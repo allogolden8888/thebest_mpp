@@ -35,7 +35,7 @@ flowchart LR
 | `destination-resolution-service` | Rust | ✅ готов (10/10 тестов) |
 | `policy-service` | Rust | ✅ готов (27/27 тестов) — порт `policy_matching/` (template matching + banwords + оркестрация 8 проверок), 1:1 по тестам, см. `services/policy-service/README.md` |
 | `billing-service` | Java | ✅ готов (21/21 тестов) — порт `state_machines/billing_account_state.py` (fencing по account_epoch), 1:1 по тестам, первый Java-сервис сессии, см. `services/billing-service/README.md` |
-| `pipeline-engine` | Rust | Центральный оркестратор, `resolve_next_stage`/`handle_stage_completed` — правила графа (Destination Resolution всегда первый, REJECTED всё равно в Billing) спроектированы в этой сессии |
+| `pipeline-engine` | Rust | ✅ готов (12/12 тестов) — центральный оркестратор, обходит весь граф из `pipeline.valid.json` от начала до конца, включая Billing-BLOCKED override; **не работает с >1 репликой в текущем виде** (in-memory state, не Redis CAS) — см. `services/pipeline-engine/README.md` |
 | `partner-rest-receiver` | Rust | Точка входа "ходового скелета" |
 | `routing-service` | Rust | ✅ готов (10/10 тестов) — тесты грузят реальный `config_schemas/examples/routing_table.valid.json`, см. `services/routing-service/README.md` |
 | `delivery-service` | Java | Часть пути "ходового скелета" |
@@ -129,7 +129,7 @@ flowchart LR
 
 | # | Задача | Статус | Блокирует |
 |---|---|---|---|
-| 2.1 | Реализация каждого сервиса из LLD-методов (`service_internal_methods.md`) на своём языке (Rust/Java/Go) — это большая часть "написания кода" проекта, вне скоупа документов | 🟡 4/32 готово (Главный агент: `destination-resolution-service`, `policy-service`, `billing-service`, `routing-service`), 28 распределены — см. "Распределение между агентами" выше | Фаза 3 |
+| 2.1 | Реализация каждого сервиса из LLD-методов (`service_internal_methods.md`) на своём языке (Rust/Java/Go) — это большая часть "написания кода" проекта, вне скоупа документов | 🟡 5/32 готово (Главный агент: `destination-resolution-service`, `policy-service`, `billing-service`, `routing-service`, `pipeline-engine`), 27 распределены — см. "Распределение между агентами" выше | Фаза 3 |
 | 2.2 | Один реальный/sandbox-профиль оператора (SMPP или HTTP), один партнёр, 2-3 шаблона, 1 тариф | ⬜ не начато | — |
 | 2.3 | Разворот сгенерированных `k8s/rendered/*.yaml` в staging-кластер, first-run диагностика (readiness/liveness на `/healthz`/`/readyz`, порт 9090 — конвенция уже описана в `k8s/README.md`) | ⬜ не начато (`docker build`/деплой не выполнялись — недоступен Docker daemon в этом окружении, см. `services/destination-resolution-service/README.md`) | — |
 | 2.4 | Сквозной smoke-тест: сообщение проходит весь путь и партнёр получает корректный financial-neutral DLR | ⬜ не начато | Фаза 3 |
@@ -142,7 +142,9 @@ flowchart LR
 
 **Что доказано на 2.1 (Routing Service, 10/10):** `select_routes_for_operator`/`filter_by_control_state`/`select_route_and_protocol`/`apply_failover` из service_internal_methods.md §1.7 объединены в одну функцию `resolve_final_route` (обоснование в README — это одно решение, не четыре шага с промежуточным состоянием). Реальная кросс-артефактная сверка: тесты грузят `config_schemas/examples/routing_table.valid.json` напрямую (не переизобретённый fixture) — если бы схема и сервис разошлись в понимании формы, тест бы не распарсился. Доказано: PAUSED primary вызывает failover **с сменой протокола** (SMPP→HTTP), DEGRADED не исключает маршрут (не равно недоступности), `NO_HEALTHY_ROUTE` ретраябельно, `UNKNOWN_OPERATOR` — нет.
 
-Не проверено ни у одного из четырёх сервисов: реальный Kafka-брокер (нет `docker`/`kind` в этом окружении), `docker build` самого образа — см. README каждого сервиса.
+**Что доказано на 2.1 (Pipeline Engine, 12/12):** самый сложный сервис серии — единственный, обходящий весь граф, не одну стадию. `full_happy_path_walks_entire_real_graph_to_terminal` проходит все 6 узлов реального `pipeline.valid.json` от `DESTINATION_RESOLUTION` до `Terminal`, накапливая `resolved_operator_id`/`category`/`route_id` в `ExecutionState` по ходу. Ключевой тест `billing_blocked_override_fires_even_if_graph_would_route_onward` доказывает, что особый случай "Billing category=BLOCKED → Terminal независимо от графа" (service_internal_methods.md §1.4) — это реальный defense-in-depth поверх графовых данных, не просто следствие правильно сконфигурированного `pipeline.valid.json`: тест намеренно портит граф так, чтобы он предписывал `ROUTING`, и всё равно получает `Terminal`. Реальная находка компилятора: два protobuf package (`mpp.common.v1`+`mpp.events.v1`) с cross-package ссылками потребовали точного совпадения модульной вложенности с точками в имени package — плоское `pub mod common`/`pub mod events` (паттерн, работавший для всех четырёх предыдущих однопакетных сервисов) не собралось. **Важное ограничение, не мелочь:** `ExecutionState` — `Arc<Mutex<HashMap>>` в памяти процесса, не Runtime Redis CAS — единственный сервис серии, который в текущем виде физически не работает с более чем одной репликой (k8s планирует 17 инстансов).
+
+Не проверено ни у одного из пяти сервисов: реальный Kafka-брокер (нет `docker`/`kind` в этом окружении), `docker build` самого образа — см. README каждого сервиса.
 
 ---
 
