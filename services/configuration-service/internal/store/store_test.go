@@ -1,0 +1,164 @@
+package store
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"mpp/configuration-service/internal/validate"
+)
+
+func testPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	dsn := os.Getenv("CONFIGURATION_SERVICE_TEST_DSN")
+	if dsn == "" {
+		dsn = "postgres://localhost:5432/mpp"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("не удалось создать пул подключений к Postgres (%v) — пропуск", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		t.Skipf("Postgres недоступен на %q (%v) — пропуск", dsn, err)
+	}
+	return pool
+}
+
+// uniqueEntityID — изолирует тесты друг от друга и от предыдущих прогонов
+// в общей таблице config.config_versions.
+func uniqueEntityID(prefix string) string {
+	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+}
+
+func TestCreateImmutableVersionAndOutboxFirstVersion(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	s := New(pool)
+	ctx := context.Background()
+
+	entityID := uniqueEntityID("acme")
+	v, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(`{"partner_id":"acme"}`), "tester")
+	if err != nil {
+		t.Fatalf("CreateImmutableVersionAndOutbox failed: %v", err)
+	}
+	if v.Version != 1 {
+		t.Fatalf("ожидали первую версию = 1, получили %d", v.Version)
+	}
+	if v.Status != "active" {
+		t.Fatalf("ожидали status=active, получили %s", v.Status)
+	}
+
+	var outboxCount int
+	err = pool.QueryRow(ctx, `SELECT count(*) FROM config.config_outbox WHERE entity_id = $1`, entityID).Scan(&outboxCount)
+	if err != nil {
+		t.Fatalf("readback outbox failed: %v", err)
+	}
+	if outboxCount != 1 {
+		t.Fatalf("ожидали ровно 1 outbox-запись, получили %d", outboxCount)
+	}
+}
+
+func TestCreateImmutableVersionAndOutboxIncrementsVersion(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	s := New(pool)
+	ctx := context.Background()
+	entityID := uniqueEntityID("beeline_uz")
+
+	v1, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityOperator, entityID, []byte(`{}`), "tester")
+	if err != nil {
+		t.Fatalf("first create failed: %v", err)
+	}
+	v2, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityOperator, entityID, []byte(`{}`), "tester")
+	if err != nil {
+		t.Fatalf("second create failed: %v", err)
+	}
+	if v1.Version != 1 || v2.Version != 2 {
+		t.Fatalf("ожидали версии 1 и 2, получили %d и %d", v1.Version, v2.Version)
+	}
+}
+
+func TestPolicyTemplateSkipsConfigVersionsTable(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	s := New(pool)
+	ctx := context.Background()
+	entityID := uniqueEntityID("tmpl")
+
+	_, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPolicyTemplate, entityID, []byte(`{}`), "tester")
+	if err != nil {
+		t.Fatalf("CreateImmutableVersionAndOutbox failed: %v", err)
+	}
+
+	var configVersionsCount int
+	err = pool.QueryRow(ctx, `SELECT count(*) FROM config.config_versions WHERE entity_id = $1`, entityID).Scan(&configVersionsCount)
+	if err != nil {
+		t.Fatalf("readback config_versions failed: %v", err)
+	}
+	if configVersionsCount != 0 {
+		t.Fatalf("policy_template не должен писать строку в config_versions, нашли %d", configVersionsCount)
+	}
+
+	var outboxCount int
+	var configVersionIDIsNull bool
+	err = pool.QueryRow(ctx, `SELECT count(*), bool_and(config_version_id IS NULL) FROM config.config_outbox WHERE entity_id = $1`, entityID).
+		Scan(&outboxCount, &configVersionIDIsNull)
+	if err != nil {
+		t.Fatalf("readback outbox failed: %v", err)
+	}
+	if outboxCount != 1 || !configVersionIDIsNull {
+		t.Fatalf("ожидали 1 outbox-запись с config_version_id=NULL, получили count=%d null=%v", outboxCount, configVersionIDIsNull)
+	}
+}
+
+func TestArchiveVersionSetsStatusArchived(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	s := New(pool)
+	ctx := context.Background()
+	entityID := uniqueEntityID("acme")
+
+	created, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(`{}`), "tester")
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	archived, err := s.ArchiveVersion(ctx, validate.EntityPartner, entityID, created.Version)
+	if err != nil {
+		t.Fatalf("ArchiveVersion failed: %v", err)
+	}
+	if archived.Status != "archived" {
+		t.Fatalf("ожидали status=archived, получили %s", archived.Status)
+	}
+}
+
+func TestListVersionsReturnsAllCreatedVersions(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	s := New(pool)
+	ctx := context.Background()
+	entityID := uniqueEntityID("acme")
+
+	for i := 0; i < 3; i++ {
+		if _, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(`{}`), "tester"); err != nil {
+			t.Fatalf("create #%d failed: %v", i, err)
+		}
+	}
+
+	versions, _, err := s.ListVersions(ctx, validate.EntityPartner, entityID, 50, "")
+	if err != nil {
+		t.Fatalf("ListVersions failed: %v", err)
+	}
+	if len(versions) != 3 {
+		t.Fatalf("ожидали 3 версии, получили %d", len(versions))
+	}
+}

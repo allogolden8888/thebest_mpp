@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mpp/config_schemas/pipeline.schema.json",
+  "title": "PIPELINE config payload (ConfigEntityType.CONFIG_ENTITY_TYPE_PIPELINE)",
+  "description": "Форма payload_json в ConfigChangeEvent / config.config_versions.payload для entity_type='pipeline'. Граф стадий, исполняемый Pipeline Engine (hld.md §6-7). Структурные инварианты (Destination Resolution всегда первый узел, REJECTED из Policy всегда ведёт в Billing) НЕ выразимы чистым JSON Schema — проверяются отдельно в validate_pipeline_graph.py.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pipeline_id", "version", "status", "entry_node_id", "nodes"],
+  "properties": {
+    "pipeline_id": { "type": "string" },
+    "version": { "type": "integer", "minimum": 1 },
+    "status": { "enum": ["active", "archived"] },
+    "partner_id": {
+      "description": "null = платформенный дефолт для партнёров без собственного pipeline",
+      "type": ["string", "null"]
+    },
+    "application_id": {
+      "description": "null = применяется ко всем приложениям партнёра. operator_id здесь намеренно нет — Destination Resolution всегда первая стадия, оператор ещё не известен на момент выбора pipeline (service_internal_methods.md resolve_pipeline_version)",
+      "type": ["string", "null"]
+    },
+    "entry_node_id": { "type": "string" },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/node" }
+    }
+  },
+  "$defs": {
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "stage_name", "next"],
+      "properties": {
+        "node_id": { "type": "string" },
+        "stage_name": {
+          "enum": ["DESTINATION_RESOLUTION", "POLICY", "BILLING", "ROUTING", "DELIVERY", "DELIVERY_RECONCILIATION"]
+        },
+        "implicit_category": {
+          "description": "Только для узлов BILLING, достижимых из POLICY-REJECTED — фиксирует category=BLOCKED без обращения к PolicyResult (см. hld.md §5.3.1)",
+          "enum": ["BLOCKED"]
+        },
+        "next": {
+          "description": "Ключ — Outcome (без префикса OUTCOME_), значение — node_id следующего узла или null (терминальный исход для этой ветки). Ровно один next per outcome — фан-аут не поддерживается (hld.md §6).",
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "type": ["string", "null"] },
+          "propertyNames": {
+            "enum": ["SUCCEEDED", "REJECTED", "FAILED", "TIMED_OUT", "RETRY_EXHAUSTED", "SUBMISSION_OUTCOME_UNKNOWN", "DELIVERY_UNRESOLVED"]
+          }
+        }
+      }
+    }
+  }
+}

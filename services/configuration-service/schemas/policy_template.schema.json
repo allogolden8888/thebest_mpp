@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mpp/config_schemas/policy_template.schema.json",
+  "title": "POLICY_TEMPLATE config payload (ConfigEntityType.CONFIG_ENTITY_TYPE_POLICY_TEMPLATE)",
+  "description": "Одна строка policy.policy_template (data_infrastructure_spec.md §1.9b / migrations/V013), сериализованная как payload_json. category не может быть UNTEMPLATED/BLOCKED — это зарезервированные значения, присваиваемые Policy во время исполнения, не значения реального шаблона (тот же CHECK, что в V013__policy_template.sql).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["template_id", "partner_id", "channel", "category", "pattern", "version", "status"],
+  "properties": {
+    "template_id": { "type": "string", "format": "uuid" },
+    "partner_id": { "type": "string" },
+    "operator_id": {
+      "description": "null = общий для всех операторов этого партнёра",
+      "type": ["string", "null"]
+    },
+    "channel": { "enum": ["SMS", "EMAIL", "PUSH"] },
+    "category": {
+      "type": "string",
+      "not": { "enum": ["UNTEMPLATED", "BLOCKED"] }
+    },
+    "pattern": { "type": "string", "minLength": 1 },
+    "version": { "type": "integer", "minimum": 1 },
+    "status": { "enum": ["active", "archived"] }
+  }
+}
