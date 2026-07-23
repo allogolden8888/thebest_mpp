@@ -34,9 +34,9 @@ flowchart LR
 |---|---|---|
 | `destination-resolution-service` | Rust | ✅ готов (10/10 тестов) |
 | `policy-service` | Rust | ✅ готов (27/27 тестов) — порт `policy_matching/` (template matching + banwords + оркестрация 8 проверок), 1:1 по тестам, см. `services/policy-service/README.md` |
+| `billing-service` | Java | ✅ готов (21/21 тестов) — порт `state_machines/billing_account_state.py` (fencing по account_epoch), 1:1 по тестам, первый Java-сервис сессии, см. `services/billing-service/README.md` |
 | `pipeline-engine` | Rust | Центральный оркестратор, `resolve_next_stage`/`handle_stage_completed` — правила графа (Destination Resolution всегда первый, REJECTED всё равно в Billing) спроектированы в этой сессии |
 | `partner-rest-receiver` | Rust | Точка входа "ходового скелета" |
-| `billing-service` | Java | `state_machines/billing_account_state.py` (fencing по account_epoch) спроектирован здесь |
 | `routing-service` | Rust | Часть пути "ходового скелета" |
 | `delivery-service` | Java | Часть пути "ходового скелета" |
 | `dlr-correlation-writer` | Go | Питает DLR-путь скелета |
@@ -129,7 +129,7 @@ flowchart LR
 
 | # | Задача | Статус | Блокирует |
 |---|---|---|---|
-| 2.1 | Реализация каждого сервиса из LLD-методов (`service_internal_methods.md`) на своём языке (Rust/Java/Go) — это большая часть "написания кода" проекта, вне скоупа документов | 🟡 2/32 готово (Главный агент: `destination-resolution-service`, `policy-service`), 30 распределены — см. "Распределение между агентами" выше | Фаза 3 |
+| 2.1 | Реализация каждого сервиса из LLD-методов (`service_internal_methods.md`) на своём языке (Rust/Java/Go) — это большая часть "написания кода" проекта, вне скоупа документов | 🟡 3/32 готово (Главный агент: `destination-resolution-service`, `policy-service`, `billing-service`), 29 распределены — см. "Распределение между агентами" выше | Фаза 3 |
 | 2.2 | Один реальный/sandbox-профиль оператора (SMPP или HTTP), один партнёр, 2-3 шаблона, 1 тариф | ⬜ не начато | — |
 | 2.3 | Разворот сгенерированных `k8s/rendered/*.yaml` в staging-кластер, first-run диагностика (readiness/liveness на `/healthz`/`/readyz`, порт 9090 — конвенция уже описана в `k8s/README.md`) | ⬜ не начато (`docker build`/деплой не выполнялись — недоступен Docker daemon в этом окружении, см. `services/destination-resolution-service/README.md`) | — |
 | 2.4 | Сквозной smoke-тест: сообщение проходит весь путь и партнёр получает корректный financial-neutral DLR | ⬜ не начато | Фаза 3 |
@@ -138,7 +138,9 @@ flowchart LR
 
 **Что доказано на 2.1 (Policy Service, 27/27):** порт `policy_matching/` (Python, эта сессия) на Rust — тот же алгоритм template matching (два прохода Aho-Corasick), та же таблица гомоглифов, тот же порядок 8 проверок, один и тот же набор тестов один-в-один (сверка по имени теста). **Найдено при переносе, не в Python-версии:** `RuntimeState` (consent-блэклисты, spam-счётчик) в текущем срезе in-memory, не Runtime Redis — при реальном деплое с 3 репликами (`k8s/generate_manifests.py`) spam-throttling будет считаться неверно (каждая реплика видит только свою историю). Зафиксировано как приоритетный технический долг перед 2.3/2.4, не скрыто.
 
-Не проверено ни у одного из двух сервисов: реальный Kafka-брокер (нет `docker`/`kind` в этом окружении), `docker build` самого образа — см. README каждого сервиса.
+**Что доказано на 2.1 (Billing Service, 21/21):** первый Java-сервис сессии — порт `state_machines/billing_account_state.py` (fencing по `account_epoch`, идемпотентность по `charge_id`) 1:1, включая ключевой `inFlightChargeRejectedByStaleEpochRace`. **Найдено при переносе:** (1) реальная проблема окружения — `mvn` не мог достучаться до Maven Central из-за TLS-инспектирующего прокси в этой сети (issuer `Unitel LLC`/FortiGate), чей корневой сертификат есть в системном Keychain macOS, но не в отдельном JDK `cacerts` — исправлено импортом через `keytool`, задокументировано в README как находка именно такого типа, какой просили фиксировать в "Координации"; (2) версионный рассинхрон `protobuf-java` (4.28.3) vs код, генерируемый системным `protoc` 35.1 — компилятор поймал реальную ошибку `cannot find symbol` на новом Descriptors API, исправлено поднятием до 4.35.1; (3) ни `BillingExtension`, ни `StageExecuteCommand` не несут явного поля под `account_epoch` или `partner_id`/`account_id` — тот же класс пробела, что Policy Service нашёл для `msisdn`/`body`, задокументировано в README, не решено.
+
+Не проверено ни у одного из трёх сервисов: реальный Kafka-брокер (нет `docker`/`kind` в этом окружении), `docker build` самого образа — см. README каждого сервиса.
 
 ---
 

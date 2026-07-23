@@ -162,6 +162,22 @@ jobs:
           cd services/policy-service
           cargo test
 
+  billing-service:
+    name: Billing Service (mvn test, порт billing_account_state.py на Java)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: "mvn test (21 тестов: BillingAccountState/TariffResolver/BillingService/HealthServer)"
+        run: |
+          cd services/billing-service
+          mvn -B "-Dprotobuf.protocExecutable=$(which protoc)" test
+
   terraform:
     name: Terraform (fmt + validate против реальной схемы yandex-cloud провайдера)
     runs-on: ubuntu-latest

@@ -9,3 +9,5 @@ __pycache__/
 # .terraform.lock.hcl НЕ игнорируется — terraform сам рекомендует коммитить его
 # (гарантирует одинаковый выбор версии провайдера при повторном `terraform init`).
 node_modules/
+.vscode/
+.idea/

@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  services_specifictaion.md §2.6: Java 25, Micronaut, Lettuce. Эта версия —
+  plain Java (JDK 25) + built-in com.sun.net.httpserver вместо полного
+  Micronaut — намеренное упрощение ради быстрой, лёгкой, реально
+  компилируемой сборки в этом срезе (тот же принцип, что у Rust-сервисов:
+  минимум зависимостей, реальный компилятор/тесты, не framework-плюмбинг).
+  Полная Micronaut-обвязка (DI, application.yml, health endpoints "из
+  коробки") — не редизайн, а последующий шаг, см. README.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>uz.mpp</groupId>
+  <artifactId>billing-service</artifactId>
+  <version>0.1.0</version>
+  <packaging>jar</packaging>
+
+  <properties>
+    <maven.compiler.release>25</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- Системный protoc (brew) — 35.1, что новее, чем изначально взятый protobuf-java
+         4.28.3 умеет читать (генератор использовал Descriptors-API, которого не было
+         в 4.28.3 — реальная ошибка компиляции поймала рассинхрон, не предположение). -->
+    <protobuf.version>4.35.1</protobuf.version>
+    <kafka.version>3.9.0</kafka.version>
+    <lettuce.version>6.5.1.RELEASE</lettuce.version>
+    <junit.version>5.11.3</junit.version>
+    <!-- Platform-contracts лежит на два уровня выше сервиса — тот же монорепо-layout,
+         что у Rust-сервисов (PLATFORM_CONTRACTS_DIR override там же по духу). -->
+    <platform.contracts.dir>${project.basedir}/../../platform-contracts</platform.contracts.dir>
+    <!-- brew-путь по умолчанию (локальная разработка на macOS) — Dockerfile
+         переопределяет через -Dprotobuf.protocExecutable=/usr/bin/protoc (Linux-образ). -->
+    <protobuf.protocExecutable>/opt/homebrew/bin/protoc</protobuf.protocExecutable>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.google.protobuf</groupId>
+      <artifactId>protobuf-java</artifactId>
+      <version>${protobuf.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.kafka</groupId>
+      <artifactId>kafka-clients</artifactId>
+      <version>${kafka.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.lettuce</groupId>
+      <artifactId>lettuce-core</artifactId>
+      <version>${lettuce.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>2.18.1</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>${junit.version}</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.xolstice.maven.plugins</groupId>
+        <artifactId>protobuf-maven-plugin</artifactId>
+        <version>0.6.1</version>
+        <configuration>
+          <!-- Системный protoc (brew), не os-maven-plugin classifier-резолв —
+               protoc уже реально установлен и провалидирован в этой сессии
+               (platform_contracts.md). -->
+          <protocExecutable>${protobuf.protocExecutable}</protocExecutable>
+          <protoSourceRoot>${platform.contracts.dir}</protoSourceRoot>
+          <includes>
+            <include>common/enums.proto</include>
+            <include>common/types.proto</include>
+            <include>common/stage_contract.proto</include>
+          </includes>
+        </configuration>
+        <executions>
+          <execution>
+            <goals>
+              <goal>compile</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.2</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <version>3.6.0</version>
+        <executions>
+          <execution>
+            <phase>package</phase>
+            <goals><goal>shade</goal></goals>
+            <configuration>
+              <transformers>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                  <mainClass>uz.mpp.billing.Main</mainClass>
+                </transformer>
+              </transformers>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
