@@ -1,0 +1,10 @@
+{
+  "template_id": "b7e6b1a0-1c3d-4f2a-9e3a-1234567890ab",
+  "partner_id": "click_uz",
+  "operator_id": null,
+  "channel": "SMS",
+  "category": "TRANSACTION",
+  "pattern": "%w shartnoma bo'yicha %d{1,6} so'm to'lovni bugun amalga oshiring",
+  "version": 1,
+  "status": "active"
+}

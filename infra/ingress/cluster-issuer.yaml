@@ -1,0 +1,25 @@
+# Имя должно совпадать с k8s/generate_manifests.py CLUSTER_ISSUER
+# ("letsencrypt-http01") — Ingress-объекты ссылаются на него по имени через
+# аннотацию cert-manager.io/cluster-issuer, единственная связь между двумя
+# генераторами, поэтому вынесена в комментарий на обеих сторонах.
+#
+# HTTP-01, не DNS-01: не привязано к конкретному DNS-провайдеру (тот же
+# принцип портируемости, что уже применён к Kafka/Vault) — работает, как
+# только Ingress реально отвечает на 80/443 с правильного домена. Требует
+# исключительно реального зарегистрированного домена вместо
+# EXTERNAL_DOMAIN="mpp.example" (плейсхолдер, IANA reserved zone — Let's
+# Encrypt не выпустит сертификат, пока домен не заменён на настоящий).
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-http01
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: platform-team@mpp.example # плейсхолдер вместе с доменом — реальный контакт для expiry-уведомлений Let's Encrypt
+    privateKeySecretRef:
+      name: letsencrypt-http01-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: nginx

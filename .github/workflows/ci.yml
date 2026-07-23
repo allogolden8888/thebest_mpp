@@ -1,0 +1,161 @@
+name: mpp-ci
+
+# Каждый job здесь — ровно та проверка, что реально выполнялась вручную по
+# ходу LLD этой сессии (protoc compile, миграции на настоящем PostgreSQL,
+# Python-тесты state machines/policy matching/config schemas, kubeconform на
+# k8s-манифестах, terraform validate). Здесь они собраны в один пайплайн,
+# чтобы регрессия в любом артефакте ловилась на PR, а не при следующем
+# ручном прогоне через месяц.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  protobuf:
+    name: platform-contracts (protoc compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Compile all .proto (descriptor set, catches import/syntax errors)
+        run: |
+          cd platform-contracts
+          find . -name '*.proto' -print0 | xargs -0 protoc -I . --descriptor_set_out=/dev/null
+
+  migrations:
+    name: PostgreSQL migrations (apply + partition maintenance test)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: mpp_test
+          POSTGRES_PASSWORD: mpp_test
+          POSTGRES_DB: mpp_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply V001-V017 in order
+        env:
+          PGPASSWORD: mpp_test
+        run: |
+          for f in migrations/V*.sql; do
+            psql -h localhost -U mpp_test -d mpp_test -v ON_ERROR_STOP=1 -f "$f"
+          done
+
+  python-artifacts:
+    name: Python-исполняемые спецификации (state machines / policy matching / config schemas)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install jsonschema pyahocorasick pyyaml
+      - name: state_machines (message lifecycle / execution control / billing account_state)
+        run: |
+          python3 state_machines/message_lifecycle.py
+          python3 state_machines/execution_control_hysteresis.py
+          python3 state_machines/billing_account_state.py
+      - name: config_schemas (JSON Schema + semantic checks)
+        run: python3 config_schemas/validate_all.py
+      - name: policy_matching (template matching / banwords / policy engine orchestration)
+        run: |
+          python3 policy_matching/template_matching.py
+          python3 policy_matching/banword_normalization.py
+          python3 policy_matching/policy_engine.py
+
+  k8s-manifests:
+    name: Kubernetes-манифесты (generate + kubeconform + reachability)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install pyyaml
+      - name: Install kubeconform
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz
+          sudo mv kubeconform /usr/local/bin/
+      - name: Generate manifests
+        run: |
+          cd k8s
+          python3 generate_manifests.py
+          python3 network_policies.py
+      - name: Generate ExternalSecret/SecretStore (reads SECRET_K8S_NAME from k8s/generate_manifests.py)
+        run: |
+          cd infra/secrets
+          python3 generate_external_secrets.py
+      - name: kubeconform (real Kubernetes 1.34 OpenAPI schemas; Strimzi/KEDA/Istio/ESO/PodMonitor/cert-manager CRDs skipped — no offline schema, see infra/README.md)
+        run: |
+          kubeconform -strict -kubernetes-version 1.34.0 -ignore-missing-schemas -summary k8s/rendered/*.yaml infra/istio/*.yaml infra/secrets/rendered/*.yaml infra/observability/*.yaml infra/ingress/*.yaml
+      - name: NetworkPolicy reachability tests
+        run: |
+          cd k8s
+          python3 test_network_policy_reachability.py
+
+  kafka-topics:
+    name: Kafka-топики (partition/replication план + kubeconform)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install pyyaml
+      - name: Install kubeconform
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz
+          sudo mv kubeconform /usr/local/bin/
+      - name: Generate Strimzi CRDs
+        run: |
+          cd infra/kafka
+          python3 generate_kafka_topics.py
+      - name: kubeconform (структурная валидация; Strimzi CRD-схем нет в офлайн-каталоге — см. infra/README.md)
+        run: |
+          cd infra/kafka
+          kubeconform -kubernetes-version 1.34.0 -ignore-missing-schemas -summary rendered/*.yaml
+
+  destination-resolution-service:
+    name: Destination Resolution Service (cargo build + test, real platform-contracts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc + librdkafka
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler librdkafka-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo build (compiles platform-contracts/common/*.proto via build.rs)
+        run: |
+          cd services/destination-resolution-service
+          cargo build
+      - name: "cargo test (10 тестов: resolver/kafka_io/health)"
+        run: |
+          cd services/destination-resolution-service
+          cargo test
+
+  terraform:
+    name: Terraform (fmt + validate против реальной схемы yandex-cloud провайдера)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.8"
+      - name: terraform fmt -check
+        run: terraform -chdir=infra/terraform fmt -check -diff
+      - name: terraform init (без backend, без реальных cloud-креденшлов)
+        run: terraform -chdir=infra/terraform init -backend=false
+      - name: terraform validate
+        run: terraform -chdir=infra/terraform validate

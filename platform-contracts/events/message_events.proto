@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package mpp.events.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/enums.proto";
+import "common/types.proto";
+
+option go_package = "mpp/platformcontracts/events/v1;eventsv1";
+option java_package = "uz.mpp.platformcontracts.events.v1";
+option java_multiple_files = true;
+
+// Immutable message context — публикуется в incoming.messages, единственное
+// место, где body передаётся полностью (HLD §5.1, service_internal_methods.md §0).
+message IncomingMessage {
+  string message_id = 1;
+  string trace_id = 2;
+  mpp.common.v1.Channel channel = 3;
+  string partner_id = 4;
+  string application_id = 5;
+
+  oneof body {
+    mpp.common.v1.SmsPayload sms = 10;
+    mpp.common.v1.EmailPayload email = 11;
+    mpp.common.v1.PushPayload push = 12;
+  }
+
+  google.protobuf.Timestamp received_at = 20;
+  // До какого момента сообщение считается живым — используется Pipeline
+  // Engine, Scheduler, Message State Resolver (HLD §4).
+  google.protobuf.Timestamp message_ttl = 21;
+}
+
+// Партнёрский, внешний переход статуса — публикуется Message State Resolver
+// в message.lifecycle (HLD §10). Формальные допустимые переходы —
+// отдельный LLD-артефакт (state machine), не специфицируются здесь.
+message MessageLifecycleEvent {
+  string event_id = 1;
+  string message_id = 2;
+  mpp.common.v1.MessageLifecycleStatus status = 3;
+  // Монотонно растущая версия — каждое новое событие для message_id
+  // несёт версию на 1 больше предыдущей; используется для дедупликации
+  // и как замена "переписывания истории" (HLD §10).
+  int64 lifecycle_version = 4;
+  bool terminal = 5;
+  // event_id события-источника (stage.completed либо delivery.status),
+  // из которого выведен этот переход — для трассировки происхождения.
+  string source_event_id = 6;
+  google.protobuf.Timestamp occurred_at = 7;
+}
+
+// Нормализованный статус от оператора — публикуется DLR Manager
+// в delivery.status (HLD §14), протокол-независимо (SMPP DLR и HTTP DLR
+// webhook попадают в один и тот же формат).
+message DeliveryStatusEvent {
+  string event_id = 1;
+  string message_id = 2;
+  string operator_id = 3;
+  // Статус после нормализации операторского кода в платформенный словарь —
+  // точный список операторских→платформенных маппингов вне scope
+  // этого контракта (per-operator LLD).
+  string normalized_status = 4;
+  string raw_operator_status = 5;
+  google.protobuf.Timestamp occurred_at = 6;
+}

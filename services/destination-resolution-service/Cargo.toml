@@ -1,0 +1,30 @@
+[package]
+name = "destination-resolution-service"
+version = "0.1.0"
+edition = "2024"
+# services_specifictaion.md §2.4a: Rust (Tokio/rust-rdkafka/ArcSwap).
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+prost = "0.13"
+# StageExecuteCommand/StageCompletedEvent несут google.protobuf.Timestamp —
+# сгенерированный код ссылается на ::prost_types::Timestamp напрямую, не
+# только build-time зависимость prost-build.
+prost-types = "0.13"
+# Линковка против системной librdkafka (brew) через pkg-config, не cmake-build
+# vendored — быстрее собирается, и библиотека уже реально установлена в этом
+# окружении (`pkg-config --modversion rdkafka` подтверждает 2.15.0).
+rdkafka = { version = "0.36", features = ["tokio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+arc-swap = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[build-dependencies]
+prost-build = "0.13"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tower = "0.5"

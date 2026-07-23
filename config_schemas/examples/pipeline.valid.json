@@ -1,0 +1,46 @@
+{
+  "pipeline_id": "sms-default-v1",
+  "version": 1,
+  "status": "active",
+  "partner_id": null,
+  "application_id": null,
+  "entry_node_id": "n1_destination_resolution",
+  "nodes": [
+    {
+      "node_id": "n1_destination_resolution",
+      "stage_name": "DESTINATION_RESOLUTION",
+      "next": { "SUCCEEDED": "n2_policy", "FAILED": null }
+    },
+    {
+      "node_id": "n2_policy",
+      "stage_name": "POLICY",
+      "next": { "SUCCEEDED": "n3_billing", "REJECTED": "n_billing_blocked", "FAILED": null }
+    },
+    {
+      "node_id": "n3_billing",
+      "stage_name": "BILLING",
+      "next": { "SUCCEEDED": "n4_routing", "FAILED": null }
+    },
+    {
+      "node_id": "n_billing_blocked",
+      "stage_name": "BILLING",
+      "implicit_category": "BLOCKED",
+      "next": { "SUCCEEDED": null, "FAILED": null }
+    },
+    {
+      "node_id": "n4_routing",
+      "stage_name": "ROUTING",
+      "next": { "SUCCEEDED": "n5_delivery", "FAILED": null, "RETRY_EXHAUSTED": null }
+    },
+    {
+      "node_id": "n5_delivery",
+      "stage_name": "DELIVERY",
+      "next": { "SUCCEEDED": "n6_reconciliation", "FAILED": null, "TIMED_OUT": "n6_reconciliation", "RETRY_EXHAUSTED": "n6_reconciliation" }
+    },
+    {
+      "node_id": "n6_reconciliation",
+      "stage_name": "DELIVERY_RECONCILIATION",
+      "next": { "SUCCEEDED": null, "SUBMISSION_OUTCOME_UNKNOWN": null, "DELIVERY_UNRESOLVED": null }
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mpp/config_schemas/number_range.schema.json",
+  "title": "NUMBER_RANGE config payload (ConfigEntityType.CONFIG_ENTITY_TYPE_NUMBER_RANGE)",
+  "description": "Одна строка routing.number_range (data_infrastructure_spec.md §1.9a), сериализованная как payload_json одного config_outbox-события. range_end >= range_start проверяется structural-валидацией (JSON Schema это не выразит арифметически — см. validate_all.py).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["range_start", "range_end", "operator_id", "version", "status"],
+  "properties": {
+    "range_start": { "type": "integer", "minimum": 998000000000, "maximum": 998999999999 },
+    "range_end": { "type": "integer", "minimum": 998000000000, "maximum": 998999999999 },
+    "operator_id": { "type": "string" },
+    "version": { "type": "integer", "minimum": 1 },
+    "status": { "enum": ["active", "archived"] }
+  }
+}

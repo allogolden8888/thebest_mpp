@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package mpp.events.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/enums.proto";
+import "common/stage_contract.proto";
+
+option go_package = "mpp/platformcontracts/events/v1;eventsv1";
+option java_package = "uz.mpp.platformcontracts.events.v1";
+option java_multiple_files = true;
+
+// Публикуется Critical Sweep в stage.*.dlq (HLD §20). Несёт полную исходную
+// stage-команду — не только метаданные — чтобы Replay Service мог сделать
+// republish без похода за чем-либо ещё. Тот же формат, что PostgreSQL
+// dlq_record.original_command (data_infrastructure_spec.md §1.5).
+message DlqRecord {
+  string stage_execution_id = 1;
+  string message_id = 2;
+  mpp.common.v1.StageName stage_name = 3;
+  int32 attempt = 4;
+  mpp.common.v1.StageExecuteCommand original_command = 5;
+  string reason_code = 6;
+  string error_detail = 7;
+  google.protobuf.Timestamp created_at = 8;
+}

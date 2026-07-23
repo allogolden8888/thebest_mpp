@@ -1,0 +1,28 @@
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: mpp-strict-mtls
+  namespace: mpp
+spec:
+  # STRICT — mesh отклоняет любое plaintext-соединение внутри namespace mpp.
+  # Дополняет, не заменяет k8s/network_policies.py: NetworkPolicy решает, кто
+  # вообще может открыть TCP-соединение (L3/L4), PeerAuthentication STRICT —
+  # что каждое разрешённое соединение обязано быть аутентифицировано mTLS
+  # (identity), см. k8s/README.md "Важное ограничение" о разделении слоёв.
+  mtls:
+    mode: STRICT
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: mpp-default-mtls
+  namespace: mpp
+spec:
+  host: "*.mpp.svc.cluster.local"
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+  # Формально избыточно поверх PeerAuthentication STRICT + Istio auto-mTLS
+  # (mesh сам выставил бы ISTIO_MUTUAL для всех in-mesh назначений) — оставлено
+  # явно, чтобы это было видно в манифесте, а не только подразумевалось
+  # поведением по умолчанию.

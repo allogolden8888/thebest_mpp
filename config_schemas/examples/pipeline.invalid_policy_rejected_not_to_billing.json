@@ -1,0 +1,25 @@
+{
+  "pipeline_id": "sms-broken-rejected-route-v1",
+  "version": 1,
+  "status": "active",
+  "partner_id": null,
+  "application_id": null,
+  "entry_node_id": "n1_destination_resolution",
+  "nodes": [
+    {
+      "node_id": "n1_destination_resolution",
+      "stage_name": "DESTINATION_RESOLUTION",
+      "next": { "SUCCEEDED": "n2_policy", "FAILED": null }
+    },
+    {
+      "node_id": "n2_policy",
+      "stage_name": "POLICY",
+      "next": { "SUCCEEDED": "n3_billing", "REJECTED": null, "FAILED": null }
+    },
+    {
+      "node_id": "n3_billing",
+      "stage_name": "BILLING",
+      "next": { "SUCCEEDED": null, "FAILED": null }
+    }
+  ]
+}

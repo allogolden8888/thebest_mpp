@@ -1,0 +1,15 @@
+{
+  "operator_id": "ucell_uz",
+  "version": 1,
+  "status": "active",
+  "smpp_profile": {
+    "max_window": 50,
+    "tps_limit": 400,
+    "bind_count": 2,
+    "reconnect_policy": { "initial_backoff_ms": 500, "max_backoff_ms": 30000, "multiplier": 2.0 },
+    "enquire_link_interval_sec": 30,
+    "dlr_supported": true,
+    "dlr_reliable": false,
+    "query_sm_enabled": true
+  }
+}

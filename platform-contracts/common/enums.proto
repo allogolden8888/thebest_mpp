@@ -1,0 +1,153 @@
+syntax = "proto3";
+
+package mpp.common.v1;
+
+option go_package = "mpp/platformcontracts/common/v1;commonv1";
+option java_package = "uz.mpp.platformcontracts.common.v1";
+option java_multiple_files = true;
+
+// Канал сообщения — независимое от протокола измерение (HLD §3.1.1).
+// Определяет, какой вариант StagePayload / MessageBody заполнен и какой
+// набор Policy/Billing-правил применяется.
+enum Channel {
+  CHANNEL_UNSPECIFIED = 0;
+  CHANNEL_SMS = 1;
+  // Зарезервировано, payload не специфицирован в этой версии контрактов.
+  CHANNEL_EMAIL = 2;
+  // Зарезервировано, payload не специфицирован в этой версии контрактов.
+  CHANNEL_PUSH = 3;
+}
+
+// Протокол доставки — атрибут конкретного inbound/outbound адаптера
+// и конкретного маршрута, не канала (HLD §3.1.1).
+enum Protocol {
+  PROTOCOL_UNSPECIFIED = 0;
+  PROTOCOL_SMPP = 1;
+  PROTOCOL_HTTP = 2;
+  // Зарезервировано для email.
+  PROTOCOL_SMTP = 10;
+  // Зарезервировано для push.
+  PROTOCOL_APNS = 20;
+  PROTOCOL_FCM = 21;
+}
+
+// Зарегистрированные типы стадий (HLD §5.3). Порядок значений — не порядок
+// исполнения; фактический порядок определяет Pipeline Engine по графу,
+// кроме DESTINATION_RESOLUTION, которая всегда идёт первой.
+enum StageName {
+  STAGE_NAME_UNSPECIFIED = 0;
+  STAGE_NAME_DESTINATION_RESOLUTION = 1;
+  STAGE_NAME_POLICY = 2;
+  STAGE_NAME_BILLING = 3;
+  STAGE_NAME_ROUTING = 4;
+  STAGE_NAME_DELIVERY = 5;
+  STAGE_NAME_DELIVERY_RECONCILIATION = 6;
+}
+
+// Основные исходы выполнения стадии (HLD §6).
+enum Outcome {
+  OUTCOME_UNSPECIFIED = 0;
+  OUTCOME_SUCCEEDED = 1;
+  OUTCOME_REJECTED = 2;
+  OUTCOME_FAILED = 3;
+  OUTCOME_TIMED_OUT = 4;
+  OUTCOME_RETRY_EXHAUSTED = 5;
+  OUTCOME_SUBMISSION_OUTCOME_UNKNOWN = 6;
+  OUTCOME_DELIVERY_UNRESOLVED = 7;
+}
+
+// Исходы Delivery Reconciliation (HLD §13).
+enum ReconciliationOutcome {
+  RECONCILIATION_OUTCOME_UNSPECIFIED = 0;
+  RECONCILIATION_OUTCOME_CONFIRMED_SUBMITTED = 1;
+  RECONCILIATION_OUTCOME_CONFIRMED_NOT_SUBMITTED = 2;
+  RECONCILIATION_OUTCOME_DELIVERY_CONFIRMED = 3;
+  RECONCILIATION_OUTCOME_DELIVERY_FAILED = 4;
+  RECONCILIATION_OUTCOME_DELIVERY_UNRESOLVED = 5;
+}
+
+// Партнёрский, внешний статус сообщения (message.lifecycle, HLD §10, §19).
+// ПРИМЕЧАНИЕ: формальная диаграмма допустимых переходов — отдельный LLD-артефакт
+// Message State Resolver, не специфицируется здесь. Значения ниже собраны из
+// всех мест HLD, где статус упоминается явно; список может быть неполным
+// до того, как state machine будет формально спроектирована.
+enum MessageLifecycleStatus {
+  MESSAGE_LIFECYCLE_STATUS_UNSPECIFIED = 0;
+  MESSAGE_LIFECYCLE_STATUS_SUBMITTED = 1;
+  MESSAGE_LIFECYCLE_STATUS_DELIVERED = 2;
+  MESSAGE_LIFECYCLE_STATUS_UNDELIVERABLE = 3;
+  MESSAGE_LIFECYCLE_STATUS_DELIVERY_UNRESOLVED = 4;
+  MESSAGE_LIFECYCLE_STATUS_LATE_DELIVERY_CONFIRMED = 5;
+  MESSAGE_LIFECYCLE_STATUS_REJECTED = 6;
+  MESSAGE_LIFECYCLE_STATUS_FAILED = 7;
+  // Терминальный статус при исчерпании message_ttl во время PAUSED (HLD §9.2).
+  MESSAGE_LIFECYCLE_STATUS_SYSTEM_UNAVAILABLE = 8;
+}
+
+// Состояния Execution Control (HLD §8.2).
+enum ExecutionControlState {
+  EXECUTION_CONTROL_STATE_UNSPECIFIED = 0;
+  EXECUTION_CONTROL_STATE_ACTIVE = 1;
+  EXECUTION_CONTROL_STATE_DEGRADED = 2;
+  EXECUTION_CONTROL_STATE_PAUSED = 3;
+}
+
+// Области действия Execution Control (HLD §8.1).
+enum ExecutionControlScope {
+  EXECUTION_CONTROL_SCOPE_UNSPECIFIED = 0;
+  EXECUTION_CONTROL_SCOPE_GLOBAL = 1;
+  EXECUTION_CONTROL_SCOPE_STAGE = 2;
+  EXECUTION_CONTROL_SCOPE_PARTNER = 3;
+  EXECUTION_CONTROL_SCOPE_PARTNER_STAGE = 4;
+  EXECUTION_CONTROL_SCOPE_OPERATOR_ROUTE = 5;
+}
+
+// account_state Billing Redis (HLD §15.3).
+enum AccountState {
+  ACCOUNT_STATE_UNSPECIFIED = 0;
+  ACCOUNT_STATE_ACTIVE = 1;
+  ACCOUNT_STATE_FROZEN = 2;
+}
+
+// Тип billing-записи (HLD §15.4).
+enum LedgerEntryType {
+  LEDGER_ENTRY_TYPE_UNSPECIFIED = 0;
+  LEDGER_ENTRY_TYPE_CHARGE = 1;
+  LEDGER_ENTRY_TYPE_COMPENSATING = 2;
+}
+
+// Тип задачи Scheduler Background Lane (HLD §9.3, §14, §19).
+enum BackgroundTaskType {
+  BACKGROUND_TASK_TYPE_UNSPECIFIED = 0;
+  BACKGROUND_TASK_TYPE_DLR_CORRELATION_RETRY = 1;
+  BACKGROUND_TASK_TYPE_NOTIFICATION_RETRY = 2;
+}
+
+// Тип ручной команды Scheduler Critical Sweep (HLD §9.1).
+enum CriticalCommandType {
+  CRITICAL_COMMAND_TYPE_UNSPECIFIED = 0;
+  CRITICAL_COMMAND_TYPE_FORCE_TIMEOUT = 1;
+  CRITICAL_COMMAND_TYPE_FORCE_RETRY = 2;
+}
+
+// scope consent-блэклиста абонента (data_infrastructure_spec.md §1.9c).
+enum ConsentScopeType {
+  CONSENT_SCOPE_TYPE_UNSPECIFIED = 0;
+  CONSENT_SCOPE_TYPE_CATEGORY = 1;
+  CONSENT_SCOPE_TYPE_SENDER = 2;
+}
+
+// entity_type конфигурационных сущностей в config.changes (HLD §16,
+// data_infrastructure_spec.md §1.1, §1.9a-c).
+enum ConfigEntityType {
+  CONFIG_ENTITY_TYPE_UNSPECIFIED = 0;
+  CONFIG_ENTITY_TYPE_PIPELINE = 1;
+  CONFIG_ENTITY_TYPE_POLICY_RULESET = 2;
+  CONFIG_ENTITY_TYPE_POLICY_TEMPLATE = 3;
+  CONFIG_ENTITY_TYPE_BILLING_TARIFF = 4;
+  CONFIG_ENTITY_TYPE_ROUTING_TABLE = 5;
+  CONFIG_ENTITY_TYPE_NUMBER_RANGE = 6;
+  CONFIG_ENTITY_TYPE_PARTNER = 7;
+  CONFIG_ENTITY_TYPE_OPERATOR = 8;
+  CONFIG_ENTITY_TYPE_SUBSCRIBER_CONSENT = 9;
+}

@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package mpp.common.v1;
+
+option go_package = "mpp/platformcontracts/common/v1;commonv1";
+option java_package = "uz.mpp.platformcontracts.common.v1";
+option java_multiple_files = true;
+
+// Денежная сумма в минимальных единицах валюты — целочисленно, чтобы избежать
+// ошибок округления float в финансовых расчётах (HLD §15).
+message Money {
+  // ISO 4217, например "UZS".
+  string currency_code = 1;
+  // Сумма в минимальных единицах валюты (тийин для UZS).
+  int64 minor_units = 2;
+}
+
+// Контекст партнёра, резолвится на приёме (Partner REST Receiver /
+// Partner SMPP Gateway) из партнёрской конфигурации в config.changes.
+message PartnerContext {
+  string partner_id = 1;
+  string application_id = 2;
+  // IP, с которого пришёл запрос — для аудита, не для допуска
+  // (allowlist-проверка уже применена на момент заполнения этого поля).
+  string source_ip = 3;
+}
+
+// SMS-специфичный payload (единственный заполненный вариант канала сегодня).
+// Тело сообщения НЕ дублируется в stage-командах — хранится в
+// Runtime Redis (msgctx:{message_id}) и передаётся по ссылке
+// (service_internal_methods.md §0).
+message SmsPayload {
+  string msisdn = 1;
+  string sender = 2;
+  // Присутствует только в IncomingMessage и в Runtime Redis msgctx;
+  // в StageExecuteCommand НЕ передаётся, см. StagePayloadRef.
+  string body = 3;
+  string encoding = 4;
+  // Посчитано один раз Pipeline Engine при кэшировании контекста —
+  // передаётся Billing полем в команде без чтения msgctx.
+  int32 segment_count = 5;
+}
+
+// Зарезервировано под будущий канал — payload не специфицируется
+// в этой версии контрактов (HLD §26).
+message EmailPayload {
+  reserved 1 to 10;
+}
+
+// Зарезервировано под будущий канал — payload не специфицируется
+// в этой версии контрактов (HLD §26).
+message PushPayload {
+  reserved 1 to 10;
+}
+
+// Ссылка на контекст сообщения в Runtime Redis — то, что реально несут
+// stage-команды вместо полного payload (service_internal_methods.md §0).
+message StagePayloadRef {
+  string message_id = 1;
+  // Ключ в Runtime Redis: msgctx:{message_id}. Явно вынесен полем,
+  // а не собирается конкатенацией на стороне потребителя.
+  string runtime_redis_key = 2;
+}

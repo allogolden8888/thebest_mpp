@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package mpp.events.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/enums.proto";
+
+option go_package = "mpp/platformcontracts/events/v1;eventsv1";
+option java_package = "uz.mpp.platformcontracts.events.v1";
+option java_multiple_files = true;
+
+// Публикуется Config Event Publisher в config.changes (compacted), читая
+// config_outbox (HLD §16, data_infrastructure_spec.md §1.2). `payload`
+// намеренно непрозрачный JSON, а не типизированное protobuf-сообщение —
+// форма конфигурации разная для каждого entity_type и меняется чаще,
+// чем стоит того жёсткая protobuf-схема; версионирование обеспечивает
+// `version`, не protobuf-контракт содержимого.
+message ConfigChangeEvent {
+  mpp.common.v1.ConfigEntityType entity_type = 1;
+  string entity_id = 2;
+  int64 version = 3;
+  // Сериализованный JSON — конкретная форма см. в LLD соответствующего
+  // потребителя (Policy ruleset, route table, tariff и т.д.).
+  bytes payload_json = 4;
+  string status = 5; // "active" | "archived"
+  google.protobuf.Timestamp created_at = 6;
+}
+
+// Публикуется Execution Control Service в execution.control (compacted)
+// (HLD §8).
+message ExecutionControlRecord {
+  mpp.common.v1.ExecutionControlScope scope = 1;
+  // Пусто для scope = GLOBAL; иначе partner_id / stage_name /
+  // "partner_id:stage_name" / operator_route_id в зависимости от scope.
+  string scope_id = 2;
+  mpp.common.v1.ExecutionControlState state = 3;
+  // 0.0–1.0, доля от номинальной пропускной способности scope.
+  double admission_rate = 4;
+  double dispatch_rate = 5;
+  string reason = 6;
+  int64 version = 7;
+  // Пусто для не-ручных (автоматических) записей.
+  google.protobuf.Timestamp expires_at = 8;
+  google.protobuf.Timestamp created_at = 9;
+}

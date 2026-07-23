@@ -1,0 +1,29 @@
+# Один PodMonitor на весь namespace mpp, не 32 отдельных объекта — все
+# сервисы уже унифицированы на один health-порт/путь конвенцией из
+# k8s/generate_manifests.py (HEALTH_PORT=9090, /metrics), которую сам этот
+# генератор вводит для readiness/liveness — тот же порт переиспользуется
+# здесь для scrape, не второй отдельный механизм.
+#
+# Не Service-based ServiceMonitor: большинство сервисов (чистые
+# Kafka-consumer'ы без внешнего/gRPC-порта) НЕ получают Service-объект в
+# generate_manifests.py — Service создаётся только при наличии
+# external_port/internal_grpc_port или для sticky/kafka-streams классов.
+# PodMonitor селектит поды напрямую по label, не требует Service вообще —
+# не пришлось ради одного только scrape-а заводить лишние 20+ Service.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: mpp-services
+  namespace: mpp
+  # Без release-лейбла: infra/terraform/observability.tf ставит
+  # podMonitorSelectorNilUsesHelmValues=false — Prometheus Operator берёт
+  # PodMonitor из ЛЮБОГО namespace независимо от лейблов, не только
+  # помеченные под релиз мониторинга. Лейбл здесь был бы лишним, не игнорируемым.
+spec:
+  namespaceSelector:
+    matchNames: ["mpp"]
+  selector: {}
+  podMetricsEndpoints:
+    - port: health
+      path: /metrics
+      interval: 30s

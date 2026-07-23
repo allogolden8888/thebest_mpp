@@ -1,0 +1,13 @@
+{
+  "partner_id": "click_uz",
+  "operator_id": null,
+  "version": 1,
+  "status": "active",
+  "unmatched_template_behavior": "CATEGORIZE_AS_UNTEMPLATED",
+  "anti_spam": { "max_messages": 3, "window_seconds": 60, "scope": "PER_MSISDN" },
+  "time_of_day": [
+    { "category": "ADVERTISING", "allowed_from": "25:00", "allowed_to": "20:00", "timezone": "Asia/Tashkent" }
+  ],
+  "banwords": { "words": ["idiot"], "normalization": { "nfkc": true, "homoglyph_fold": true, "strip_separators": true } },
+  "sender_validation": { "allowed_sender_ids": ["Click"] }
+}

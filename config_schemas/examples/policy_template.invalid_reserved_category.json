@@ -1,0 +1,10 @@
+{
+  "template_id": "b7e6b1a0-1c3d-4f2a-9e3a-1234567890ac",
+  "partner_id": "click_uz",
+  "operator_id": null,
+  "channel": "SMS",
+  "category": "BLOCKED",
+  "pattern": "%w test pattern",
+  "version": 1,
+  "status": "active"
+}

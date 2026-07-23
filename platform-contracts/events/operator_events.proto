@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package mpp.events.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/enums.proto";
+
+option go_package = "mpp/platformcontracts/events/v1;eventsv1";
+option java_package = "uz.mpp.platformcontracts.events.v1";
+option java_multiple_files = true;
+
+// Принятый submit — публикуется в operator.submit.accepted как Operator SMPP
+// Session Manager, так и Operator HTTP Gateway в один и тот же формат;
+// downstream (DLR Correlation Writer, Delivery Reconciliation) не различает
+// протокол (HLD §11.3, data_infrastructure_spec.md §3).
+message OperatorSubmitAccepted {
+  string message_id = 1;
+  string stage_execution_id = 2;
+  string operator_id = 3;
+  mpp.common.v1.Protocol protocol = 4;
+  // Идентификатор сообщения на стороне SMSC/оператора, если доступен
+  // сразу (не все операторы возвращают его синхронно).
+  string smsc_message_id = 5;
+  int32 segment_id = 6;
+  google.protobuf.Timestamp submitted_at = 7;
+  // DLR SLA конкретного оператора — используется для расчёта
+  // expires_at в dlr_correlation (data_infrastructure_spec.md §1.8, §1.9a).
+  google.protobuf.Timestamp correlation_expires_at = 8;
+}
+
+// Сырой DLR — публикуется в operator.dlr. Operator SMPP Session Manager
+// публикует его из deliver_sm; Operator HTTP Gateway — из нормализованного
+// webhook-payload, в тот же формат (services_specifictaion.md §2.3a).
+message OperatorDlr {
+  string operator_id = 1;
+  mpp.common.v1.Protocol protocol = 2;
+  string smsc_message_id = 3;
+  int32 segment_id = 4;
+  // Код статуса в терминологии оператора, до нормализации DLR Manager'ом.
+  string raw_status = 5;
+  google.protobuf.Timestamp received_at = 6;
+}

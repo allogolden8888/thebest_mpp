@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package mpp.events.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/enums.proto";
+import "common/types.proto";
+
+option go_package = "mpp/platformcontracts/events/v1;eventsv1";
+option java_package = "uz.mpp.platformcontracts.events.v1";
+option java_multiple_files = true;
+
+// Финансовое событие — публикуется Billing Outbox Publisher в billing.ledger,
+// читая durable stream из Billing Redis (HLD §15.4). Billing Ledger Writer
+// делает `INSERT ... ON CONFLICT (charge_id) DO NOTHING` — charge_id и есть
+// ключ идемпотентности, дублирующий stage_execution_id исходного charge.
+message LedgerEvent {
+  string charge_id = 1;
+  string account_id = 2;
+  string partner_id = 3;
+  mpp.common.v1.Money amount = 4;
+  mpp.common.v1.LedgerEntryType entry_type = 5;
+  // Заполнено только для entry_type = LEDGER_ENTRY_TYPE_COMPENSATING —
+  // charge_id исходной записи, которую компенсирует эта (HLD §13,
+  // "Billing и последствия UNKNOWN").
+  string source_charge_id = 6;
+  // Свободный текст причины — обязателен для компенсирующих записей.
+  string reason = 7;
+  google.protobuf.Timestamp created_at = 8;
+}

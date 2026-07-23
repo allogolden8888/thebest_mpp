@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package mpp.grpc.v1;
+
+option go_package = "mpp/platformcontracts/grpc/v1;grpcv1";
+option java_package = "uz.mpp.platformcontracts.grpc.v1";
+option java_multiple_files = true;
+
+// Partner Notification Service → конкретный экземпляр Partner SMPP Gateway,
+// instance-addressed через registry (HLD §11.1, §5.4). Gateway проверяет
+// session_epoch и отклоняет команду для устаревшей сессии после reconnect.
+service PartnerDeliverSmService {
+  rpc DeliverSm(DeliverSmRequest) returns (DeliverSmResponse);
+}
+
+message DeliverSmRequest {
+  string message_id = 1;
+  string partner_id = 2;
+  string system_id = 3;
+  string session_id = 4;
+  // Проверяется Gateway перед отправкой — если не совпадает
+  // с текущей активной сессией, запрос отклоняется (HLD §11.1).
+  int64 session_epoch = 5;
+  string status_text = 6;
+  bytes payload = 7;
+}
+
+message DeliverSmResponse {
+  DeliverSmStatus status = 1;
+}
+
+enum DeliverSmStatus {
+  DELIVER_SM_STATUS_UNSPECIFIED = 0;
+  DELIVER_SM_STATUS_DELIVERED = 1;
+  // session_epoch не совпадает — партнёр переподключился, команда
+  // должна быть повторена после повторного резолва через registry.
+  DELIVER_SM_STATUS_STALE_EPOCH = 2;
+  DELIVER_SM_STATUS_NO_ACTIVE_SESSION = 3;
+}

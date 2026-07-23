@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+package mpp.grpc.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/enums.proto";
+
+option go_package = "mpp/platformcontracts/grpc/v1;grpcv1";
+option java_package = "uz.mpp.platformcontracts.grpc.v1";
+option java_multiple_files = true;
+
+// Обычные внутренние вызовы (HLD §5.4) — стандартная балансировка
+// Kubernetes, без instance addressing.
+
+// Backoffice API → Configuration Service.
+service ConfigService {
+  rpc CreateVersion(CreateVersionRequest) returns (ConfigVersionResponse);
+  rpc GetActiveVersion(GetActiveVersionRequest) returns (ConfigVersionResponse);
+  rpc ListVersions(ListVersionsRequest) returns (ListVersionsResponse);
+  rpc ArchiveVersion(ArchiveVersionRequest) returns (ConfigVersionResponse);
+}
+
+message CreateVersionRequest {
+  mpp.common.v1.ConfigEntityType entity_type = 1;
+  string entity_id = 2;
+  bytes payload_json = 3;
+  string requested_by = 4;
+}
+
+message ConfigVersionResponse {
+  mpp.common.v1.ConfigEntityType entity_type = 1;
+  string entity_id = 2;
+  int64 version = 3;
+  string status = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+message GetActiveVersionRequest {
+  mpp.common.v1.ConfigEntityType entity_type = 1;
+  string entity_id = 2;
+}
+
+message ListVersionsRequest {
+  mpp.common.v1.ConfigEntityType entity_type = 1;
+  string entity_id = 2;
+  int32 page_size = 3;
+  string page_token = 4;
+}
+
+message ListVersionsResponse {
+  repeated ConfigVersionResponse versions = 1;
+  string next_page_token = 2;
+}
+
+message ArchiveVersionRequest {
+  mpp.common.v1.ConfigEntityType entity_type = 1;
+  string entity_id = 2;
+  int64 version = 3;
+  string requested_by = 4;
+}
+
+// Backoffice API → Execution Control Service (manual override);
+// Billing Reconciliation → Execution Control Service (freeze/unfreeze,
+// HLD §15.5) — то же RPC, `scope = PARTNER_STAGE`, `stage = BILLING`.
+service ExecutionControlService {
+  rpc ApplyOverride(ApplyOverrideRequest) returns (ApplyOverrideResponse);
+  rpc ClearOverride(ClearOverrideRequest) returns (ApplyOverrideResponse);
+}
+
+message ApplyOverrideRequest {
+  mpp.common.v1.ExecutionControlScope scope = 1;
+  string scope_id = 2;
+  mpp.common.v1.ExecutionControlState state = 3;
+  double admission_rate = 4;
+  string reason = 5;
+  string requested_by = 6;
+  // Пусто — override действует до явного ClearOverride.
+  google.protobuf.Timestamp expires_at = 7;
+}
+
+message ApplyOverrideResponse {
+  int64 version = 1;
+  google.protobuf.Timestamp applied_at = 2;
+}
+
+message ClearOverrideRequest {
+  mpp.common.v1.ExecutionControlScope scope = 1;
+  string scope_id = 2;
+  string requested_by = 3;
+}
+
+// Backoffice API → Replay Service.
+service ReplayService {
+  rpc RequestReplay(RequestReplayRequest) returns (RequestReplayResponse);
+}
+
+message RequestReplayRequest {
+  string stage_execution_id = 1;
+  string requested_by = 2;
+}
+
+message RequestReplayResponse {
+  bool accepted = 1;
+  // Заполнено, если accepted = false — какая из проверок TTL/idempotency/
+  // billing side effect/delivery ambiguity (HLD §20) не пройдена.
+  string rejection_reason = 2;
+}

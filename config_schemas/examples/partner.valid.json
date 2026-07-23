@@ -1,0 +1,23 @@
+{
+  "partner_id": "click_uz",
+  "version": 4,
+  "status": "active",
+  "applications": [
+    {
+      "application_id": "click_uz_main",
+      "display_name": "Click main billing notifications",
+      "auth": { "type": "API_KEY", "credential_ref": "vault://partners/click_uz/main/api_key" },
+      "ip_allowlist": ["185.65.212.0/24"],
+      "rate_limit_tps": 300,
+      "allowed_channels": ["SMS"]
+    },
+    {
+      "application_id": "click_uz_marketing",
+      "display_name": "Click marketing campaigns",
+      "auth": { "type": "API_KEY", "credential_ref": "vault://partners/click_uz/marketing/api_key" },
+      "ip_allowlist": ["185.65.212.0/24"],
+      "rate_limit_tps": 50,
+      "allowed_channels": ["SMS"]
+    }
+  ]
+}

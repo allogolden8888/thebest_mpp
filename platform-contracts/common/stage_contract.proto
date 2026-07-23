@@ -1,0 +1,156 @@
+syntax = "proto3";
+
+package mpp.common.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/enums.proto";
+import "common/types.proto";
+
+option go_package = "mpp/platformcontracts/common/v1;commonv1";
+option java_package = "uz.mpp.platformcontracts.common.v1";
+option java_multiple_files = true;
+
+// Общий контракт команды стадии (HLD §6). Публикуется в stage.destination-resolution,
+// stage.policy, stage.billing, stage.routing, stage.delivery,
+// stage.delivery-reconciliation. `stage_extension` несёт то немногое,
+// что специфично для конкретной стадии — большинство данных сообщения
+// стадии получают через StagePayloadRef → Runtime Redis, не через это поле.
+message StageExecuteCommand {
+  string event_id = 1;
+  string message_id = 2;
+  Channel channel = 3;
+  string pipeline_id = 4;
+  string pipeline_version = 5;
+  string node_id = 6;
+  StageName stage_name = 7;
+  // Стабилен на всё логическое выполнение узла, не меняется при retry —
+  // единственный ключ идемпотентности (HLD §4).
+  string stage_execution_id = 8;
+  // 1 при первой попытке; растёт при retry, но НЕ является ключом
+  // идемпотентности.
+  int32 attempt = 9;
+  google.protobuf.Timestamp deadline = 10;
+  google.protobuf.Timestamp message_ttl = 11;
+  // Версии конфигурации, применённые к этому сообщению — фиксируются
+  // на момент диспетчеризации, не пересматриваются при повторной публикации
+  // новой конфигурации (HLD §7.1).
+  map<string, int64> config_versions = 12;
+  // W3C Trace Context.
+  string traceparent = 13;
+  StagePayloadRef payload_ref = 14;
+
+  oneof stage_extension {
+    DestinationResolutionExtension destination_resolution = 20;
+    PolicyExtension policy = 21;
+    BillingExtension billing = 22;
+    RoutingExtension routing = 23;
+    DeliveryExtension delivery = 24;
+    DeliveryReconciliationExtension delivery_reconciliation = 25;
+  }
+}
+
+message DestinationResolutionExtension {
+  // Адрес назначения — msisdn для SMS; поле общее по имени для будущих
+  // каналов (email-адрес, push device token), не msisdn-специфичное.
+  string destination_address = 1;
+}
+
+message PolicyExtension {
+  // Заполняется Pipeline Engine из результата DestinationResolution —
+  // обязательный предшественник (HLD §5.3).
+  string resolved_operator_id = 1;
+}
+
+message BillingExtension {
+  string resolved_operator_id = 1;
+  // Посчитано Pipeline Engine при кэшировании контекста — Billing не читает
+  // msgctx за этим полем (service_internal_methods.md §0).
+  int32 segment_count = 2;
+  // Категория, присвоенная Policy — обычная (из шаблона), либо одно из
+  // двух специальных значений: "UNTEMPLATED" (нет совпадения, но партнёр
+  // разрешил продолжить) или "BLOCKED" (Policy отклонил — тариф на
+  // отклонённое сообщение тоже ненулевой). Billing только считает цену
+  // по category, не принимает решение о том, продолжать ли pipeline —
+  // это решает граф Pipeline Engine (см. открытый вопрос ниже).
+  string category = 3;
+}
+
+message RoutingExtension {
+  string resolved_operator_id = 1;
+}
+
+message DeliveryExtension {
+  string route_id = 1;
+  Protocol protocol = 2;
+  string route_version = 3;
+}
+
+message DeliveryReconciliationExtension {
+  // Почему сообщение попало в reconciliation — сегодня всегда
+  // SUBMISSION_OUTCOME_UNKNOWN, поле оставлено расширяемым.
+  Outcome triggering_outcome = 1;
+  string queue_msg_id = 2;
+}
+
+// Общий контракт результата стадии (HLD §6). Публикуется в stage.completed.
+message StageCompletedEvent {
+  string event_id = 1;
+  string message_id = 2;
+  string stage_execution_id = 3;
+  int32 attempt = 4;
+  StageName stage_name = 5;
+  Outcome outcome = 6;
+  // Машиночитаемая причина — пустая строка при OUTCOME_SUCCEEDED.
+  string reason_code = 7;
+  bool retryable = 8;
+  google.protobuf.Timestamp retry_after = 9;
+  string traceparent = 10;
+  google.protobuf.Timestamp completed_at = 11;
+
+  oneof stage_result {
+    DestinationResolutionResult destination_resolution = 20;
+    PolicyResult policy = 21;
+    BillingResult billing = 22;
+    RoutingResult routing = 23;
+    DeliveryResult delivery = 24;
+    DeliveryReconciliationResult delivery_reconciliation = 25;
+  }
+}
+
+message DestinationResolutionResult {
+  string resolved_operator_id = 1;
+}
+
+message PolicyResult {
+  // Присвоенная категория. Всегда заполнена, включая случай REJECTED:
+  // "UNTEMPLATED" — нет совпадения с шаблоном, но партнёр разрешил
+  // продолжить; "BLOCKED" — Policy отклонил сообщение (любая из 8 проверок,
+  // HLD §5.3/§15 — единая категория и тариф независимо от конкретной
+  // причины отклонения). Billing всегда получает непустую category.
+  string category = 1;
+}
+
+message BillingResult {
+  // charge_id = stage_execution_id (HLD §15.1/§15.4) — поле дублирует
+  // stage_execution_id ради самодостаточности события для аудита.
+  string charge_id = 1;
+  // Эхо категории, с которой был вызван Billing — избавляет downstream
+  // (Analytics Writer, ClickHouse-отчётность) от необходимости
+  // сопоставлять с диспетчеризацией, чтобы узнать, что было оплачено.
+  string category = 4;
+  Money amount = 2;
+}
+
+message RoutingResult {
+  string route_id = 1;
+  Protocol protocol = 2;
+  string route_version = 3;
+}
+
+message DeliveryResult {
+  string queue_msg_id = 1;
+}
+
+message DeliveryReconciliationResult {
+  ReconciliationOutcome reconciliation_outcome = 1;
+}

@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package mpp.grpc.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "mpp/platformcontracts/grpc/v1;grpcv1";
+option java_package = "uz.mpp.platformcontracts.grpc.v1";
+option java_multiple_files = true;
+
+// Один и тот же интерфейс реализуют Operator SMPP Session Manager
+// (protocol=SMPP) и Operator HTTP Gateway (protocol=HTTP) — Delivery Service
+// вызывает один и тот же контракт независимо от протокола, различается
+// только то, какой сервис резолвится через Operator Route Registry
+// (HLD §11.4, service_internal_methods.md §1.8). Instance-addressed —
+// вызывающая сторона уже резолвила конкретный endpoint через registry,
+// балансировщик здесь не участвует.
+service OperatorSubmitService {
+  rpc Submit(SubmitRequest) returns (SubmitResponse);
+}
+
+message SubmitRequest {
+  string message_id = 1;
+  string stage_execution_id = 2;
+  string queue_msg_id = 3;
+  string operator_id = 4;
+  string route_id = 5;
+  string destination_address = 6;
+  repeated MessageSegment segments = 7;
+  google.protobuf.Timestamp deadline = 8;
+}
+
+message MessageSegment {
+  int32 segment_id = 1;
+  bytes content = 2;
+  string encoding = 3;
+}
+
+message SubmitResponse {
+  SubmitOutcomeStatus status = 1;
+  // Заполнен, только если оператор синхронно вернул идентификатор
+  // сообщения (не все SMPP/HTTP интеграции его дают сразу).
+  string smsc_message_id = 2;
+  string reason_code = 3;
+}
+
+enum SubmitOutcomeStatus {
+  SUBMIT_OUTCOME_STATUS_UNSPECIFIED = 0;
+  SUBMIT_OUTCOME_STATUS_ACCEPTED = 1;
+  SUBMIT_OUTCOME_STATUS_REJECTED = 2;
+  // Ответ не получен/не дошёл до подтверждения — соответствует
+  // SUBMISSION_OUTCOME_UNKNOWN на уровне stage-контракта (HLD §13).
+  SUBMIT_OUTCOME_STATUS_AMBIGUOUS = 3;
+}
+
+// Реализует только Operator SMPP Session Manager — HTTP-операторы
+// не имеют query_sm-эквивалента (services_specifictaion.md §2.9,
+// service_internal_methods.md §1.9).
+service OperatorQuerySmService {
+  rpc QuerySm(QuerySmRequest) returns (QuerySmResponse);
+}
+
+message QuerySmRequest {
+  string message_id = 1;
+  string operator_id = 2;
+  string smsc_message_id = 3;
+}
+
+message QuerySmResponse {
+  bool found = 1;
+  string raw_status = 2;
+}

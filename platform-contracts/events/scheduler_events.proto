@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package mpp.events.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/enums.proto";
+
+option go_package = "mpp/platformcontracts/events/v1;eventsv1";
+option java_package = "uz.mpp.platformcontracts.events.v1";
+option java_multiple_files = true;
+
+// Ручная команда в scheduler.critical.commands — единственный producer:
+// Backoffice API (HLD §9.1). task_type ограничен разрешённым списком.
+message SchedulerCriticalCommand {
+  string stage_execution_id = 1;
+  mpp.common.v1.CriticalCommandType task_type = 2;
+  string requested_by = 3;
+  string reason = 4;
+  google.protobuf.Timestamp requested_at = 5;
+}
+
+// Hold-команда в scheduler.standard.commands — единственный producer:
+// Pipeline Engine, при обнаружении PAUSED на диспетчеризации (HLD §9.2).
+message SchedulerHoldCommand {
+  string message_id = 1;
+  string stage_execution_id = 2;
+  mpp.common.v1.ExecutionControlScope scope = 3;
+  string scope_id = 4;
+  mpp.common.v1.StageName stage_name = 5;
+  google.protobuf.Timestamp held_at = 6;
+}
+
+// Задача Background Lane в scheduler.background.commands (HLD §9.3, §14, §19).
+message SchedulerBackgroundTask {
+  mpp.common.v1.BackgroundTaskType task_type = 1;
+  // Для DLR_CORRELATION_RETRY — event_id исходного operator.dlr;
+  // для NOTIFICATION_RETRY — event_id исходного message.lifecycle.
+  string source_event_id = 2;
+  int32 attempt = 3;
+  google.protobuf.Timestamp due_at = 4;
+  google.protobuf.Timestamp deadline = 5;
+  // Разрешённый список: "operator.dlr.unresolved" | "notification.retry" —
+  // не произвольная строка (HLD §14, защита от использования Scheduler
+  // как открытого редиректа внутри Kafka).
+  string target_topic = 6;
+}
+
+// Задача повторной доставки уведомления — публикуется в notification.retry
+// Background Lane'ом (HLD §19).
+message NotificationRetryTask {
+  string message_id = 1;
+  string lifecycle_event_id = 2;
+  int32 attempt = 3;
+  google.protobuf.Timestamp retry_at = 4;
+}

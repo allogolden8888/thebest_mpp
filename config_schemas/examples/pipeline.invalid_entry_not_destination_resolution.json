@@ -1,0 +1,20 @@
+{
+  "pipeline_id": "sms-broken-entry-v1",
+  "version": 1,
+  "status": "active",
+  "partner_id": null,
+  "application_id": null,
+  "entry_node_id": "n2_policy",
+  "nodes": [
+    {
+      "node_id": "n1_destination_resolution",
+      "stage_name": "DESTINATION_RESOLUTION",
+      "next": { "SUCCEEDED": "n2_policy", "FAILED": null }
+    },
+    {
+      "node_id": "n2_policy",
+      "stage_name": "POLICY",
+      "next": { "SUCCEEDED": null, "REJECTED": "n1_destination_resolution", "FAILED": null }
+    }
+  ]
+}
