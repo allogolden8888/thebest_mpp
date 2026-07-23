@@ -32,10 +32,10 @@ flowchart LR
 
 | Сервис | Язык | Почему у Главного агента |
 |---|---|---|
-| `destination-resolution-service` | Rust | ✅ уже готов (10/10 тестов) — см. выше |
+| `destination-resolution-service` | Rust | ✅ готов (10/10 тестов) |
+| `policy-service` | Rust | ✅ готов (27/27 тестов) — порт `policy_matching/` (template matching + banwords + оркестрация 8 проверок), 1:1 по тестам, см. `services/policy-service/README.md` |
 | `pipeline-engine` | Rust | Центральный оркестратор, `resolve_next_stage`/`handle_stage_completed` — правила графа (Destination Resolution всегда первый, REJECTED всё равно в Billing) спроектированы в этой сессии |
 | `partner-rest-receiver` | Rust | Точка входа "ходового скелета" |
-| `policy-service` | Rust | `policy_matching/` (template matching + banwords + оркестрация 8 проверок) уже реализован и протестирован в этой сессии — переносить в другой контекст без причины |
 | `billing-service` | Java | `state_machines/billing_account_state.py` (fencing по account_epoch) спроектирован здесь |
 | `routing-service` | Rust | Часть пути "ходового скелета" |
 | `delivery-service` | Java | Часть пути "ходового скелета" |
@@ -129,12 +129,16 @@ flowchart LR
 
 | # | Задача | Статус | Блокирует |
 |---|---|---|---|
-| 2.1 | Реализация каждого сервиса из LLD-методов (`service_internal_methods.md`) на своём языке (Rust/Java/Go) — это большая часть "написания кода" проекта, вне скоупа документов | 🟡 1/32 готово, 31 распределены между Главным агентом и Субагентом 1 — см. "Распределение между агентами" выше | Фаза 3 |
+| 2.1 | Реализация каждого сервиса из LLD-методов (`service_internal_methods.md`) на своём языке (Rust/Java/Go) — это большая часть "написания кода" проекта, вне скоупа документов | 🟡 2/32 готово (Главный агент: `destination-resolution-service`, `policy-service`), 30 распределены — см. "Распределение между агентами" выше | Фаза 3 |
 | 2.2 | Один реальный/sandbox-профиль оператора (SMPP или HTTP), один партнёр, 2-3 шаблона, 1 тариф | ⬜ не начато | — |
 | 2.3 | Разворот сгенерированных `k8s/rendered/*.yaml` в staging-кластер, first-run диагностика (readiness/liveness на `/healthz`/`/readyz`, порт 9090 — конвенция уже описана в `k8s/README.md`) | ⬜ не начато (`docker build`/деплой не выполнялись — недоступен Docker daemon в этом окружении, см. `services/destination-resolution-service/README.md`) | — |
 | 2.4 | Сквозной smoke-тест: сообщение проходит весь путь и партнёр получает корректный financial-neutral DLR | ⬜ не начато | Фаза 3 |
 
-**Что доказано на 2.1 первым срезом:** `resolve_operator_by_range` корректно резолвит все 9 задокументированных префиксов (`migrations/V011`), MNP overlay побеждает диапазон, непокрытый префикс — `NotFound`, а не тихая ошибка; Kafka-обработчик (`handle_command`) строит `StageCompletedEvent` из реальных сгенерированных protobuf-типов, различая `SUCCEEDED`/`REJECTED` с правильным `reason_code`; `/readyz` реально возвращает 503 до загрузки снапшота. Не проверено: реальный Kafka-брокер (нет `docker`/`kind` в этом окружении), `docker build` самого образа.
+**Что доказано на 2.1 (Destination Resolution, 10/10):** `resolve_operator_by_range` корректно резолвит все 9 задокументированных префиксов (`migrations/V011`), MNP overlay побеждает диапазон, непокрытый префикс — `NotFound`, а не тихая ошибка; Kafka-обработчик (`handle_command`) строит `StageCompletedEvent` из реальных сгенерированных protobuf-типов, различая `SUCCEEDED`/`REJECTED` с правильным `reason_code`; `/readyz` реально возвращает 503 до загрузки снапшота.
+
+**Что доказано на 2.1 (Policy Service, 27/27):** порт `policy_matching/` (Python, эта сессия) на Rust — тот же алгоритм template matching (два прохода Aho-Corasick), та же таблица гомоглифов, тот же порядок 8 проверок, один и тот же набор тестов один-в-один (сверка по имени теста). **Найдено при переносе, не в Python-версии:** `RuntimeState` (consent-блэклисты, spam-счётчик) в текущем срезе in-memory, не Runtime Redis — при реальном деплое с 3 репликами (`k8s/generate_manifests.py`) spam-throttling будет считаться неверно (каждая реплика видит только свою историю). Зафиксировано как приоритетный технический долг перед 2.3/2.4, не скрыто.
+
+Не проверено ни у одного из двух сервисов: реальный Kafka-брокер (нет `docker`/`kind` в этом окружении), `docker build` самого образа — см. README каждого сервиса.
 
 ---
 

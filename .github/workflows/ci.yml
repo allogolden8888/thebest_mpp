@@ -145,6 +145,23 @@ jobs:
           cd services/destination-resolution-service
           cargo test
 
+  policy-service:
+    name: Policy Service (cargo build + test, порт policy_matching/ на Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc + librdkafka
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler librdkafka-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo build (compiles platform-contracts/common/*.proto via build.rs)
+        run: |
+          cd services/policy-service
+          cargo build
+      - name: "cargo test (27 тестов: template_matching/banwords/policy_engine/kafka_io/health)"
+        run: |
+          cd services/policy-service
+          cargo test
+
   terraform:
     name: Terraform (fmt + validate против реальной схемы yandex-cloud провайдера)
     runs-on: ubuntu-latest

@@ -1,0 +1,34 @@
+[package]
+name = "policy-service"
+version = "0.1.0"
+edition = "2024"
+# services_specifictaion.md §2.5: Rust (Tokio/rust-rdkafka/redis-rs/Aho-Corasick/regex-automata).
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+prost = "0.13"
+prost-types = "0.13"
+rdkafka = { version = "0.36", features = ["tokio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+arc-swap = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+# Требование 1 (template matching) — тот же алгоритм, что в policy_matching/template_matching.py,
+# порт на реальный target-язык сервиса вместо pyahocorasick.
+aho-corasick = "1.1"
+# Требование 5 (банворды) — NFKC для многоязычной нормализации (policy_matching/banword_normalization.py).
+unicode-normalization = "0.1"
+chrono = "0.4"
+# fetch_message_context — Policy читает body/msisdn/sender_id из Runtime Redis
+# по message_id (тело не дублируется в stage-командах, service_internal_methods.md §0).
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+async-trait = "0.1"
+
+[build-dependencies]
+prost-build = "0.13"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tower = "0.5"
