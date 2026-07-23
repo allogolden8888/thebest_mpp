@@ -1,0 +1,27 @@
+[package]
+name = "routing-service"
+version = "0.1.0"
+edition = "2024"
+# services_specifictaion.md §2.7: Rust (Tokio/rust-rdkafka).
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+prost = "0.13"
+prost-types = "0.13"
+rdkafka = { version = "0.36", features = ["tokio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+arc-swap = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+# Не добавлен: redis (Operator Route Registry) — этот сервис выбирает
+# route_id/protocol из конфигурации, не резолвит owning instance того
+# маршрута (это делает Delivery Service) — см. README "Что НЕ реализовано".
+
+[build-dependencies]
+prost-build = "0.13"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tower = "0.5"

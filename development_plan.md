@@ -37,7 +37,7 @@ flowchart LR
 | `billing-service` | Java | ✅ готов (21/21 тестов) — порт `state_machines/billing_account_state.py` (fencing по account_epoch), 1:1 по тестам, первый Java-сервис сессии, см. `services/billing-service/README.md` |
 | `pipeline-engine` | Rust | Центральный оркестратор, `resolve_next_stage`/`handle_stage_completed` — правила графа (Destination Resolution всегда первый, REJECTED всё равно в Billing) спроектированы в этой сессии |
 | `partner-rest-receiver` | Rust | Точка входа "ходового скелета" |
-| `routing-service` | Rust | Часть пути "ходового скелета" |
+| `routing-service` | Rust | ✅ готов (10/10 тестов) — тесты грузят реальный `config_schemas/examples/routing_table.valid.json`, см. `services/routing-service/README.md` |
 | `delivery-service` | Java | Часть пути "ходового скелета" |
 | `dlr-correlation-writer` | Go | Питает DLR-путь скелета |
 | `dlr-manager` | Go | Питает DLR-путь скелета; заодно владелец 4.1 (DLR code mapping) |
@@ -129,7 +129,7 @@ flowchart LR
 
 | # | Задача | Статус | Блокирует |
 |---|---|---|---|
-| 2.1 | Реализация каждого сервиса из LLD-методов (`service_internal_methods.md`) на своём языке (Rust/Java/Go) — это большая часть "написания кода" проекта, вне скоупа документов | 🟡 3/32 готово (Главный агент: `destination-resolution-service`, `policy-service`, `billing-service`), 29 распределены — см. "Распределение между агентами" выше | Фаза 3 |
+| 2.1 | Реализация каждого сервиса из LLD-методов (`service_internal_methods.md`) на своём языке (Rust/Java/Go) — это большая часть "написания кода" проекта, вне скоупа документов | 🟡 4/32 готово (Главный агент: `destination-resolution-service`, `policy-service`, `billing-service`, `routing-service`), 28 распределены — см. "Распределение между агентами" выше | Фаза 3 |
 | 2.2 | Один реальный/sandbox-профиль оператора (SMPP или HTTP), один партнёр, 2-3 шаблона, 1 тариф | ⬜ не начато | — |
 | 2.3 | Разворот сгенерированных `k8s/rendered/*.yaml` в staging-кластер, first-run диагностика (readiness/liveness на `/healthz`/`/readyz`, порт 9090 — конвенция уже описана в `k8s/README.md`) | ⬜ не начато (`docker build`/деплой не выполнялись — недоступен Docker daemon в этом окружении, см. `services/destination-resolution-service/README.md`) | — |
 | 2.4 | Сквозной smoke-тест: сообщение проходит весь путь и партнёр получает корректный financial-neutral DLR | ⬜ не начато | Фаза 3 |
@@ -140,7 +140,9 @@ flowchart LR
 
 **Что доказано на 2.1 (Billing Service, 21/21):** первый Java-сервис сессии — порт `state_machines/billing_account_state.py` (fencing по `account_epoch`, идемпотентность по `charge_id`) 1:1, включая ключевой `inFlightChargeRejectedByStaleEpochRace`. **Найдено при переносе:** (1) реальная проблема окружения — `mvn` не мог достучаться до Maven Central из-за TLS-инспектирующего прокси в этой сети (issuer `Unitel LLC`/FortiGate), чей корневой сертификат есть в системном Keychain macOS, но не в отдельном JDK `cacerts` — исправлено импортом через `keytool`, задокументировано в README как находка именно такого типа, какой просили фиксировать в "Координации"; (2) версионный рассинхрон `protobuf-java` (4.28.3) vs код, генерируемый системным `protoc` 35.1 — компилятор поймал реальную ошибку `cannot find symbol` на новом Descriptors API, исправлено поднятием до 4.35.1; (3) ни `BillingExtension`, ни `StageExecuteCommand` не несут явного поля под `account_epoch` или `partner_id`/`account_id` — тот же класс пробела, что Policy Service нашёл для `msisdn`/`body`, задокументировано в README, не решено.
 
-Не проверено ни у одного из трёх сервисов: реальный Kafka-брокер (нет `docker`/`kind` в этом окружении), `docker build` самого образа — см. README каждого сервиса.
+**Что доказано на 2.1 (Routing Service, 10/10):** `select_routes_for_operator`/`filter_by_control_state`/`select_route_and_protocol`/`apply_failover` из service_internal_methods.md §1.7 объединены в одну функцию `resolve_final_route` (обоснование в README — это одно решение, не четыре шага с промежуточным состоянием). Реальная кросс-артефактная сверка: тесты грузят `config_schemas/examples/routing_table.valid.json` напрямую (не переизобретённый fixture) — если бы схема и сервис разошлись в понимании формы, тест бы не распарсился. Доказано: PAUSED primary вызывает failover **с сменой протокола** (SMPP→HTTP), DEGRADED не исключает маршрут (не равно недоступности), `NO_HEALTHY_ROUTE` ретраябельно, `UNKNOWN_OPERATOR` — нет.
+
+Не проверено ни у одного из четырёх сервисов: реальный Kafka-брокер (нет `docker`/`kind` в этом окружении), `docker build` самого образа — см. README каждого сервиса.
 
 ---
 
