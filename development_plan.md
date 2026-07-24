@@ -33,7 +33,7 @@ flowchart LR
 | Сервис | Язык | Почему у Главного агента |
 |---|---|---|
 | `destination-resolution-service` | Rust | ✅ готов (10/10 тестов) |
-| `policy-service` | Rust | ✅ готов (27/27 тестов) — порт `policy_matching/` (template matching + banwords + оркестрация 8 проверок), 1:1 по тестам, см. `services/policy-service/README.md` |
+| `policy-service` | Rust | ✅ готов (31/31 тестов, было 27 — 4 добавлены по итогам независимого кодревью) — порт `policy_matching/` (template matching + banwords + оркестрация 8 проверок), 1:1 по тестам; исправлены UTF-8 паника в `parse_pattern` и сдвиг часового пояса (UTC вместо Asia/Tashkent) в `check_time_of_day` — см. `services/policy-service/README.md` |
 | `billing-service` | Java | ✅ готов (27/27 тестов, было 21 — 6 добавлены по итогам независимого кодревью) — порт `state_machines/billing_account_state.py` (fencing по account_epoch), 1:1 по тестам, первый Java-сервис сессии; исправлены 3 critical находки (offset-commit data loss, negative segment_count, TOCTOU race) — см. `services/billing-service/README.md` |
 | `pipeline-engine` | Rust | ✅ готов (18/18 тестов, было 12 — 6 добавлены по итогам независимого кодревью) — центральный оркестратор, обходит весь граф из `pipeline.valid.json` от начала до конца, включая Billing-BLOCKED override; исправлены 2 high находки (идемпотентность `incoming.messages`, валидация `stage.completed` против устаревших/дублирующихся событий) и 1 medium/high (Delivery/DeliveryReconciliation extension строились как заглушка через RoutingExtension); **не работает с >1 репликой в текущем виде** (in-memory state, не Redis CAS) — см. `services/pipeline-engine/README.md` |
 | `partner-rest-receiver` | Rust | Точка входа "ходового скелета" |
