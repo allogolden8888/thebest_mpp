@@ -9,6 +9,7 @@ mod partner_config;
 mod proto;
 mod rate_limit;
 mod redis_sync;
+mod redis_url;
 mod request;
 mod segmentation;
 
@@ -49,8 +50,7 @@ async fn main() {
         .unwrap_or_else(|_| "kafka-bootstrap.mpp.svc:9092".to_string());
     let producer = kafka_io::build_producer(&bootstrap_servers);
 
-    let redis_runtime_url =
-        std::env::var("REDIS_RUNTIME_URL").unwrap_or_else(|_| "redis://redis-runtime.mpp.svc:6379".to_string());
+    let redis_runtime_url = redis_url::build_redis_runtime_url();
 
     let rate_limiter = RateLimiter::default();
 
