@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -25,6 +27,27 @@ func getenv(key, fallback string) string {
 	return fallback
 }
 
+// buildDatabaseURL — реальная находка (см. services/dlr-manager/README.md
+// "Реальная находка (систематическая...)" для полного разбора): k8s
+// инжектит POSTGRES_HOST/PORT/DB/USER/PASSWORD дискретно (envFrom
+// secretRef), не единую DATABASE_URL, которую этот сервис читал раньше —
+// в реальном кластере он никогда бы не подключился. DATABASE_URL оставлен
+// как явный override для локальной разработки/тестов.
+func buildDatabaseURL() string {
+	if v := os.Getenv("DATABASE_URL"); v != "" {
+		return v
+	}
+	host := getenv("POSTGRES_HOST", "postgresql.mpp.svc")
+	port := getenv("POSTGRES_PORT", "5432")
+	db := getenv("POSTGRES_DB", "mpp")
+	user := getenv("POSTGRES_USER", "mpp")
+	password := os.Getenv("POSTGRES_PASSWORD")
+	if password == "" {
+		return fmt.Sprintf("postgres://%s@%s:%s/%s?sslmode=disable", url.QueryEscape(user), host, port, db)
+	}
+	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", url.QueryEscape(user), url.QueryEscape(password), host, port, db)
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -37,8 +60,7 @@ func main() {
 		}
 	}()
 
-	databaseURL := getenv("DATABASE_URL", "postgres://mpp@postgresql.mpp.svc:5432/mpp?sslmode=disable")
-	pgWriter, err := writer.NewPgWriter(ctx, databaseURL)
+	pgWriter, err := writer.NewPgWriter(ctx, buildDatabaseURL())
 	if err != nil {
 		log.Fatalf("writer.NewPgWriter: %v", err)
 	}
