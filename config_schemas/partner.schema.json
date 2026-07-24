@@ -47,6 +47,11 @@
           "type": "array",
           "minItems": 1,
           "items": { "enum": ["SMS", "EMAIL", "PUSH"] }
+        },
+        "notification_callback_url": {
+          "description": "Найдено при реализации Partner Notification Service (service_internal_methods.md §7.1, resolve_delivery_channel): для auth.type=SMPP_BIND уведомление о статусе идёт через deliver_sm на тот же бинд (нужен только system_id, которым здесь считается application_id), для API_KEY/MTLS — нужен явный REST-callback URL, которого раньше нигде не было в конфиге. Обязателен для auth.type != SMPP_BIND (см. service_internal_methods §7.1), не заполняется для SMPP_BIND.",
+          "type": "string",
+          "format": "uri"
         }
       }
     }

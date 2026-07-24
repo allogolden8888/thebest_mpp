@@ -9,7 +9,8 @@
       "auth": { "type": "API_KEY", "credential_ref": "vault://partners/click_uz/main/api_key" },
       "ip_allowlist": ["185.65.212.0/24"],
       "rate_limit_tps": 300,
-      "allowed_channels": ["SMS"]
+      "allowed_channels": ["SMS"],
+      "notification_callback_url": "https://api.click.uz/mpp/notifications"
     },
     {
       "application_id": "click_uz_marketing",
@@ -17,7 +18,8 @@
       "auth": { "type": "API_KEY", "credential_ref": "vault://partners/click_uz/marketing/api_key" },
       "ip_allowlist": ["185.65.212.0/24"],
       "rate_limit_tps": 50,
-      "allowed_channels": ["SMS"]
+      "allowed_channels": ["SMS"],
+      "notification_callback_url": "https://api.click.uz/mpp/notifications"
     }
   ]
 }
