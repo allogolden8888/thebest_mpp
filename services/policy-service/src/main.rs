@@ -3,6 +3,7 @@ mod health;
 mod kafka_io;
 mod policy_engine;
 mod proto;
+mod redis_url;
 mod template_matching;
 
 use health::HealthState;
@@ -55,7 +56,7 @@ async fn main() {
     let consumer = kafka_io::build_consumer(&bootstrap_servers, "policy-service");
     let producer = kafka_io::build_producer(&bootstrap_servers);
 
-    let redis_runtime_url = std::env::var("REDIS_RUNTIME_URL").unwrap_or_else(|_| "redis://redis-runtime.mpp.svc:6379".to_string());
+    let redis_runtime_url = redis_url::build_redis_runtime_url();
     let context_store: Box<dyn MessageContextStore> = Box::new(RedisMessageContextStore::new(&redis_runtime_url));
 
     kafka_io::run_loop(consumer, producer, context_store, ruleset, templates, banwords, runtime).await;
