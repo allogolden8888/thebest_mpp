@@ -20,8 +20,7 @@ public final class Main {
         HealthServer health = new HealthServer(9090);
         health.start();
 
-        String redisUrl = System.getenv().getOrDefault("REDIS_BILLING_URL", "redis://redis-billing.mpp.svc:6379");
-        BillingAccountStore accountStore = new BillingAccountStore(redisUrl);
+        BillingAccountStore accountStore = new BillingAccountStore(RedisUrl.buildBillingUrl());
 
         String bootstrapServers = System.getenv().getOrDefault("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap.mpp.svc:9092");
         KafkaConsumer<String, byte[]> consumer = KafkaIo.buildConsumer(bootstrapServers, "billing-service");
