@@ -2,7 +2,9 @@
 
 **Основание:** `development_plan.md` Фаза 2.1, седьмой сервис "ходового скелета" (Главный агент) — готовит и отправляет операторский submit (`service_internal_methods.md` §1.8). Второй Java-сервис серии (после billing-service) и **первый сервис во всей сессии, реально генерирующий и компилирующий gRPC-код** (`protoc-gen-grpc-java`) — Delivery вызывает `OperatorSubmitService.Submit` как gRPC-клиент (`service_io_contracts.md` §1.8).
 
-**Статус:** реально компилируется и тестируется — `mvn test`, **26/26 тестов проходят**, компилирует настоящие `platform-contracts/common/*.proto` + `platform-contracts/grpc/operator_gateway.proto` (`protobuf-maven-plugin` с `pluginId=grpc-java`, `pluginArtifact=io.grpc:protoc-gen-grpc-java`).
+**Статус:** реально компилируется и тестируется — `mvn test`, **30/30 тестов проходят** (было 26 — 4 добавлены по итогам находки о секретах ниже), компилирует настоящие `platform-contracts/common/*.proto` + `platform-contracts/grpc/operator_gateway.proto` (`protobuf-maven-plugin` с `pluginId=grpc-java`, `pluginArtifact=io.grpc:protoc-gen-grpc-java`).
+
+**Исправлено (найдено при реализации `dlr-manager`, полный разбор — его README, "Реальная находка (систематическая...)"):** `Main.java` раньше читал единственную `REDIS_RUNTIME_URL`, которую k8s никогда не установит — реальный секрет инжектится дискретными `REDIS_RUNTIME_HOST`/`PORT`/`PASSWORD` (`envFrom: secretRef`). `RedisUrl.buildRuntimeUrl()` теперь собирает connection string из них (тот же паттерн, что `billing-service/RedisUrl.java`), `REDIS_RUNTIME_URL` оставлена как явный override. 4 новых теста.
 
 ```bash
 cd services/delivery-service

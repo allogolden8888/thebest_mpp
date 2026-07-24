@@ -13,7 +13,7 @@ public final class Main {
         HealthServer health = new HealthServer(9090);
         health.start();
 
-        String redisRuntimeUrl = System.getenv().getOrDefault("REDIS_RUNTIME_URL", "redis://redis-runtime.mpp.svc:6379");
+        String redisRuntimeUrl = RedisUrl.buildRuntimeUrl();
         MessageContextStore contextStore = new MessageContextStore(redisRuntimeUrl);
         GatewayRegistry gatewayRegistry = new GatewayRegistry(redisRuntimeUrl);
         ControlSnapshot controlSnapshot = new ControlSnapshot();
