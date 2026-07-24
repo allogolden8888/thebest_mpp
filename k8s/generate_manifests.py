@@ -174,7 +174,12 @@ SECRET_DEPENDENCIES: dict[str, list[str]] = {
     "scheduler-critical-sweep": ["redis-runtime"],
     "scheduler-standard-lane": ["redis-runtime", "redis-configuration"],
     "scheduler-background-lane": ["redis-runtime", "redis-configuration"],
-    "message-state-resolver": ["redis-configuration"],
+    # Найдено при реализации services/message-state-resolver: не было
+    # обоснования этой записи ни в одном документе — service_io_contracts.md
+    # §2.4 перечисляет ровно 2 входа (stage.completed, delivery.status) и
+    # 2 выхода (message.lifecycle, message-state.changelog), ни один не
+    # Redis. Убрано как стороннее/скопированное значение, не додуманное
+    # заново — реального использования Redis в этом сервисе нет.
     "execution-control-service": ["postgresql", "redis-configuration"],
     "configuration-service": ["postgresql"],
     "config-cache-projector": ["redis-configuration"],
