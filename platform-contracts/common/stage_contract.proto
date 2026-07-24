@@ -83,6 +83,17 @@ message DeliveryExtension {
   string route_id = 1;
   Protocol protocol = 2;
   string route_version = 3;
+  // Найдено при реализации Delivery Service (service_internal_methods.md
+  // §1.8): resolve_gateway_instance читает Operator Route Registry по ключу
+  // operator_route:{operator_id}:{route_id} (data_infrastructure_spec.md
+  // §287), и OperatorSubmitService.SubmitRequest.operator_id (grpc/
+  // operator_gateway.proto) тоже нужен явно — но ни один предыдущий stage
+  // не передавал resolved_operator_id дальше DeliveryExtension (только
+  // PolicyExtension/BillingExtension/RoutingExtension/RoutingResult его
+  // несут). Pipeline Engine уже накапливает его в ExecutionState с этапа
+  // DestinationResolution — добавлено сюда, а не переоткрыто заново из
+  // route_id (route_id не гарантированно структурно кодирует operator_id).
+  string resolved_operator_id = 4;
 }
 
 message DeliveryReconciliationExtension {

@@ -58,6 +58,13 @@ pub fn build_stage_execute(
                 route_id,
                 protocol,
                 route_version: state.route_version.clone().unwrap_or_default(),
+                // Найдено при реализации delivery-service: DeliveryExtension
+                // изначально не нёс resolved_operator_id вообще — добавлено
+                // полем 4 в platform-contracts/common/stage_contract.proto,
+                // см. комментарий там. ExecutionState уже накапливал это
+                // значение с этапа DestinationResolution — только не
+                // прокидывал дальше сюда.
+                resolved_operator_id: state.resolved_operator_id.clone().unwrap_or_default(),
             })
         }
         StageName::DeliveryReconciliation => {
@@ -150,6 +157,26 @@ mod tests {
                 assert_eq!(ext.protocol, 1);
                 assert_eq!(ext.route_version, "3");
             }
+            other => panic!("ожидали DeliveryExtension, получили {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delivery_command_carries_resolved_operator_id_accumulated_since_destination_resolution() {
+        // Найдено при реализации delivery-service: DeliveryExtension изначально
+        // не нёс resolved_operator_id вообще (platform-contracts/common/
+        // stage_contract.proto field 4, добавлено вместе с этим тестом) —
+        // Delivery не может резолвить Operator Route Registry
+        // (operator_route:{operator_id}:{route_id}) без него.
+        let pipeline = pipeline();
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1);
+        state.resolved_operator_id = Some("beeline".into());
+        state.route_id = Some("beeline_smpp_primary".into());
+        state.protocol = Some(1);
+        let decision = NextStageDecision { node_id: "n5_delivery".into(), stage_name: "DELIVERY".into() };
+        let command = build_stage_execute(&decision, &state, "998901331835", "se5".into()).unwrap();
+        match command.stage_extension {
+            Some(StageExtension::Delivery(ext)) => assert_eq!(ext.resolved_operator_id, "beeline"),
             other => panic!("ожидали DeliveryExtension, получили {other:?}"),
         }
     }
