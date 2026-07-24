@@ -12,6 +12,7 @@ import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BillingServiceTest {
@@ -111,5 +112,27 @@ class BillingServiceTest {
         assertTrue(result.event().getRetryable());
         assertFalse(result.event().hasBilling(), "устаревшая попытка не должна была списать деньги");
         assertEquals(100_000, result.updatedAccount().balance(), "баланс не изменился — charge реально не применился");
+    }
+
+    @Test
+    void negativeSegmentCountRejectedBeforeArithmetic() {
+        // Кодревью: непровалидированный отрицательный segment_count инвертирует
+        // charge в credit (perSegment * segmentCount с отрицательным множителем),
+        // и applyCharge докладывает это как обычный SUCCEEDED. Обязано быть
+        // отклонено до того, как дойдёт до BillingAccountState.applyCharge.
+        BillingService service = new BillingService(realTariff());
+        Account account = Account.fresh(100_000);
+        StageExecuteCommand command = command("se-negative", "SERVICE", -3);
+
+        assertThrows(IllegalArgumentException.class, () -> service.handleBillingExecute(command, account, account.epoch()));
+    }
+
+    @Test
+    void zeroSegmentCountRejected() {
+        BillingService service = new BillingService(realTariff());
+        Account account = Account.fresh(100_000);
+        StageExecuteCommand command = command("se-zero", "SERVICE", 0);
+
+        assertThrows(IllegalArgumentException.class, () -> service.handleBillingExecute(command, account, account.epoch()));
     }
 }

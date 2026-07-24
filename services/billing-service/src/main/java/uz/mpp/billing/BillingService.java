@@ -1,7 +1,6 @@
 package uz.mpp.billing;
 
 import uz.mpp.billing.BillingAccountState.Account;
-import uz.mpp.billing.BillingAccountState.ChargeOutcome;
 import uz.mpp.billing.BillingAccountState.ChargeResult;
 import uz.mpp.platformcontracts.common.v1.BillingExtension;
 import uz.mpp.platformcontracts.common.v1.BillingResult;
@@ -14,17 +13,23 @@ import uz.mpp.platformcontracts.common.v1.StageExecuteCommand;
  * {@code handle_billing_execute} (service_internal_methods.md §1.6) —
  * оркестрация {@code read_segment_hint} -> {@code resolve_tariff} ->
  * {@code check_account_state}+{@code check_charge_dedup}+{@code apply_atomic_charge}
- * (три проверки объединены в {@link BillingAccountState#applyCharge}, как в
- * реальном Lua-скрипте) -> {@code publish_stage_completed}.
+ * -> {@code publish_stage_completed}.
+ *
+ * <p>Тариф резолвится и валидируется здесь ({@link #resolveTariff}), сама
+ * атомарная мутация счёта — в {@link BillingAccountStore#applyChargeAtomically}
+ * (WATCH/MULTI/EXEC), не в этом классе — {@link #handleBillingExecute}
+ * остаётся чистой in-memory версией для юнит-тестов (использует
+ * {@link BillingAccountState#applyCharge} напрямую, без Redis), но
+ * пропускает вход через ту же {@link #resolveTariff} валидацию, что и
+ * реальный Kafka-путь — негативный {@code segment_count} отклоняется
+ * одинаково в обоих местах, не только в одном.
  *
  * <p><b>Упрощение этого среза, не редизайн:</b> {@code resolve_tariff} по
  * спеке ключуется по {@code partner_id}, которого нет в
- * {@code StageExecuteCommand} напрямую (только {@code stage_extension} с
- * {@code resolved_operator_id}/{@code segment_count}/{@code category}) —
- * вероятный источник, как и для Policy Service, это {@code msgctx} в
- * Runtime Redis. Этот срез соответствует Фазе 2.2 (один тестовый партнёр,
- * один тариф) — {@link TariffResolver} не параметризован по партнёру,
- * реальная per-partner маршрутизация тарифа — открытый пункт, см. README.
+ * {@code StageExecuteCommand} напрямую — вероятный источник, как и для
+ * Policy Service, это {@code msgctx} в Runtime Redis. Этот срез
+ * соответствует Фазе 2.2 (один тестовый партнёр, один тариф) —
+ * {@link TariffResolver} не параметризован по партнёру.
  */
 public final class BillingService {
 
@@ -38,34 +43,47 @@ public final class BillingService {
     }
 
     /**
-     * @param account         текущее состояние счёта, как реально стоит в Billing Redis
-     *                        прямо перед атомарным вызовом (после fetch, до CAS-записи)
-     * @param expectedEpoch   epoch, который вызывающая сторона наблюдала в момент диспетчеризации
-     *                        команды — <b>намеренно отдельный параметр, не {@code account.epoch()}</b>:
-     *                        если бы epoch читался из того же {@code account}, race "freeze произошёл
-     *                        между чтением и записью" был бы структурно недоказуем через этот метод
-     *                        (см. {@code BillingAccountStateTest#inFlightChargeRejectedByStaleEpochRace}
-     *                        для доказательства свойства на уровне state machine, и
-     *                        {@code staleEpochRejectedAsRetryable} здесь — на уровне оркестрации).
-     *                        <b>Открытая находка:</b> ни {@code BillingExtension}, ни
-     *                        {@code StageExecuteCommand} не несут явного поля под account_epoch —
-     *                        вероятный источник, как и {@code partner_id}, конфигурация/Execution
-     *                        State, закэшированные Pipeline Engine на момент диспетчеризации
-     *                        (hld.md §15.3), не формализовано в текущих platform-contracts — см. README.
+     * Отклоняет отрицательный/нулевой {@code segment_count} до того, как он
+     * дойдёт до арифметики списания — найдено кодревью: непровалидированный
+     * отрицательный {@code segment_count} (сырой wire {@code int32},
+     * `stage_contract.proto`) инвертирует списание в начисление
+     * ({@code perSegment * segmentCount} с отрицательным множителем), и
+     * {@code applyCharge} рапортует это как обычный {@code SUCCEEDED}.
      */
-    public Result handleBillingExecute(StageExecuteCommand command, Account account, long expectedEpoch) {
-        BillingExtension ext = command.getBilling();
-        TariffResolver.Tariff tariff = tariffResolver.resolve(ext.getCategory(), ext.getSegmentCount());
+    public TariffResolver.Tariff resolveTariff(BillingExtension ext) {
+        if (ext.getSegmentCount() <= 0) {
+            throw new IllegalArgumentException(
+                "segment_count обязан быть положительным, получено " + ext.getSegmentCount()
+                    + " — отрицательное/нулевое значение инвертировало бы списание в начисление");
+        }
+        return tariffResolver.resolve(ext.getCategory(), ext.getSegmentCount());
+    }
 
-        ChargeResult chargeResult = BillingAccountState.applyCharge(
-            account, command.getStageExecutionId(), tariff.amountMinorUnits(), expectedEpoch);
-
-        StageCompletedEvent event = switch (chargeResult.outcome()) {
-            case APPLIED, ALREADY_PROCESSED -> succeeded(command, ext.getCategory(), tariff);
+    public StageCompletedEvent buildEvent(StageExecuteCommand command, String category, TariffResolver.Tariff tariff, ChargeResult chargeResult) {
+        return switch (chargeResult.outcome()) {
+            case APPLIED, ALREADY_PROCESSED -> succeeded(command, category, tariff);
             case ACCOUNT_FROZEN -> rejectedRetryable(command, "ACCOUNT_FROZEN");
             case STALE_EPOCH -> rejectedRetryable(command, "STALE_EPOCH");
         };
+    }
 
+    /**
+     * Чистая in-memory версия для юнит-тестов — эквивалент реального пути
+     * (resolveTariff -> BillingAccountState.applyCharge -> buildEvent), но
+     * без Redis. См. {@link BillingAccountStore#applyChargeAtomically} для
+     * того, что реально исполняется в проде (KafkaIo).
+     *
+     * @param expectedEpoch epoch, который вызывающая сторона наблюдала в момент
+     *                      диспетчеризации команды — намеренно отдельный параметр,
+     *                      не {@code account.epoch()}, см. предыдущую версию javadoc
+     *                      в истории коммитов для полного обоснования (race-доказательство
+     *                      в {@code staleEpochRejectedAsRetryable}).
+     */
+    public Result handleBillingExecute(StageExecuteCommand command, Account account, long expectedEpoch) {
+        BillingExtension ext = command.getBilling();
+        TariffResolver.Tariff tariff = resolveTariff(ext);
+        ChargeResult chargeResult = BillingAccountState.applyCharge(account, command.getStageExecutionId(), tariff.amountMinorUnits(), expectedEpoch);
+        StageCompletedEvent event = buildEvent(command, ext.getCategory(), tariff, chargeResult);
         return new Result(event, chargeResult.account());
     }
 

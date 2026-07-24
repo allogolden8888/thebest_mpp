@@ -21,9 +21,11 @@ class HealthServerTest {
 
     @BeforeEach
     void start() throws IOException {
-        port = 18080 + (int) (Math.random() * 1000); // избегаем конфликтов при параллельных прогонах
-        server = new HealthServer(port);
+        // port=0 — ОС сама выдаёт свободный эфемерный порт, не псевдослучайный
+        // выбор из диапазона (кодревью: риск конфликта под параллельными прогонами CI).
+        server = new HealthServer(0);
         server.start();
+        port = server.port();
     }
 
     @AfterEach
@@ -49,7 +51,7 @@ class HealthServerTest {
     }
 
     @Test
-    void metricsReturns200NotFound() throws Exception {
+    void metricsReturns200() throws Exception {
         assertEquals(200, get("/metrics").statusCode());
     }
 }

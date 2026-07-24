@@ -39,8 +39,13 @@ public final class HealthServer {
         server.start();
     }
 
+    /** Реальный забинженный порт — нужен, когда конструктор вызван с {@code port=0} (ephemeral). */
+    public int port() {
+        return server.getAddress().getPort();
+    }
+
     public void stop() {
-        server.stop(0);
+        server.stop(1); // 1с grace period — 0 может оборвать ответ в процессе отправки (кодревью)
     }
 
     private static void respond(com.sun.net.httpserver.HttpExchange exchange, int status, String body) throws IOException {
