@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  services_specifictaion.md §2.8: Java 25, Micronaut, gRPC Java, Kafka Client.
+  Как и billing-service: plain Java (JDK 25) + com.sun.net.httpserver вместо
+  полного Micronaut — то же намеренное упрощение (быстрая, реально
+  компилируемая сборка), см. billing-service/pom.xml для полного обоснования.
+
+  Первый Java-сервис серии, реально ГЕНЕРИРУЮЩИЙ и КОМПИЛИРУЮЩИЙ gRPC-код
+  (grpc-java + protoc-gen-grpc-java) — Delivery Service вызывает
+  OperatorSubmitService.Submit как gRPC-клиент (service_io_contracts.md
+  §1.8: "Синхронные вызовы, отправляемые сервисом: Delivery → Operator SMPP
+  Session Manager либо Operator HTTP Gateway"). Сервер этого контракта
+  (Operator SMPP Session Manager / Operator HTTP Gateway) не реализован ни
+  в этом репозитории (владелец — Субагент 1), поэтому клиентские вызовы
+  компилируются против настоящего сгенерированного стаба, но не проверены
+  live — см. README.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>uz.mpp</groupId>
+  <artifactId>delivery-service</artifactId>
+  <version>0.1.0</version>
+  <packaging>jar</packaging>
+
+  <properties>
+    <maven.compiler.release>25</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <protobuf.version>4.35.1</protobuf.version>
+    <grpc.version>1.68.1</grpc.version>
+    <kafka.version>3.9.0</kafka.version>
+    <lettuce.version>6.5.1.RELEASE</lettuce.version>
+    <junit.version>5.11.3</junit.version>
+    <platform.contracts.dir>${project.basedir}/../../platform-contracts</platform.contracts.dir>
+    <protobuf.protocExecutable>/opt/homebrew/bin/protoc</protobuf.protocExecutable>
+    <!-- macOS Apple Silicon по умолчанию (локальная разработка) — Dockerfile
+         переопределяет через -Dgrpc.plugin.classifier=linux-x86_64 (Linux-образ),
+         тот же паттерн, что protobuf.protocExecutable в billing-service. -->
+    <grpc.plugin.classifier>osx-aarch_64</grpc.plugin.classifier>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.google.protobuf</groupId>
+      <artifactId>protobuf-java</artifactId>
+      <version>${protobuf.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.grpc</groupId>
+      <artifactId>grpc-netty-shaded</artifactId>
+      <version>${grpc.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.grpc</groupId>
+      <artifactId>grpc-protobuf</artifactId>
+      <version>${grpc.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.grpc</groupId>
+      <artifactId>grpc-stub</artifactId>
+      <version>${grpc.version}</version>
+    </dependency>
+    <dependency>
+      <!-- javax.annotation.Generated используется сгенерированным gRPC-кодом,
+           удалён из JDK начиная с 11 — нужен явной зависимостью. -->
+      <groupId>org.apache.tomcat</groupId>
+      <artifactId>annotations-api</artifactId>
+      <version>6.0.53</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.kafka</groupId>
+      <artifactId>kafka-clients</artifactId>
+      <version>${kafka.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.lettuce</groupId>
+      <artifactId>lettuce-core</artifactId>
+      <version>${lettuce.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>${junit.version}</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.xolstice.maven.plugins</groupId>
+        <artifactId>protobuf-maven-plugin</artifactId>
+        <version>0.6.1</version>
+        <configuration>
+          <protocExecutable>${protobuf.protocExecutable}</protocExecutable>
+          <protoSourceRoot>${platform.contracts.dir}</protoSourceRoot>
+          <includes>
+            <include>common/enums.proto</include>
+            <include>common/types.proto</include>
+            <include>common/stage_contract.proto</include>
+            <include>grpc/operator_gateway.proto</include>
+          </includes>
+          <pluginId>grpc-java</pluginId>
+          <pluginArtifact>io.grpc:protoc-gen-grpc-java:${grpc.version}:exe:${grpc.plugin.classifier}</pluginArtifact>
+        </configuration>
+        <executions>
+          <execution>
+            <goals>
+              <goal>compile</goal>
+              <goal>compile-custom</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.2</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <version>3.6.0</version>
+        <executions>
+          <execution>
+            <phase>package</phase>
+            <goals><goal>shade</goal></goals>
+            <configuration>
+              <transformers>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                  <mainClass>uz.mpp.delivery.Main</mainClass>
+                </transformer>
+              </transformers>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
