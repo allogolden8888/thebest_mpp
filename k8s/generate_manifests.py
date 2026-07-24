@@ -152,9 +152,14 @@ SERVICES = [
 # Vault (infra/secrets/). Источник — services_specifictaion.md (упоминания
 # "Runtime Redis"/"Configuration Redis"/"Billing Redis"/"PostgreSQL"/
 # "ClickHouse" по каждому сервису); там, где документ не называет хранилище
-# явно (DLR Manager, Config Event Publisher), секрет не назначен — не
-# додумано, см. infra/README.md.
+# явно (Config Event Publisher), секрет не назначен — не додумано, см.
+# infra/README.md. DLR Manager раньше был в этом списке "не додумано" —
+# закрыто при реализации `services/dlr-manager`: lookup_correlation читает
+# PostgreSQL (dlr.dlr_correlation), а кэш "ожидающих корреляции" DLR
+# (см. README сервиса — реальный пробел контракта SchedulerBackgroundTask,
+# закрытый локальным кэшем) живёт в Runtime Redis.
 SECRET_DEPENDENCIES: dict[str, list[str]] = {
+    "dlr-manager": ["postgresql", "redis-runtime"],
     "partner-rest-receiver": ["redis-runtime", "redis-configuration"],
     "partner-smpp-gateway": ["redis-runtime", "redis-configuration"],
     "operator-smpp-session-manager": ["redis-runtime", "redis-configuration"],
