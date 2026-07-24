@@ -29,12 +29,20 @@ pub enum Token {
 
 /// Возвращает чередующийся список: Literal, Placeholder, Literal, ..., Literal
 /// (первый/последний Literal может быть пустой строкой).
+///
+/// Найдено кодревью, исправлено здесь: предыдущая версия шагала по `i` побайтово
+/// (`i += 1` в ветке `else`), но слайсила `pattern[i..]` каждую итерацию — `str`-слайс
+/// по не-граничному байту паникует. На чисто ASCII паттернах (`%w`, `%d{n,m}`,
+/// разделители) это никогда не срабатывало, но литеральные фрагменты этой платформы
+/// реально содержат кириллицу, эмодзи и узбекский латинский апостроф (ʻ/ʼ, 2 байта
+/// в UTF-8) — реальный паттерн регистрации, а не гипотетический вход. Теперь `i`
+/// продвигается на всю длину символа в ветке `else`, так что он всегда остаётся на
+/// границе символа перед следующей слайсинг-проверкой.
 pub fn parse_pattern(pattern: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut pos = 0usize;
-    let bytes = pattern.as_bytes();
     let mut i = 0usize;
-    while i < bytes.len() {
+    while i < pattern.len() {
         if pattern[i..].starts_with("%w") {
             tokens.push(Token::Literal(pattern[pos..i].to_string()));
             tokens.push(Token::Placeholder(Placeholder::Word));
@@ -55,7 +63,8 @@ pub fn parse_pattern(pattern: &str) -> Vec<Token> {
             }
             i += 1;
         } else {
-            i += 1;
+            let ch_len = pattern[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+            i += ch_len;
         }
     }
     tokens.push(Token::Literal(pattern[pos..].to_string()));
@@ -291,5 +300,36 @@ mod tests {
         assert!(ruleset.find_match("42-ok-done").is_some());
         assert!(ruleset.find_match("4-ok-done").is_none(), "только 1 цифра, нужно ровно 2");
         assert!(ruleset.find_match("42-ok-").is_none(), "пустой %w в конце недопустим");
+    }
+
+    // Регрессия на находку кодревью: parse_pattern раньше паниковал на любом
+    // многобайтовом UTF-8 символе (слайсинг по не-граничному байту). Реальный
+    // домен этой платформы — кириллица и узбекская латиница с апострофом
+    // ʻ/ʼ (U+02BB/U+02BC, 2 байта) — не гипотетический вход.
+    #[test]
+    fn cyrillic_literal_fragment_does_not_panic() {
+        let tpl = Template { template_id: "tpl-cyr".into(), pattern: "Спасибо за %w покупку".into(), category: "SERVICE".into() };
+        let ruleset = CompiledRuleset::new(vec![tpl]);
+        assert!(ruleset.find_match("Спасибо за вашу покупку").is_some());
+    }
+
+    #[test]
+    fn uzbek_latin_apostrophe_literal_fragment_does_not_panic() {
+        // U+02BB (ʻ) — двухбайтовый в UTF-8, реально встречается в узбекских
+        // словах вроде "oʻzbekcha". Ровно такой же класс символа, что уже
+        // используется в этих тестах внутри %w-разделённых фрагментов
+        // ("bo'yicha", "so'm"), но здесь — внутри самого литерала.
+        let tpl = Template { template_id: "tpl-uz".into(), pattern: "toʻlov %w bajarildi".into(), category: "SERVICE".into() };
+        let ruleset = CompiledRuleset::new(vec![tpl]);
+        assert!(ruleset.find_match("toʻlov muvaffaqiyatli bajarildi").is_some());
+    }
+
+    #[test]
+    fn emoji_literal_fragment_does_not_panic() {
+        // Emoji — 4-байтовый UTF-8 символ, самый жёсткий случай для
+        // границ char boundary.
+        let tpl = Template { template_id: "tpl-emoji".into(), pattern: "🎉 %w tabriklaymiz".into(), category: "SERVICE".into() };
+        let ruleset = CompiledRuleset::new(vec![tpl]);
+        assert!(ruleset.find_match("🎉 sizni tabriklaymiz").is_some());
     }
 }

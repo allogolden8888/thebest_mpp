@@ -25,7 +25,7 @@ use crate::proto::stage_execute_command::StageExtension;
 use crate::proto::{Outcome, PolicyResult, StageCompletedEvent, StageExecuteCommand};
 use crate::template_matching::CompiledRuleset;
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{FixedOffset, Utc};
 use prost::Message;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
@@ -85,7 +85,27 @@ pub fn build_producer(bootstrap_servers: &str) -> FutureProducer {
         .expect("не удалось создать Kafka producer")
 }
 
+/// Asia/Tashkent — постоянный UTC+5, без перехода на летнее время с 1992 года
+/// (в отличие от большинства зон, здесь не нужна полноценная tz-база вроде
+/// `chrono-tz`, фиксированного смещения достаточно и корректно навсегда).
+fn tashkent_offset() -> FixedOffset {
+    FixedOffset::east_opt(5 * 3600).expect("+5:00 — валидное смещение")
+}
+
+/// Найдено кодревью, исправлено здесь: `policy_ruleset.valid.json` документирует
+/// окна check_time_of_day в Asia/Tashkent local time (например "ADVERTISING
+/// 09:00-20:00"), но раньше `handle_command` передавал в `evaluate_policy` чистый
+/// UTC без конвертации — сдвиг на 5 часов, реально блокировавший/пропускавший
+/// сообщения не в то окно суток. `evaluate_policy` использует `now` и для
+/// check_time_of_day, и для окна анти-спама — постоянное смещение не меняет
+/// разницу между двумя моментами времени, так что анти-спам-логика этим не
+/// затронута.
+pub fn now_tashkent() -> chrono::NaiveDateTime {
+    Utc::now().with_timezone(&tashkent_offset()).naive_local()
+}
+
 /// Ядро обработки — чистая функция, тестируется без сети/Redis/Kafka.
+/// `now` — Asia/Tashkent local time (см. `now_tashkent`), не UTC.
 pub fn handle_command(
     command: &StageExecuteCommand,
     ctx: &MessageContext,
@@ -93,8 +113,8 @@ pub fn handle_command(
     templates: &CompiledRuleset,
     banwords: &BanwordChecker,
     runtime: &mut RuntimeState,
+    now: chrono::NaiveDateTime,
 ) -> StageCompletedEvent {
-    let now = Utc::now().naive_utc();
     let outcome = policy_engine::evaluate_policy(ctx, ruleset, templates, banwords, runtime, now);
     build_event(command, outcome)
 }
@@ -157,7 +177,7 @@ pub async fn run_loop(
                     continue; // не коммитим — at-least-once, переобработается
                 };
 
-                let event = handle_command(&command, &ctx, &ruleset, &templates, &banwords, &mut runtime);
+                let event = handle_command(&command, &ctx, &ruleset, &templates, &banwords, &mut runtime, now_tashkent());
                 let bytes = event.encode_to_vec();
                 let record = FutureRecord::to(OUTPUT_TOPIC).key(&event.message_id).payload(&bytes);
                 if let Err((e, _)) = producer.send(record, Duration::from_secs(5)).await {
@@ -223,7 +243,7 @@ mod tests {
             sender_id: "Click".into(),
             body: "Hello1238!@* shartnoma bo'yicha 123456 so'm to'lovni bugun amalga oshiring".into(),
         };
-        let event = handle_command(&command("m1"), &ctx, &ruleset, &templates, &banwords, &mut runtime);
+        let event = handle_command(&command("m1"), &ctx, &ruleset, &templates, &banwords, &mut runtime, test_now());
         assert_eq!(event.outcome, Outcome::Succeeded as i32);
         match event.stage_result {
             Some(StageResult::Policy(r)) => assert_eq!(r.category, "TRANSACTION"),
@@ -236,7 +256,7 @@ mod tests {
     fn rejected_carries_blocked_category_and_reason() {
         let (ruleset, templates, banwords, mut runtime) = env();
         let ctx = MessageContext { msisdn: "998901331835".into(), sender_id: "NotClick".into(), body: "irrelevant".into() };
-        let event = handle_command(&command("m2"), &ctx, &ruleset, &templates, &banwords, &mut runtime);
+        let event = handle_command(&command("m2"), &ctx, &ruleset, &templates, &banwords, &mut runtime, test_now());
         assert_eq!(event.outcome, Outcome::Rejected as i32);
         assert_eq!(event.reason_code, "INVALID_SENDER");
         match event.stage_result {
@@ -249,8 +269,29 @@ mod tests {
     fn stage_execution_id_propagates_for_idempotency() {
         let (ruleset, templates, banwords, mut runtime) = env();
         let ctx = MessageContext { msisdn: "998901331835".into(), sender_id: "Click".into(), body: "irrelevant".into() };
-        let event = handle_command(&command("m3"), &ctx, &ruleset, &templates, &banwords, &mut runtime);
+        let event = handle_command(&command("m3"), &ctx, &ruleset, &templates, &banwords, &mut runtime, test_now());
         assert_eq!(event.stage_execution_id, "se1");
         assert_eq!(event.message_id, "m3");
+    }
+
+    fn test_now() -> chrono::NaiveDateTime {
+        use chrono::NaiveDate;
+        NaiveDate::from_ymd_opt(2026, 7, 22).unwrap().and_hms_opt(12, 0, 0).unwrap()
+    }
+
+    // Регрессия на находку кодревью: раньше `handle_command` передавал в
+    // `evaluate_policy` чистый `Utc::now()`, а `policy_ruleset.valid.json`
+    // документирует окна check_time_of_day в Asia/Tashkent (UTC+5) — 5-часовой
+    // сдвиг мог и пропустить сообщение не в то окно, и заблокировать легитимное.
+    // Здесь доказывается сама конвертация `now_tashkent()`, не бизнес-логика
+    // check_time_of_day (та уже покрыта `policy_engine::tests::outside_time_window`
+    // через инъекцию `now` напрямую).
+    #[test]
+    fn now_tashkent_is_five_hours_ahead_of_utc() {
+        let utc_now = Utc::now();
+        let tashkent_now = now_tashkent();
+        let expected = utc_now.naive_utc() + chrono::Duration::hours(5);
+        let diff = (tashkent_now - expected).num_seconds().abs();
+        assert!(diff <= 2, "конвертация в Asia/Tashkent должна давать UTC+5, разница {diff}с слишком велика для дрожания часов теста");
     }
 }
