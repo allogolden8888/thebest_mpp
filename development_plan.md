@@ -34,8 +34,8 @@ flowchart LR
 |---|---|---|
 | `destination-resolution-service` | Rust | ✅ готов (10/10 тестов) |
 | `policy-service` | Rust | ✅ готов (34/34 тестов, было 27 — 4 по итогам кодревью, 3 по итогам находки о секретах) — порт `policy_matching/` (template matching + banwords + оркестрация 8 проверок), 1:1 по тестам; исправлены UTF-8 паника в `parse_pattern` и сдвиг часового пояса (UTC вместо Asia/Tashkent) в `check_time_of_day` — см. `services/policy-service/README.md` |
-| `billing-service` | Java | ✅ готов (31/31 тестов, было 21 — 6 по итогам кодревью, 4 по итогам находки о секретах) — порт `state_machines/billing_account_state.py` (fencing по account_epoch), 1:1 по тестам, первый Java-сервис сессии; исправлены 3 critical находки (offset-commit data loss, negative segment_count, TOCTOU race) — см. `services/billing-service/README.md` |
-| `pipeline-engine` | Rust | ✅ готов (18/18 тестов, было 12 — 6 добавлены по итогам независимого кодревью) — центральный оркестратор, обходит весь граф из `pipeline.valid.json` от начала до конца, включая Billing-BLOCKED override; исправлены 2 high находки (идемпотентность `incoming.messages`, валидация `stage.completed` против устаревших/дублирующихся событий) и 1 medium/high (Delivery/DeliveryReconciliation extension строились как заглушка через RoutingExtension); **не работает с >1 репликой в текущем виде** (in-memory state, не Redis CAS) — см. `services/pipeline-engine/README.md` |
+| `billing-service` | Java | ✅ готов (37/37 тестов, было 21 — 6 по итогам кодревью, 4 по итогам находки о секретах, 6 по итогам Redis Lua/4.2) — порт `state_machines/billing_account_state.py` (fencing по account_epoch), 1:1 по тестам, первый Java-сервис сессии; исправлены 3 critical находки (offset-commit data loss, negative segment_count, TOCTOU race), `apply_atomic_charge` теперь настоящий атомарный Lua-скрипт — см. `services/billing-service/README.md` |
+| `pipeline-engine` | Rust | ✅ готов (28/28 тестов, было 12 — 6 по итогам кодревью, 1 по итогам delivery-service, 9 по итогам Redis CAS/4.2) — центральный оркестратор, обходит весь граф из `pipeline.valid.json` от начала до конца, включая Billing-BLOCKED override; **многорепличный блокер снят** — `ExecutionState` теперь в Runtime Redis с реальным атомарным CAS (`cas_transition_and_track_deadline`, development_plan.md 4.2), не в памяти процесса — см. `services/pipeline-engine/README.md` |
 | `partner-rest-receiver` | Rust | ✅ готов (62/62 тестов, было 59 — 3 по итогам находки о секретах) — точка входа "ходового скелета", единственный сервис серии, публикующий `incoming.messages` вместо потребления `stage.*`, реальный расчёт `segment_count` (GSM-7/UCS-2, GSM 03.38), см. `services/partner-rest-receiver/README.md` |
 | `routing-service` | Rust | ✅ готов (10/10 тестов) — тесты грузят реальный `config_schemas/examples/routing_table.valid.json`, см. `services/routing-service/README.md` |
 | `delivery-service` | Java | ✅ готов (30/30 тестов, было 26 — 4 по итогам находки о секретах) — первый сервис сессии, реально генерирующий и компилирующий gRPC-код (`OperatorSubmitService`), реальная GSM-7/UCS-2 сегментация на байтовом уровне, см. `services/delivery-service/README.md` |
@@ -80,7 +80,7 @@ flowchart LR
 | 3.4 | Backoffice API/UI | Субагент 1 |
 | 3.5 | Message State Resolver транзакционная гарантия | Главный агент |
 | 4.1 | DLR code mapping | Главный агент (владеет `dlr-manager`) |
-| 4.2 | Lua: Runtime Redis CAS+deadline И Billing Redis `apply_atomic_charge` | Главный агент (оба потребителя — `pipeline-engine`/`billing-service` — его) |
+| 4.2 | ✅ Lua: Runtime Redis CAS+deadline И Billing Redis `apply_atomic_charge` — Главный агент (оба потребителя — `pipeline-engine`/`billing-service` — его) | `apply_atomic_charge.lua` (billing-service, 37/37 тестов, 6 живьём против Redis, включая 20-поточный конкурентный) + `cas_transition.lua`/`finalize.lua` (pipeline-engine, 28/28 тестов, 5 живьём против Redis) — оба закрыты, см. README каждого сервиса |
 | 4.3 | Template disambiguation | Главный агент (`policy-service`) |
 | 4.4 | Homoglyph-таблица | Главный агент (`policy-service`) |
 
@@ -181,7 +181,7 @@ flowchart LR
 | # | Задача | Источник flag |
 |---|---|---|
 | 4.1 | Маппинг операторских DLR-кодов в `normalized_status`, per-operator | `platform_contracts.md` §4 |
-| 4.2 | Lua-скрипты для Runtime Redis (CAS+deadline) и Billing Redis (`apply_atomic_charge`) — алгоритм и гарантии уже доказаны в `state_machines/billing_account_state.py` (8/8 тестов), нужна реализация на настоящем Lua/Redis Function | `platform_contracts.md` §4 |
+| 4.2 | ✅ Закрыто — Lua-скрипты для Runtime Redis (CAS+deadline, `pipeline-engine/lua/`) и Billing Redis (`apply_atomic_charge`, `billing-service/src/main/resources/apply_atomic_charge.lua`) реализованы и доказаны против живого локального Redis (concurrency-тесты для обоих) | `platform_contracts.md` §4 |
 | 4.3 | Точная приоритизация при реальной неоднозначности нескольких прошедших фазу 2 шаблонов (`template_matching.py` доказал, что множественные кандидаты не роняют алгоритм, но не выбирает между ними осмысленно) | `policy_matching/README.md` |
 | 4.4 | Расширение таблицы гомоглифов за пределы documented Cyrillic/Latin пар | `policy_matching/README.md` |
 
