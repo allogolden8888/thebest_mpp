@@ -78,7 +78,7 @@ flowchart LR
 | 3.2 | Scheduler (3 lane) | Субагент 1 |
 | 3.3 | Billing Reconciliation freeze/unfreeze | Субагент 1 |
 | 3.4 | Backoffice API/UI | Субагент 1 |
-| 3.5 | Message State Resolver транзакционная гарантия | Главный агент |
+| 3.5 | 🟡 Message State Resolver транзакционная гарантия — Главный агент | Реальный transactional `KafkaProducer` (initTransactions/beginTransaction/sendOffsetsToTransaction/commitTransaction) уже реализован при постройке `message-state-resolver` (см. его README) — закрыт сам HLD §10.1 механизм; RocksDB + restore-from-changelog (локальная durable проекция, переживающая рестарт) всё ещё не реализованы (in-memory `ConcurrentHashMap`) — остаточный пункт |
 | 4.1 | DLR code mapping | Главный агент (владеет `dlr-manager`) |
 | 4.2 | ✅ Lua: Runtime Redis CAS+deadline И Billing Redis `apply_atomic_charge` — Главный агент (оба потребителя — `pipeline-engine`/`billing-service` — его) | `apply_atomic_charge.lua` (billing-service, 37/37 тестов, 6 живьём против Redis, включая 20-поточный конкурентный) + `cas_transition.lua`/`finalize.lua` (pipeline-engine, 28/28 тестов, 5 живьём против Redis) — оба закрыты, см. README каждого сервиса |
 | 4.3 | ✅ Template disambiguation — Главный агент (`policy-service`) | Специфичность плейсхолдеров (Digit>Word) + длина литералов + insertion order tie-break, 40/40 тестов |
