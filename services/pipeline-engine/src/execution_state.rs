@@ -33,6 +33,22 @@ pub struct ExecutionState {
     pub route_id: Option<String>,
     pub protocol: Option<i32>, // proto Protocol as i32 — не нуждается в раскодировке здесь
     pub route_version: Option<String>,
+
+    /// Сложено из отдельного `DestinationStore` (development_plan.md 4.2,
+    /// Redis CAS интеграция) — раньше хранилось второй отдельной
+    /// `Arc<Mutex<HashMap>>` картой (см. README/kafka_io.rs до этой правки),
+    /// теперь просто поле того же состояния: один Redis HASH на message_id,
+    /// не два независимых стора, которые надо было бы держать в синхроне
+    /// вручную.
+    pub destination_address: String,
+
+    /// Дедлайн текущей диспетчеризованной попытки (unix ms) —
+    /// `cas_transition_and_track_deadline` пишет его в `deadlines:{bucket}`
+    /// той же атомарной Lua-транзакцией, что и CAS (hld.md:770/912,
+    /// `src/redis_cas.rs`). Не путать с `StageExecuteCommand.deadline`
+    /// (wire-поле, отдельный, всё ещё не реализованный пробел — см. README) —
+    /// это внутреннее поле Pipeline Engine для Critical Sweep.
+    pub deadline_ms: i64,
 }
 
 impl ExecutionState {
@@ -53,6 +69,8 @@ impl ExecutionState {
             route_id: None,
             protocol: None,
             route_version: None,
+            destination_address: String::new(),
+            deadline_ms: 0,
         }
     }
 

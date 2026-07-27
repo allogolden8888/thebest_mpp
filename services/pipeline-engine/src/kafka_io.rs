@@ -3,18 +3,15 @@
 //! (динамический топик по имени стадии, infra/kafka/generate_kafka_topics.py)
 //! либо ничего не публикует при `Decision::Terminal`/`Decision::Ignored`.
 //!
-//! **Явное упрощение этого среза:** `ExecutionState` хранится в
-//! `Arc<Mutex<HashMap>>` в памяти процесса, не в Runtime Redis с атомарным
-//! CAS (`cas_transition_and_track_deadline`, service_internal_methods.md
-//! §1.4) — то же самое ограничение, что `BillingAccountStore` в Billing
-//! Service (read-then-write, не одна атомарная операция), тот же
-//! Lua-скрипт из `development_plan.md` 4.2 закрыл бы оба сразу. При
-//! нескольких репликах Pipeline Engine (`k8s/generate_manifests.py`: 17
-//! инстансов) состояние **не разделяется** между ними — сообщение,
-//! обработанное одной репликой, невидимо для другой. Это не тихий
-//! пробел: без Redis-бэкенда сервис в этом виде физически не может
-//! работать с более чем одной репликой корректно — зафиксировано как
-//! приоритетный блокер перед Фазой 2.3/2.4 в README, не спрятано.
+//! **development_plan.md 4.2 закрыто:** `ExecutionState` теперь хранится в
+//! Runtime Redis через `cas_transition_and_track_deadline`
+//! (`src/redis_cas.rs`), не в `Arc<Mutex<HashMap>>` — тот блокер
+//! "не работает с более чем одной репликой", который был здесь
+//! задокументирован, снят: состояние видимо любой реплике Pipeline Engine
+//! одинаково, CAS-guard (`expected_awaiting_stage_execution_id`) защищает от
+//! двух реплик, одновременно продвигающих один и тот же `message_id`. Сама
+//! бизнес-логика (`handle_incoming`/`advance`, чистые функции) не изменилась
+//! ни на строку — только слой хранения вокруг них.
 
 use crate::build_stage_execute::build_stage_execute;
 use crate::execution_state::{Decision, ExecutionState, NextStageDecision, handle_stage_completed};
@@ -22,20 +19,30 @@ use crate::pipeline_graph::PipelineDefinition;
 use crate::proto::common::StageCompletedEvent;
 use crate::proto::events::IncomingMessage;
 use crate::proto::events::incoming_message::Body as IncomingBody;
+use crate::redis_cas::{CasOutcome, RedisStateStore};
 use prost::Message;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::message::Message as _;
 use rdkafka::producer::{FutureProducer, FutureRecord};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
 pub const INCOMING_TOPIC: &str = "incoming.messages";
 pub const COMPLETED_TOPIC: &str = "stage.completed";
 
-pub type StateStore = Arc<Mutex<HashMap<String, ExecutionState>>>;
+/// Дефолт для `deadline_ms` — не задокументирован дословно нигде (сама
+/// wire-таблица `StageExecuteCommand.deadline` тоже ещё не заполняется, это
+/// отдельный, отдельно задокументированный пробел, см. README) — разумное
+/// значение для внутреннего Critical Sweep трекинга: с запасом дольше
+/// типичного round-trip любой стадии, короче, чем стоит ждать перед тем,
+/// как считать стадию зависшей.
+const DEFAULT_STAGE_TIMEOUT_MS: i64 = 30_000;
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
 
 fn stage_topic(stage_name: &str) -> Option<&'static str> {
     match stage_name {
@@ -130,18 +137,21 @@ pub fn advance(
     }
 }
 
-/// message_id -> destination_address — упрощённый "msgctx" (в проде это
-/// поле Runtime Redis `msgctx:{message_id}`, читаемое по ссылке
-/// (`StagePayloadRef`), не хранится вторым отдельным местом — см. README).
-pub type DestinationStore = Arc<Mutex<HashMap<String, String>>>;
-
 /// Потребляет `incoming.messages`, запускает пайплайн для каждого сообщения.
+///
+/// Идемпотентность на входе теперь обеспечивает сам CAS-вызов
+/// (`cas_advance(None, ...)` — "ожидаем, что состояния ещё нет"), не
+/// отдельная (потенциально гоняющаяся) проверка `contains_key` перед ним —
+/// см. `cas_transition.lua`. Остаточный пробел прежний (см. README): если
+/// пайплайн УЖЕ завершился и состояние удалено (`finalize_pipeline`),
+/// редоставленное `incoming.messages` после этого не будет отловлено —
+/// нужен персистентный журнал "уже обработано", не только текущее
+/// активное состояние.
 pub async fn run_incoming_loop(
     consumer: StreamConsumer,
     producer: FutureProducer,
     pipeline: Arc<PipelineDefinition>,
-    store: StateStore,
-    destinations: DestinationStore,
+    store: Arc<RedisStateStore>,
 ) {
     loop {
         match consumer.recv().await {
@@ -152,22 +162,7 @@ pub async fn run_incoming_loop(
                     continue;
                 };
 
-                // Идемпотентность: если для этого message_id уже есть состояние
-                // (пайплайн уже запущен и ещё не завершился), это — редоставленное
-                // at-least-once сообщение, не новое. Пропускаем, не перезапускаем.
-                // Остаточный пробел (см. README): если пайплайн УЖЕ завершился и
-                // состояние удалено (finalize_pipeline), редоставленное сообщение
-                // после этого не будет отловлено этой проверкой — нужен персистентный
-                // журнал "уже обработано", не только in-memory карта активных.
-                if store.lock().unwrap().contains_key(&incoming.message_id) {
-                    tracing::warn!("incoming.messages повтор для уже активного message_id={}, пропущено", incoming.message_id);
-                    if let Err(e) = consumer.commit_message(&msg, rdkafka::consumer::CommitMode::Async) {
-                        tracing::error!("не удалось закоммитить offset (incoming.messages, дубликат): {e}");
-                    }
-                    continue;
-                }
-
-                let (state, destination_address, command) = match handle_incoming(&incoming, &pipeline) {
+                let (mut state, destination_address, command) = match handle_incoming(&incoming, &pipeline) {
                     Ok(v) => v,
                     Err(e) => {
                         tracing::error!("не удалось обработать IncomingMessage message_id={}: {e}", incoming.message_id);
@@ -178,13 +173,41 @@ pub async fn run_incoming_loop(
                     tracing::error!("entry_node несёт неизвестный stage_name — конфигурация пайплайна повреждена");
                     continue;
                 };
-                destinations.lock().unwrap().insert(state.message_id.clone(), destination_address);
-                store.lock().unwrap().insert(state.message_id.clone(), state);
+                state.destination_address = destination_address;
+                state.deadline_ms = now_ms() + DEFAULT_STAGE_TIMEOUT_MS;
+                let stage_execution_id = state.awaiting_stage_execution_id.clone().unwrap_or_default();
+
+                match store.cas_advance(None, None, &state).await {
+                    Ok(CasOutcome::Ok) => {}
+                    Ok(CasOutcome::Conflict { .. }) => {
+                        tracing::warn!("incoming.messages повтор для уже активного message_id={}, пропущено", incoming.message_id);
+                        if let Err(e) = consumer.commit_message(&msg, rdkafka::consumer::CommitMode::Async) {
+                            tracing::error!("не удалось закоммитить offset (incoming.messages, дубликат): {e}");
+                        }
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::error!("не удалось записать начальное состояние в Runtime Redis для message_id={}: {e}", incoming.message_id);
+                        continue; // не коммитим — at-least-once, переобработается
+                    }
+                }
 
                 let bytes = command.encode_to_vec();
                 let record = FutureRecord::to(topic).key(&command.message_id).payload(&bytes);
                 if let Err((e, _)) = producer.send(record, Duration::from_secs(5)).await {
                     tracing::error!("не удалось опубликовать первую StageExecuteCommand: {e}");
+                    // Реальная находка при этом рефакторинге (не новая, была
+                    // и в in-memory версии, там просто не откатывалась):
+                    // CAS уже создал состояние с expected=None, но команда не
+                    // опубликована — без отката повторная обработка того же
+                    // incoming.messages увидела бы это состояние как "уже
+                    // активное" и никогда не опубликовала бы первую команду.
+                    // Здесь, раз CAS только что создал ИМЕННО этот ключ с нуля
+                    // (никто другой не мог успеть на него опереться), откат
+                    // безопасен и однозначен.
+                    if let Err(finalize_err) = store.finalize(&state.message_id, &stage_execution_id).await {
+                        tracing::error!("не удалось откатить состояние message_id={} после неудачной публикации: {finalize_err}", state.message_id);
+                    }
                     continue;
                 }
                 if let Err(e) = consumer.commit_message(&msg, rdkafka::consumer::CommitMode::Async) {
@@ -197,12 +220,23 @@ pub async fn run_incoming_loop(
 }
 
 /// Потребляет `stage.completed`, продвигает состояние существующих пайплайнов.
+///
+/// **Известный, не новый пробел** (был и в in-memory версии, здесь не
+/// решается — увеличение объёма правки за пределы `development_plan.md` 4.2):
+/// если CAS-запись новой стадии в Redis проходит успешно, но последующая
+/// публикация `StageExecuteCommand` для НЕЁ проваливается, откатить CAS
+/// небезопасно (в отличие от `run_incoming_loop` — здесь между CAS и
+/// публикацией другая реплика могла уже успеть опереться на новое
+/// состояние), а редоставленное исходное `stage.completed`-событие на
+/// повторной обработке уже не совпадёт с новым `awaiting_stage_execution_id`
+/// и будет проигнорировано как устаревшее — тот же класс пробела, что уже
+/// был в in-memory версии (там мутация в `HashMap` происходила так же
+/// безусловно до публикации), не новый регресс от Redis-переноса.
 pub async fn run_completed_loop(
     consumer: StreamConsumer,
     producer: FutureProducer,
     pipeline: Arc<PipelineDefinition>,
-    store: StateStore,
-    destinations: DestinationStore,
+    store: Arc<RedisStateStore>,
 ) {
     loop {
         match consumer.recv().await {
@@ -213,18 +247,40 @@ pub async fn run_completed_loop(
                     continue;
                 };
 
-                let mut state = match store.lock().unwrap().get(&event.message_id).cloned() {
-                    Some(s) => s,
-                    None => {
-                        tracing::error!("нет ExecutionState для message_id={} (in-memory store, см. README про ограничение)", event.message_id);
+                let mut state = match store.load(&event.message_id).await {
+                    Ok(Some(s)) => s,
+                    Ok(None) => {
+                        tracing::error!("нет ExecutionState в Runtime Redis для message_id={} — либо ещё не создано, либо уже финализировано", event.message_id);
                         continue;
                     }
+                    Err(e) => {
+                        tracing::error!("не удалось прочитать ExecutionState для message_id={}: {e}", event.message_id);
+                        continue; // не коммитим — переобработается
+                    }
                 };
-                let destination_address = destinations.lock().unwrap().get(&event.message_id).cloned().unwrap_or_default();
+                let expected_before = state.awaiting_stage_execution_id.clone();
+                let destination_address = state.destination_address.clone();
 
                 match advance(&mut state, &pipeline, &event, &destination_address) {
                     Ok(AdvanceOutcome::Next(topic, command)) => {
-                        store.lock().unwrap().insert(state.message_id.clone(), state);
+                        state.deadline_ms = now_ms() + DEFAULT_STAGE_TIMEOUT_MS;
+                        match store.cas_advance(expected_before.as_deref(), expected_before.as_deref(), &state).await {
+                            Ok(CasOutcome::Ok) => {}
+                            Ok(CasOutcome::Conflict { actual_awaiting }) => {
+                                tracing::warn!(
+                                    "CAS-конфликт при продвижении message_id={}: ожидали awaiting={:?}, реально={actual_awaiting} — другая реплика уже продвинула это состояние, событие проигнорировано",
+                                    event.message_id, expected_before
+                                );
+                                if let Err(e) = consumer.commit_message(&msg, rdkafka::consumer::CommitMode::Async) {
+                                    tracing::error!("не удалось закоммитить offset (stage.completed, CAS-конфликт): {e}");
+                                }
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::error!("не удалось атомарно записать новое состояние для message_id={}: {e}", event.message_id);
+                                continue; // не коммитим — переобработается
+                            }
+                        }
                         let bytes = command.encode_to_vec();
                         let record = FutureRecord::to(&topic).key(&command.message_id).payload(&bytes);
                         if let Err((e, _)) = producer.send(record, Duration::from_secs(5)).await {
@@ -233,9 +289,11 @@ pub async fn run_completed_loop(
                         }
                     }
                     Ok(AdvanceOutcome::Terminal) => {
-                        // finalize_pipeline — освобождение состояния (TTL в проде, здесь — немедленно).
-                        store.lock().unwrap().remove(&event.message_id);
-                        destinations.lock().unwrap().remove(&event.message_id);
+                        let expected = expected_before.as_deref().unwrap_or("");
+                        if let Err(e) = store.finalize(&event.message_id, expected).await {
+                            tracing::error!("не удалось финализировать message_id={}: {e}", event.message_id);
+                            continue; // не коммитим — переобработается
+                        }
                     }
                     Ok(AdvanceOutcome::Ignored) => {
                         // Устаревшее/дублирующееся событие — состояние не трогаем, просто коммитим offset ниже.
