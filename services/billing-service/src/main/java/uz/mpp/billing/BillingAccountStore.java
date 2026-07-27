@@ -1,7 +1,7 @@
 package uz.mpp.billing;
 
 import io.lettuce.core.RedisClient;
-import io.lettuce.core.TransactionResult;
+import io.lettuce.core.ScriptOutputType;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.sync.RedisCommands;
 import uz.mpp.billing.BillingAccountState.Account;
@@ -9,38 +9,32 @@ import uz.mpp.billing.BillingAccountState.AccountState;
 import uz.mpp.billing.BillingAccountState.ChargeOutcome;
 import uz.mpp.billing.BillingAccountState.ChargeResult;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 /**
  * Billing Redis — {@code check_account_state}/{@code apply_atomic_charge}
- * (service_internal_methods.md §1.6).
+ * (service_internal_methods.md §1.6, development_plan.md 4.2).
  *
- * <p><b>Известное ограничение, сужено кодревью — исправлено, не только
- * задокументировано.</b> Первая версия делала read-then-write двумя
- * независимыми {@code fetch()}/{@code save()} вызовами — реальный TOCTOU race
- * между двумя репликами Billing Service: обычные ACTIVE-списания НЕ двигают
- * {@code epoch} (только freeze/unfreeze), значит epoch fencing НЕ защищает от
- * двух конкурентных charge к одному {@code account_id} — обе реплики читают
- * один и тот же баланс, обе проходят проверку, {@code save()} — plain
- * {@code hset}, не CAS, вторая запись затирает первую без следа (списание
- * теряется молча, charge_id никогда не попадает в processedChargeIds).
- *
- * <p>Настоящий production-фикс — один атомарный Lua/Redis Function
- * (development_plan.md 4.2, ещё не написан). До него — {@link #applyChargeAtomically}
- * использует Redis {@code WATCH}/{@code MULTI}/{@code EXEC} (оптимистичная
- * блокировка на стороне клиента Lettuce): если ключ счёta изменился между
- * {@code WATCH} и {@code EXEC} (та самая гонка), транзакция откатывается
- * ({@code EXEC} возвращает discarded), и попытка повторяется — race
- * обнаруживается и разрешается повтором, а не тихо проигрывается. Это не
- * полная замена Lua-скрипта (тот убирает round-trip'ы и сетевой race
- * WATCH-to-MULTI полностью), но устраняет именно ту потерю данных, на
- * которую указало кодревью.
+ * <p><b>Реальный production-фикс, не оптимистичная блокировка.</b> Первая
+ * версия этого класса делала read-then-write (реальный TOCTOU race, найдено
+ * кодревью), вторая — WATCH/MULTI/EXEC (обнаруживает гонку и повторяет,
+ * задокументировано в истории коммитов). Эта версия — настоящий атомарный
+ * Lua-скрипт ({@code apply_atomic_charge.lua}, ресурс classpath), 1:1 порт
+ * {@link BillingAccountState#applyCharge} — вся проверка/списание выполняется
+ * Redis'ом как один неделимый шаг на стороне сервера, конкурентная запись с
+ * другой реплики физически не может вклиниться между чтением и записью (не
+ * "race обнаруживается и разрешается повтором", а "race невозможен
+ * структурно") — убирает и сетевой round-trip WATCH-to-MULTI, и сам retry-цикл.
  */
 public final class BillingAccountStore {
 
-    private static final int MAX_RETRIES = 5;
+    private static final String SCRIPT = loadScript();
 
     private final RedisClient client;
 
@@ -52,12 +46,26 @@ public final class BillingAccountStore {
         client.shutdown();
     }
 
+    private static String loadScript() {
+        try (InputStream in = BillingAccountStore.class.getClassLoader().getResourceAsStream("apply_atomic_charge.lua")) {
+            if (in == null) {
+                throw new IllegalStateException("apply_atomic_charge.lua не найден в classpath");
+            }
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new UncheckedIOException("не удалось прочитать apply_atomic_charge.lua", e);
+        }
+    }
+
     /**
      * Read-only просмотр состояния — используется вызывающей стороной только
      * чтобы определить {@code expectedEpoch} перед вызовом
      * {@link #applyChargeAtomically}. Сам по себе не защищает от гонки (это
-     * всего лишь чтение) — атомарность обеспечивает WATCH/MULTI/EXEC внутри
-     * {@link #applyChargeAtomically}, не этот метод.
+     * всего лишь чтение) — атомарность обеспечивает Lua-скрипт внутри
+     * {@link #applyChargeAtomically}, не этот метод: между этим чтением и
+     * вызовом {@link #applyChargeAtomically} epoch/баланс могут измениться,
+     * для этого и существует сам {@code expectedEpoch}-параметр (STALE_EPOCH
+     * отклонит устаревший вызов).
      */
     public Account peek(String accountId) {
         try (StatefulRedisConnection<String, String> connection = client.connect()) {
@@ -66,37 +74,48 @@ public final class BillingAccountStore {
     }
 
     /**
-     * Атомарно (WATCH/MULTI/EXEC) читает счёт, применяет {@link BillingAccountState#applyCharge},
-     * и если исход {@code APPLIED} — записывает результат в той же транзакции.
-     * При обнаруженной гонке (конкурентная запись между WATCH и EXEC) —
-     * повторяет попытку до {@value #MAX_RETRIES} раз.
+     * Один атомарный Lua-вызов — {@code apply_atomic_charge.lua}, тот же
+     * порядок проверок (charge_id dedup -> account_epoch -> account_state),
+     * что {@link BillingAccountState#applyCharge}, который этот скрипт
+     * обязан воспроизводить один-в-один (доказано
+     * {@code BillingAccountStoreTest} против живого Redis).
      */
+    @SuppressWarnings("unchecked")
     public ChargeResult applyChargeAtomically(String accountId, String chargeId, long amount, long expectedEpoch) {
         String key = "billing:account:" + accountId;
         try (StatefulRedisConnection<String, String> connection = client.connect()) {
             RedisCommands<String, String> commands = connection.sync();
-            for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
-                commands.watch(key);
-                Account current = readAccount(commands, key);
-                ChargeResult result = BillingAccountState.applyCharge(current, chargeId, amount, expectedEpoch);
+            List<Object> result = (List<Object>) commands.eval(
+                SCRIPT, ScriptOutputType.MULTI, new String[] {key}, chargeId, String.valueOf(amount), String.valueOf(expectedEpoch));
 
-                if (result.outcome() != ChargeOutcome.APPLIED) {
-                    commands.unwatch();
-                    return result; // ALREADY_PROCESSED/ACCOUNT_FROZEN/STALE_EPOCH — ничего не пишем
-                }
+            String outcomeName = (String) result.get(0);
+            long balance = Long.parseLong((String) result.get(1));
+            AccountState state = AccountState.valueOf((String) result.get(2));
+            long epoch = Long.parseLong((String) result.get(3));
 
-                commands.multi();
-                writeAccount(commands, key, result.account());
-                TransactionResult execResult = commands.exec();
-                if (!execResult.wasDiscarded()) {
-                    return result; // успешно закоммичено
-                }
-                // WATCH обнаружил конкурентное изменение ключа между WATCH и EXEC — повтор.
-            }
+            ChargeOutcome outcome = ChargeOutcome.valueOf(outcomeName);
+            Set<String> processedChargeIds = outcome == ChargeOutcome.APPLIED
+                ? peekProcessedChargeIds(commands, key)
+                : Set.of();
+            Account account = new Account(balance, state, epoch, processedChargeIds);
+            return new ChargeResult(account, outcome);
         }
-        throw new IllegalStateException(
-            "не удалось применить charge после " + MAX_RETRIES + " попыток — высокая конкуренция за account_id=" + accountId
-                + " (WATCH/MULTI/EXEC retry limit exceeded, не Lua — см. javadoc класса)");
+    }
+
+    /**
+     * Только для заполнения {@link Account#processedChargeIds()} в
+     * возвращаемом результате (вызывающая сторона нигде не читает этот
+     * набор из результата напрямую в проде — используется только в тестах
+     * для проверки, что charge_id реально добавлен); отдельный HGET, не
+     * часть атомарности — набор уже гарантированно обновлён Lua-скриптом
+     * до этого чтения.
+     */
+    private Set<String> peekProcessedChargeIds(RedisCommands<String, String> commands, String key) {
+        String raw = commands.hget(key, "processed_charge_ids");
+        if (raw == null || raw.isEmpty()) {
+            return Set.of();
+        }
+        return Set.of(raw.split(","));
     }
 
     private Account readAccount(RedisCommands<String, String> commands, String key) {
@@ -111,14 +130,5 @@ public final class BillingAccountStore {
             ? Set.of(fields.get("processed_charge_ids").split(","))
             : Set.of();
         return new Account(balance, state, epoch, processedChargeIds);
-    }
-
-    private void writeAccount(RedisCommands<String, String> commands, String key, Account account) {
-        commands.hset(key, Map.of(
-            "state", account.state().name(),
-            "balance", String.valueOf(account.balance()),
-            "epoch", String.valueOf(account.epoch()),
-            "processed_charge_ids", account.processedChargeIds().stream().collect(Collectors.joining(","))
-        ));
     }
 }
