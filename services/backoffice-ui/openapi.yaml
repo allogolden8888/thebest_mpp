@@ -1,0 +1,348 @@
+openapi: 3.0.3
+info:
+  title: Backoffice API
+  version: "1.0.0"
+  description: >
+    Ручно составленная спецификация, отражающая реальные маршруты
+    services/backoffice-api/internal/httpapi (service_internal_methods.md
+    §7.3). У Backoffice API нет собственного генератора OpenAPI (Go chi не
+    генерирует спецификацию автоматически) — этот файл поддерживается
+    вручную и должен обновляться при изменении маршрутов backoffice-api.
+    Backoffice UI генерирует TypeScript-типы из этого файла
+    (`npm run generate:api`, openapi-typescript) — services_specifictaion.md
+    §8.5 "OpenAPI-generated client".
+servers:
+  - url: /v1
+security:
+  - bearerAuth: []
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    ConfigVersion:
+      type: object
+      required: [entity_type, entity_id, version, status]
+      properties:
+        entity_type: { type: string }
+        entity_id: { type: string }
+        version: { type: integer, format: int64 }
+        status: { type: string }
+        created_at: { type: string, format: date-time }
+    CreateVersionRequest:
+      type: object
+      required: [entity_type, entity_id, payload_json]
+      properties:
+        entity_type: { type: string }
+        entity_id: { type: string }
+        payload_json: {}
+    ArchiveVersionRequest:
+      type: object
+      required: [entity_type, entity_id, version]
+      properties:
+        entity_type: { type: string }
+        entity_id: { type: string }
+        version: { type: integer, format: int64 }
+    ListVersionsResponse:
+      type: object
+      required: [versions, next_page_token]
+      properties:
+        versions:
+          type: array
+          items: { $ref: "#/components/schemas/ConfigVersion" }
+        next_page_token: { type: string }
+    ApplyOverrideRequest:
+      type: object
+      required: [scope, scope_id, state, admission_rate, reason]
+      properties:
+        scope: { type: string }
+        scope_id: { type: string }
+        state: { type: string }
+        admission_rate: { type: number }
+        reason: { type: string }
+        expires_at: { type: string, format: date-time }
+    ClearOverrideRequest:
+      type: object
+      required: [scope, scope_id]
+      properties:
+        scope: { type: string }
+        scope_id: { type: string }
+    OverrideResponse:
+      type: object
+      required: [version]
+      properties:
+        version: { type: integer, format: int64 }
+        applied_at: { type: string, format: date-time }
+    ForceSchedulerCommandRequest:
+      type: object
+      required: [stage_execution_id, task_type]
+      properties:
+        stage_execution_id: { type: string }
+        task_type:
+          type: string
+          enum: [CRITICAL_COMMAND_TYPE_FORCE_TIMEOUT, CRITICAL_COMMAND_TYPE_FORCE_RETRY]
+        reason: { type: string }
+    ForceSchedulerCommandResponse:
+      type: object
+      required: [accepted]
+      properties:
+        accepted: { type: boolean }
+    DlqRecord:
+      type: object
+      required: [stage_execution_id, message_id, stage_name, attempt, reason_code, created_at, replay_status]
+      properties:
+        stage_execution_id: { type: string }
+        message_id: { type: string }
+        stage_name: { type: string }
+        attempt: { type: integer }
+        reason_code: { type: string }
+        error_detail: { type: string }
+        created_at: { type: string, format: date-time }
+        replay_status: { type: string, enum: [pending, replayed, expired] }
+    DlqRecordsResponse:
+      type: object
+      required: [records]
+      properties:
+        records:
+          type: array
+          items: { $ref: "#/components/schemas/DlqRecord" }
+    ReplayRequest:
+      type: object
+      required: [stage_execution_id]
+      properties:
+        stage_execution_id: { type: string }
+    ReplayResponse:
+      type: object
+      required: [accepted]
+      properties:
+        accepted: { type: boolean }
+        rejection_reason: { type: string }
+    ReconciliationCase:
+      type: object
+      required: [case_id, message_id, stage_execution_id, operator_id, status, opened_at, deadline_at]
+      properties:
+        case_id: { type: string }
+        message_id: { type: string }
+        stage_execution_id: { type: string }
+        operator_id: { type: string }
+        status: { type: string, enum: [open, resolved, unresolved] }
+        opened_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time }
+        deadline_at: { type: string, format: date-time }
+    ReconciliationCasesResponse:
+      type: object
+      required: [cases]
+      properties:
+        cases:
+          type: array
+          items: { $ref: "#/components/schemas/ReconciliationCase" }
+    ReportRow:
+      type: object
+      required: [hour, partner_id, stage_name, outcome, event_count]
+      properties:
+        hour: { type: string, format: date-time }
+        partner_id: { type: string }
+        stage_name: { type: string }
+        outcome: { type: string }
+        event_count: { type: integer }
+    ReportResponse:
+      type: object
+      required: [rows]
+      properties:
+        rows:
+          type: array
+          items: { $ref: "#/components/schemas/ReportRow" }
+paths:
+  /config/versions:
+    post:
+      operationId: createConfigVersion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateVersionRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConfigVersion" }
+    get:
+      operationId: listConfigVersions
+      parameters:
+        - name: entity_type
+          in: query
+          required: true
+          schema: { type: string }
+        - name: entity_id
+          in: query
+          required: true
+          schema: { type: string }
+        - name: page_size
+          in: query
+          schema: { type: integer }
+        - name: page_token
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ListVersionsResponse" }
+  /config/versions/active:
+    get:
+      operationId: getActiveConfigVersion
+      parameters:
+        - name: entity_type
+          in: query
+          required: true
+          schema: { type: string }
+        - name: entity_id
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConfigVersion" }
+  /config/versions/archive:
+    post:
+      operationId: archiveConfigVersion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ArchiveVersionRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConfigVersion" }
+  /execution-control/override:
+    post:
+      operationId: applyExecutionControlOverride
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ApplyOverrideRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OverrideResponse" }
+  /execution-control/override/clear:
+    post:
+      operationId: clearExecutionControlOverride
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClearOverrideRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OverrideResponse" }
+  /scheduler/force-command:
+    post:
+      operationId: forceSchedulerCommand
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ForceSchedulerCommandRequest" }
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ForceSchedulerCommandResponse" }
+  /dlq:
+    get:
+      operationId: browseDlq
+      parameters:
+        - name: stage_name
+          in: query
+          schema: { type: string }
+        - name: replay_status
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer }
+        - name: offset
+          in: query
+          schema: { type: integer }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DlqRecordsResponse" }
+  /replay:
+    post:
+      operationId: requestReplay
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReplayRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReplayResponse" }
+  /reconciliation:
+    get:
+      operationId: browseReconciliation
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: operator_id
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer }
+        - name: offset
+          in: query
+          schema: { type: integer }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReconciliationCasesResponse" }
+  /reports:
+    get:
+      operationId: getReport
+      parameters:
+        - name: partner_id
+          in: query
+          schema: { type: string }
+        - name: stage_name
+          in: query
+          schema: { type: string }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReportResponse" }
