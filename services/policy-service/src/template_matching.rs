@@ -97,7 +97,10 @@ pub struct MatchedTemplate {
 pub struct CompiledRuleset {
     templates: HashMap<String, Template>,
     /// Порядок регистрации — та же семантика, что `dict` в Python 3.7+
-    /// (insertion order), от которой зависит `test_multiple_candidates_resolved_deterministically`.
+    /// (insertion order). С `development_plan.md` 4.3 больше не главный
+    /// критерий при неоднозначности (это теперь `specificity()`) — остаётся
+    /// только финальным tie-break'ом, если специфичность двух шаблонов
+    /// совпала в точности (см. `find_match`).
     template_order: Vec<String>,
     tokens_by_template: HashMap<String, Vec<Token>>,
     automaton: Option<AhoCorasick>,
@@ -177,57 +180,104 @@ impl CompiledRuleset {
         }
     }
 
+    /// Проверяет один конкретный шаблон против уже найденных `hits` — вынесено
+    /// отдельно от `find_match` (development_plan.md 4.3), чтобы можно было
+    /// проверить ВСЕ шаблоны и выбрать лучший, не останавливаться на первом
+    /// подошедшем по порядку регистрации.
+    fn check_template(&self, template_id: &str, hits: &HashMap<String, HashMap<usize, Vec<(usize, usize)>>>, text: &str) -> bool {
+        let tokens = &self.tokens_by_template[template_id];
+        let frags = literal_fragments(tokens);
+        if frags.is_empty() {
+            return false;
+        }
+        let Some(positions) = self.candidate_positions(template_id, hits, frags.len()) else { return false };
+
+        let mut frag_cursor = 0usize;
+        let mut prev_end = 0usize;
+        for (tok_idx, tok) in tokens.iter().enumerate() {
+            let Token::Literal(literal) = tok else { continue };
+            if literal.is_empty() {
+                continue;
+            }
+            let (start, end) = positions[frag_cursor];
+            if tok_idx > 0 {
+                if let Token::Placeholder(p) = &tokens[tok_idx - 1] {
+                    let region = &text[prev_end..start];
+                    if !Self::check_placeholder_region(region, p) {
+                        return false;
+                    }
+                }
+            }
+            prev_end = end;
+            frag_cursor += 1;
+        }
+
+        if let Some(Token::Literal(last)) = tokens.last() {
+            if last.is_empty() && tokens.len() > 1 {
+                if let Token::Placeholder(p) = &tokens[tokens.len() - 2] {
+                    let region = &text[prev_end..];
+                    if !Self::check_placeholder_region(region, p) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// `development_plan.md` 4.3 — реальная приоритизация при подлинной
+    /// неоднозначности (несколько шаблонов проходят фазу 2 для одного и того
+    /// же текста), не просто "не падает" (это уже было доказано
+    /// `template_matching.py`/предыдущей версией этого файла). Найдено при
+    /// реализации: до этой правки побеждал первый по порядку РЕГИСТРАЦИИ
+    /// (insertion order) — случайность, не намерение; например `code: %w`
+    /// (общий, принимает что угодно) регистрировался раньше `code: %d{4,4}`
+    /// (специфичный, только 4 цифры), и общий шаблон побеждал специфичный
+    /// для текста `"code: 1234"`, где оба технически проходят.
+    ///
+    /// Правило: `%d{n,m}` строже `%w` (ограничивает и алфавит, и длину, не
+    /// только "непустой непробельный") — специфичность = сумма весов
+    /// плейсхолдеров (Digit=2, Word=1) + суммарная длина литеральных
+    /// фрагментов как вторичный, более слабый критерий (специфичность
+    /// плейсхолдеров решает первой, длина литералов — только для разрыва
+    /// ничьей между шаблонами с одинаковым профилем плейсхолдеров). Порядок
+    /// регистрации остаётся финальным, детерминированным tie-break'ом, если
+    /// оба критерия совпали.
+    fn specificity(tokens: &[Token]) -> (usize, usize) {
+        let placeholder_score: usize = tokens
+            .iter()
+            .filter_map(|t| match t {
+                Token::Placeholder(Placeholder::Digit { .. }) => Some(2),
+                Token::Placeholder(Placeholder::Word) => Some(1),
+                _ => None,
+            })
+            .sum();
+        let literal_len: usize = literal_fragments(tokens).iter().map(|f| f.len()).sum();
+        (placeholder_score, literal_len)
+    }
+
     pub fn find_match(&self, text: &str) -> Option<MatchedTemplate> {
         let hits = self.fragment_hits(text);
 
-        for template_id in &self.template_order {
-            let tokens = &self.tokens_by_template[template_id];
-            let frags = literal_fragments(tokens);
-            if frags.is_empty() {
+        let mut best: Option<(usize, (usize, usize), &String)> = None; // (insertion_idx, specificity, template_id)
+        for (idx, template_id) in self.template_order.iter().enumerate() {
+            if !self.check_template(template_id, &hits, text) {
                 continue;
             }
-            let Some(positions) = self.candidate_positions(template_id, &hits, frags.len()) else { continue };
-
-            let mut ok = true;
-            let mut frag_cursor = 0usize;
-            let mut prev_end = 0usize;
-            for (tok_idx, tok) in tokens.iter().enumerate() {
-                let Token::Literal(literal) = tok else { continue };
-                if literal.is_empty() {
-                    continue;
-                }
-                let (start, end) = positions[frag_cursor];
-                if tok_idx > 0 {
-                    if let Token::Placeholder(p) = &tokens[tok_idx - 1] {
-                        let region = &text[prev_end..start];
-                        if !Self::check_placeholder_region(region, p) {
-                            ok = false;
-                            break;
-                        }
-                    }
-                }
-                prev_end = end;
-                frag_cursor += 1;
-            }
-            if ok {
-                if let Some(Token::Literal(last)) = tokens.last() {
-                    if last.is_empty() && tokens.len() > 1 {
-                        if let Token::Placeholder(p) = &tokens[tokens.len() - 2] {
-                            let region = &text[prev_end..];
-                            if !Self::check_placeholder_region(region, p) {
-                                ok = false;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if ok {
-                let t = &self.templates[template_id];
-                return Some(MatchedTemplate { template_id: t.template_id.clone(), category: t.category.clone() });
+            let score = Self::specificity(&self.tokens_by_template[template_id]);
+            let is_better = match &best {
+                None => true,
+                Some((_, best_score, _)) => score > *best_score, // строго больше — при равенстве побеждает более ранний по insertion order (найден первым)
+            };
+            if is_better {
+                best = Some((idx, score, template_id));
             }
         }
-        None
+
+        best.map(|(_, _, template_id)| {
+            let t = &self.templates[template_id];
+            MatchedTemplate { template_id: t.template_id.clone(), category: t.category.clone() }
+        })
     }
 }
 
@@ -286,11 +336,48 @@ mod tests {
         let tpl_digit = Template { template_id: "tpl-digit".into(), pattern: "code: %d{4,4}".into(), category: "SERVICE".into() };
         let ruleset = CompiledRuleset::new(vec![tpl_word, tpl_digit]);
 
+        // Найдено при реализации 4.3: "code: 1234" технически проходит фазу 2
+        // для ОБОИХ шаблонов ("1234" — непустой непробельный %w, и ровно 4
+        // цифры для %d{4,4}) — это и есть настоящая неоднозначность, не
+        // гипотетическая. `tpl-word` зарегистрирован ПЕРВЫМ (insertion order),
+        // но `tpl-digit` строже (ограничивает и алфавит, и длину) — специфичность
+        // обязана выбрать именно его, не первый по регистрации.
         let result_digit_text = ruleset.find_match("code: 1234");
-        assert!(result_digit_text.is_some());
+        assert_eq!(result_digit_text.unwrap().template_id, "tpl-digit",
+            "более специфичный шаблон (%d{{4,4}}) обязан победить менее специфичный (%w) при реальной неоднозначности");
 
         let result_word_only_text = ruleset.find_match("code: ABCD");
         assert_eq!(result_word_only_text.unwrap().template_id, "tpl-word", "ABCD не цифры — только tpl-word должен пройти");
+    }
+
+    #[test]
+    fn specificity_prefers_digit_over_word_for_same_literal_length() {
+        // Прямая, изолированная проверка specificity() — не через find_match,
+        // чтобы отличить "правило работает" от "правило совпало случайно с
+        // порядком регистрации" (симметричный тест — Word и Digit в
+        // обратном порядке регистрации всё равно должны выбрать Digit).
+        let tpl_word = Template { template_id: "w".into(), pattern: "pin: %w".into(), category: "S".into() };
+        let tpl_digit = Template { template_id: "d".into(), pattern: "pin: %d{4,4}".into(), category: "S".into() };
+        // Регистрируем Digit ПЕРВЫМ на этот раз — если бы побеждал порядок
+        // регистрации, а не специфичность, оба порядка дали бы Digit, и тест
+        // не отличил бы правило от совпадения. Раз оба порядка (этот тест и
+        // предыдущий) дают Digit — специфичность реально решает, не порядок.
+        let ruleset = CompiledRuleset::new(vec![tpl_digit, tpl_word]);
+        let result = ruleset.find_match("pin: 1234");
+        assert_eq!(result.unwrap().template_id, "d");
+    }
+
+    #[test]
+    fn specificity_breaks_ties_by_literal_length_when_placeholder_profile_is_identical() {
+        // Оба шаблона — одиночный %w, оба реально матчат один и тот же текст
+        // (genuine ambiguity: "code " — суффикс "the code ", Aho-Corasick
+        // находит оба литерала в одном тексте) — более длинный, более
+        // специфичный литеральный префикс обязан победить.
+        let short_literal = Template { template_id: "short".into(), pattern: "code %w".into(), category: "S".into() };
+        let long_literal = Template { template_id: "long".into(), pattern: "the code %w".into(), category: "S".into() };
+        let ruleset = CompiledRuleset::new(vec![short_literal, long_literal]);
+        let result = ruleset.find_match("the code 123");
+        assert_eq!(result.unwrap().template_id, "long", "более длинный, более специфичный литеральный контекст должен победить");
     }
 
     #[test]
