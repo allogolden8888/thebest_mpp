@@ -5,8 +5,11 @@ package grpcserver
 
 import (
 	"context"
-	"fmt"
+	"errors"
 
+	"github.com/jackc/pgx/v5"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	commonv1 "mpp/platformcontracts/common/v1"
@@ -103,42 +106,66 @@ func toResponse(v store.ConfigVersion) *grpcv1.ConfigVersionResponse {
 	return resp
 }
 
+// storeErrToStatus — сопоставляет ошибку store/validate с gRPC status code,
+// чтобы вызывающий (Backoffice API) мог различить 400/404/500, не сравнивая
+// текст ошибки строками (было CODE_REVIEW.md finding: "every error path is
+// a bare fmt.Errorf, surfaced as codes.Unknown").
+func storeErrToStatus(err error) error {
+	if err == nil {
+		return nil
+	}
+	var valErr *validate.ValidationError
+	if errors.As(err, &valErr) {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return status.Error(codes.NotFound, err.Error())
+	}
+	return status.Error(codes.Internal, err.Error())
+}
+
 // CreateVersion — validate_config_change + create_immutable_version +
 // write_config_and_outbox.
 func (s *Server) CreateVersion(ctx context.Context, req *grpcv1.CreateVersionRequest) (*grpcv1.ConfigVersionResponse, error) {
 	if req.GetRequestedBy() == "" {
-		return nil, fmt.Errorf("requested_by обязателен")
+		return nil, status.Error(codes.InvalidArgument, "requested_by обязателен")
 	}
 	entityType := entityTypeFromProto(req.GetEntityType())
 	if entityType == "" {
-		return nil, fmt.Errorf("неизвестный entity_type: %v", req.GetEntityType())
+		return nil, status.Errorf(codes.InvalidArgument, "неизвестный entity_type: %v", req.GetEntityType())
 	}
 
 	if err := s.validator.Validate(entityType, req.GetPayloadJson()); err != nil {
-		return nil, fmt.Errorf("validate_config_change: %w", err)
+		return nil, storeErrToStatus(err)
 	}
 
 	version, err := s.store.CreateImmutableVersionAndOutbox(ctx, entityType, req.GetEntityId(), req.GetPayloadJson(), req.GetRequestedBy())
 	if err != nil {
-		return nil, fmt.Errorf("write_config_and_outbox: %w", err)
+		return nil, storeErrToStatus(err)
 	}
 	return toResponse(version), nil
 }
 
 func (s *Server) GetActiveVersion(ctx context.Context, req *grpcv1.GetActiveVersionRequest) (*grpcv1.ConfigVersionResponse, error) {
 	entityType := entityTypeFromProto(req.GetEntityType())
+	if entityType == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "неизвестный entity_type: %v", req.GetEntityType())
+	}
 	version, err := s.store.GetActiveVersion(ctx, entityType, req.GetEntityId())
 	if err != nil {
-		return nil, err
+		return nil, storeErrToStatus(err)
 	}
 	return toResponse(version), nil
 }
 
 func (s *Server) ListVersions(ctx context.Context, req *grpcv1.ListVersionsRequest) (*grpcv1.ListVersionsResponse, error) {
 	entityType := entityTypeFromProto(req.GetEntityType())
+	if entityType == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "неизвестный entity_type: %v", req.GetEntityType())
+	}
 	versions, nextToken, err := s.store.ListVersions(ctx, entityType, req.GetEntityId(), req.GetPageSize(), req.GetPageToken())
 	if err != nil {
-		return nil, err
+		return nil, storeErrToStatus(err)
 	}
 	resp := &grpcv1.ListVersionsResponse{NextPageToken: nextToken}
 	for _, v := range versions {
@@ -149,12 +176,15 @@ func (s *Server) ListVersions(ctx context.Context, req *grpcv1.ListVersionsReque
 
 func (s *Server) ArchiveVersion(ctx context.Context, req *grpcv1.ArchiveVersionRequest) (*grpcv1.ConfigVersionResponse, error) {
 	if req.GetRequestedBy() == "" {
-		return nil, fmt.Errorf("requested_by обязателен")
+		return nil, status.Error(codes.InvalidArgument, "requested_by обязателен")
 	}
 	entityType := entityTypeFromProto(req.GetEntityType())
+	if entityType == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "неизвестный entity_type: %v", req.GetEntityType())
+	}
 	version, err := s.store.ArchiveVersion(ctx, entityType, req.GetEntityId(), int32(req.GetVersion()))
 	if err != nil {
-		return nil, err
+		return nil, storeErrToStatus(err)
 	}
 	return toResponse(version), nil
 }

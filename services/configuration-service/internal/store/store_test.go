@@ -87,6 +87,53 @@ func TestCreateImmutableVersionAndOutboxIncrementsVersion(t *testing.T) {
 	}
 }
 
+// TestConcurrentCreateOnBrandNewEntitySerializesVersions — CODE_REVIEW.md
+// finding: "SELECT ... FOR UPDATE только блокирует уже существующие строки;
+// для совершенно новой сущности (0 строк) ничего не блокируется, и два
+// конкурентных CreateVersion могут оба вычислить nextVersion=1". Проверяет,
+// что pg_advisory_xact_lock(hashtext(entity_type:entity_id)) реально
+// сериализует такие вызовы — N конкурентных Create для одной НОВОЙ сущности
+// должны получить N разных последовательных версий, без коллизии.
+func TestConcurrentCreateOnBrandNewEntitySerializesVersions(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	s := New(pool)
+	ctx := context.Background()
+	entityID := uniqueEntityID("race")
+
+	const n = 10
+	versions := make(chan int32, n)
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			v, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(`{}`), "tester")
+			if err != nil {
+				errs <- err
+				return
+			}
+			versions <- v.Version
+		}()
+	}
+
+	seen := map[int32]bool{}
+	for i := 0; i < n; i++ {
+		select {
+		case err := <-errs:
+			t.Fatalf("concurrent CreateImmutableVersionAndOutbox failed: %v", err)
+		case v := <-versions:
+			if seen[v] {
+				t.Fatalf("версия %d выдана более одного раза — гонка не устранена", v)
+			}
+			seen[v] = true
+		}
+	}
+	for v := int32(1); v <= n; v++ {
+		if !seen[v] {
+			t.Fatalf("версия %d никогда не была выдана: %v", v, seen)
+		}
+	}
+}
+
 func TestPolicyTemplateSkipsConfigVersionsTable(t *testing.T) {
 	pool := testPool(t)
 	defer pool.Close()

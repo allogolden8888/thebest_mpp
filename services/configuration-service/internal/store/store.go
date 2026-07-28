@@ -64,12 +64,23 @@ func (s *Store) CreateImmutableVersionAndOutbox(ctx context.Context, entityType 
 			return nil
 		}
 
+		// pg_advisory_xact_lock сериализует конкурентные CreateImmutableVersion
+		// для одной и той же (entity_type, entity_id) — включая самую первую
+		// версию, когда строк ещё нет и обычный "SELECT ... FOR UPDATE" не может
+		// заблокировать ничего (PostgreSQL к тому же вообще не разрешает FOR
+		// UPDATE вместе с агрегатной функцией MAX() в одном запросе —
+		// предыдущая версия этого кода не компилировалась в рантайме запроса).
+		// Транзакционная advisory-блокировка снимается автоматически на
+		// commit/rollback.
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, string(entityType)+":"+entityID); err != nil {
+			return fmt.Errorf("acquire version lock: %w", err)
+		}
+
 		var nextVersion int32
 		err := tx.QueryRow(ctx, `
 			SELECT COALESCE(MAX(version), 0) + 1
 			FROM config.config_versions
 			WHERE entity_type = $1 AND entity_id = $2
-			FOR UPDATE
 		`, string(entityType), entityID).Scan(&nextVersion)
 		if err != nil {
 			return fmt.Errorf("compute next version: %w", err)

@@ -6,6 +6,7 @@
 package validate
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -75,12 +76,8 @@ func NewValidator() (*Validator, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read embedded schema %s: %w", filename, err)
 		}
-		var doc any
-		if err := json.Unmarshal(raw, &doc); err != nil {
-			return nil, fmt.Errorf("unmarshal schema %s: %w", filename, err)
-		}
 		url := "mem://" + filename
-		if err := compiler.AddResource(url, doc); err != nil {
+		if err := compiler.AddResource(url, bytes.NewReader(raw)); err != nil {
 			return nil, fmt.Errorf("add schema resource %s: %w", filename, err)
 		}
 		schema, err := compiler.Compile(url)

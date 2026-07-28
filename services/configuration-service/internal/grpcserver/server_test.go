@@ -4,6 +4,10 @@ import (
 	"context"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	commonv1 "mpp/platformcontracts/common/v1"
 	grpcv1 "mpp/platformcontracts/grpc/v1"
 
@@ -30,7 +34,7 @@ func (f *fakeStore) CreateImmutableVersionAndOutbox(ctx context.Context, entityT
 func (f *fakeStore) GetActiveVersion(ctx context.Context, entityType validate.EntityType, entityID string) (store.ConfigVersion, error) {
 	v, ok := f.versions[entityID]
 	if !ok {
-		return store.ConfigVersion{}, context.DeadlineExceeded
+		return store.ConfigVersion{}, pgx.ErrNoRows
 	}
 	return v, nil
 }
@@ -144,5 +148,63 @@ func TestGetActiveVersionAfterCreate(t *testing.T) {
 	}
 	if resp.GetEntityId() != "beeline_uz" {
 		t.Fatalf("неверный entity_id: %s", resp.GetEntityId())
+	}
+}
+
+func TestCreateVersionMissingRequestedByReturnsInvalidArgument(t *testing.T) {
+	srv := New(newFakeStore(), alwaysValid{})
+	_, err := srv.CreateVersion(context.Background(), &grpcv1.CreateVersionRequest{
+		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER,
+		EntityId:   "acme",
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("ожидали codes.InvalidArgument, получили %v", status.Code(err))
+	}
+}
+
+func TestCreateVersionUnknownEntityTypeReturnsInvalidArgument(t *testing.T) {
+	srv := New(newFakeStore(), alwaysValid{})
+	_, err := srv.CreateVersion(context.Background(), &grpcv1.CreateVersionRequest{
+		EntityType:  commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_UNSPECIFIED,
+		EntityId:    "acme",
+		RequestedBy: "ops",
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("ожидали codes.InvalidArgument, получили %v", status.Code(err))
+	}
+}
+
+func TestCreateVersionValidationFailureReturnsInvalidArgument(t *testing.T) {
+	srv := New(newFakeStore(), alwaysInvalid{})
+	_, err := srv.CreateVersion(context.Background(), &grpcv1.CreateVersionRequest{
+		EntityType:  commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER,
+		EntityId:    "acme",
+		PayloadJson: []byte(`{}`),
+		RequestedBy: "ops",
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("ожидали codes.InvalidArgument, получили %v", status.Code(err))
+	}
+}
+
+func TestGetActiveVersionNotFoundReturnsNotFound(t *testing.T) {
+	srv := New(newFakeStore(), alwaysValid{})
+	_, err := srv.GetActiveVersion(context.Background(), &grpcv1.GetActiveVersionRequest{
+		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER,
+		EntityId:   "does-not-exist",
+	})
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("ожидали codes.NotFound, получили %v", status.Code(err))
+	}
+}
+
+func TestGetActiveVersionUnknownEntityTypeReturnsInvalidArgument(t *testing.T) {
+	srv := New(newFakeStore(), alwaysValid{})
+	_, err := srv.GetActiveVersion(context.Background(), &grpcv1.GetActiveVersionRequest{
+		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_UNSPECIFIED,
+		EntityId:   "acme",
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("ожидали codes.InvalidArgument, получили %v", status.Code(err))
 	}
 }
