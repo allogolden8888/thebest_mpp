@@ -2,6 +2,8 @@ package grpcserver
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -31,7 +33,7 @@ func newTestServer() (*Server, *fakeAudit) {
 		EnterConfirmationWindowTicks: 3, ExitConfirmationWindowTicks: 5, MinStateDurationTicks: 5,
 	})
 	audit := &fakeAudit{}
-	return New(reg, audit), audit
+	return New(reg, audit, nil), audit
 }
 
 func TestApplyOverrideRejectsMissingRequestedBy(t *testing.T) {
@@ -94,5 +96,90 @@ func TestClearOverrideBumpsVersionAndAuditsAsActive(t *testing.T) {
 	}
 	if len(audit.entries) != 2 || audit.entries[1].State != "ACTIVE" || audit.entries[1].Reason != "override_cleared" {
 		t.Fatalf("ожидали вторую запись аудита ACTIVE/override_cleared, получили %+v", audit.entries)
+	}
+}
+
+func TestApplyOverrideRejectsInvalidAdmissionRate(t *testing.T) {
+	srv, audit := newTestServer()
+	for _, rate := range []float64{-0.1, 1.1, math.NaN(), math.Inf(1)} {
+		_, err := srv.ApplyOverride(context.Background(), &grpcv1.ApplyOverrideRequest{
+			Scope:         commonv1.ExecutionControlScope_EXECUTION_CONTROL_SCOPE_GLOBAL,
+			AdmissionRate: rate,
+			Reason:        "x",
+			RequestedBy:   "ops",
+		})
+		if err == nil {
+			t.Fatalf("ожидали ошибку при admission_rate=%v", rate)
+		}
+	}
+	if len(audit.entries) != 0 {
+		t.Fatalf("невалидный admission_rate не должен доходить до аудита, получили %d записей", len(audit.entries))
+	}
+}
+
+// failingAudit — фейк PersistOverrideAudit, всегда возвращающий ошибку,
+// чтобы проверить, что registry НЕ мутируется, когда аудит падает
+// (CODE_REVIEW.md HIGH finding #2 — раньше registry мутировался до
+// аудита, и вызывающий не мог отличить "не применилось" от "применилось,
+// но не аудировалось").
+type failingAudit struct{}
+
+func (failingAudit) PersistOverrideAudit(ctx context.Context, e store.AuditEntry) (int64, time.Time, error) {
+	return 0, time.Time{}, fmt.Errorf("db unavailable")
+}
+
+func TestApplyOverrideDoesNotMutateRegistryWhenAuditFails(t *testing.T) {
+	reg := registry.New(hysteresis.Thresholds{
+		EnterDegraded: 0.5, ExitDegraded: 0.3, EnterPaused: 0.8, ExitPaused: 0.5,
+		EnterConfirmationWindowTicks: 3, ExitConfirmationWindowTicks: 5, MinStateDurationTicks: 5,
+	})
+	srv := New(reg, failingAudit{}, nil)
+	key := registry.ScopeKey{Scope: hysteresis.ScopeGlobal}
+
+	_, err := srv.ApplyOverride(context.Background(), &grpcv1.ApplyOverrideRequest{
+		Scope:       commonv1.ExecutionControlScope_EXECUTION_CONTROL_SCOPE_GLOBAL,
+		State:       commonv1.ExecutionControlState_EXECUTION_CONTROL_STATE_PAUSED,
+		Reason:      "x",
+		RequestedBy: "ops",
+	})
+	if err == nil {
+		t.Fatalf("ожидали ошибку ApplyOverride при неудачном аудите")
+	}
+
+	eval := reg.Evaluate(key, 0.1, time.Now())
+	if eval.State != hysteresis.StateActive {
+		t.Fatalf("registry не должен был мутировать при неудачном аудите, получили state=%v", eval.State)
+	}
+}
+
+func TestClearOverrideDoesNotMutateRegistryWhenAuditFails(t *testing.T) {
+	reg := registry.New(hysteresis.Thresholds{
+		EnterDegraded: 0.5, ExitDegraded: 0.3, EnterPaused: 0.8, ExitPaused: 0.5,
+		EnterConfirmationWindowTicks: 3, ExitConfirmationWindowTicks: 5, MinStateDurationTicks: 5,
+	})
+	key := registry.ScopeKey{Scope: hysteresis.ScopeGlobal}
+	// Применяем PAUSED override через рабочий аудит-фейк, потом переключаем
+	// сервер на падающий аудит и проверяем, что ClearOverride не откатывает
+	// registry, если аудит недоступен.
+	okAudit := &fakeAudit{}
+	setupSrv := New(reg, okAudit, nil)
+	if _, err := setupSrv.ApplyOverride(context.Background(), &grpcv1.ApplyOverrideRequest{
+		Scope: commonv1.ExecutionControlScope_EXECUTION_CONTROL_SCOPE_GLOBAL, State: commonv1.ExecutionControlState_EXECUTION_CONTROL_STATE_PAUSED,
+		Reason: "x", RequestedBy: "ops",
+	}); err != nil {
+		t.Fatalf("setup ApplyOverride failed: %v", err)
+	}
+
+	srv := New(reg, failingAudit{}, nil)
+	_, err := srv.ClearOverride(context.Background(), &grpcv1.ClearOverrideRequest{
+		Scope: commonv1.ExecutionControlScope_EXECUTION_CONTROL_SCOPE_GLOBAL, RequestedBy: "ops",
+	})
+	if err == nil {
+		t.Fatalf("ожидали ошибку ClearOverride при неудачном аудите")
+	}
+
+	eval := reg.Evaluate(key, 0.1, time.Now())
+	if eval.State != hysteresis.StatePaused {
+		t.Fatalf("ClearOverride не должен был снять override в registry при неудачном аудите, получили state=%v", eval.State)
 	}
 }

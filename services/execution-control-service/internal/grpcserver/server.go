@@ -7,6 +7,7 @@ package grpcserver
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -16,6 +17,7 @@ import (
 	commonv1 "mpp/platformcontracts/common/v1"
 
 	"mpp/execution-control-service/internal/hysteresis"
+	"mpp/execution-control-service/internal/kafkaio"
 	"mpp/execution-control-service/internal/registry"
 	"mpp/execution-control-service/internal/store"
 )
@@ -28,15 +30,37 @@ type AuditPersister interface {
 }
 
 // Server реализует grpcv1.ExecutionControlServiceServer.
+//
+// publisher — CODE_REVIEW.md CRITICAL finding: раньше ApplyOverride/
+// ClearOverride не были связаны с Kafka вообще; единственное место,
+// публикующее в execution.control, был периодический цикл в main.go,
+// который эволюционирует только scope=GLOBAL. Override для PARTNER/STAGE/
+// PARTNER_STAGE/OPERATOR_ROUTE (в частности freeze/unfreeze от Billing
+// Reconciliation, HLD §15.5) применялся в registry и аудировался, но
+// никогда не доходил ни до одного потребителя execution.control. Теперь
+// сервер публикует запись сразу после каждого успешного ApplyOverride/
+// ClearOverride, для любого scope.
 type Server struct {
 	grpcv1.UnimplementedExecutionControlServiceServer
 
-	registry *registry.Registry
-	audit    AuditPersister
+	registry  *registry.Registry
+	audit     AuditPersister
+	publisher *kafkaio.Publisher
 }
 
-func New(reg *registry.Registry, audit AuditPersister) *Server {
-	return &Server{registry: reg, audit: audit}
+func New(reg *registry.Registry, audit AuditPersister, publisher *kafkaio.Publisher) *Server {
+	return &Server{registry: reg, audit: audit, publisher: publisher}
+}
+
+// validAdmissionRate — admission_rate публикуется в ExecutionControlRecord и
+// напрямую управляет реальными решениями admission ниже по потоку;
+// CODE_REVIEW.md finding: раньше принимался любой float64 без границ
+// (отрицательный, >1.0, NaN/Inf). control.execution_control_audit тоже
+// имеет CHECK (admission_rate BETWEEN 0 AND 1), но здесь проверяется явно,
+// чтобы вызывающий получил понятное InvalidArgument, а не сырую ошибку
+// вставки в БД.
+func validAdmissionRate(rate float64) bool {
+	return !math.IsNaN(rate) && !math.IsInf(rate, 0) && rate >= 0 && rate <= 1
 }
 
 func scopeFromProto(s commonv1.ExecutionControlScope) hysteresis.Scope {
@@ -66,10 +90,22 @@ func stateFromProto(s commonv1.ExecutionControlState) hysteresis.State {
 }
 
 // ApplyOverride — apply_manual_override + persist_override_audit
-// (service_internal_methods.md §3.1).
+// (service_internal_methods.md §3.1) + publish_control_record.
+//
+// Порядок операций — audit ПЕРЕД мутацией registry, мутация ПЕРЕД publish:
+// CODE_REVIEW.md HIGH finding — раньше registry мутировался первым, и если
+// PersistOverrideAudit падал, RPC возвращал ошибку, но in-memory состояние
+// уже изменилось (вызывающий не мог отличить "ничего не произошло" от
+// "применилось, но не аудировалось"). PersistOverrideAudit не зависит от
+// версии, которую выдаёт registry.ApplyOverride, так что audit можно
+// выполнить первым без потери информации — если он падает, registry вообще
+// не трогается, откатывать нечего.
 func (s *Server) ApplyOverride(ctx context.Context, req *grpcv1.ApplyOverrideRequest) (*grpcv1.ApplyOverrideResponse, error) {
 	if req.GetRequestedBy() == "" {
 		return nil, fmt.Errorf("requested_by обязателен для аудита override")
+	}
+	if !validAdmissionRate(req.GetAdmissionRate()) {
+		return nil, fmt.Errorf("admission_rate должен быть конечным числом в диапазоне [0,1], получили %v", req.GetAdmissionRate())
 	}
 
 	scope := scopeFromProto(req.GetScope())
@@ -81,14 +117,6 @@ func (s *Server) ApplyOverride(ctx context.Context, req *grpcv1.ApplyOverrideReq
 		t := req.GetExpiresAt().AsTime()
 		expiresAt = &t
 	}
-
-	version, appliedAt := s.registry.ApplyOverride(key, registry.Override{
-		State:         state,
-		AdmissionRate: req.GetAdmissionRate(),
-		Reason:        req.GetReason(),
-		RequestedBy:   req.GetRequestedBy(),
-		ExpiresAt:     expiresAt,
-	})
 
 	if s.audit != nil {
 		if _, _, err := s.audit.PersistOverrideAudit(ctx, store.AuditEntry{
@@ -104,6 +132,21 @@ func (s *Server) ApplyOverride(ctx context.Context, req *grpcv1.ApplyOverrideReq
 		}
 	}
 
+	version, appliedAt := s.registry.ApplyOverride(key, registry.Override{
+		State:         state,
+		AdmissionRate: req.GetAdmissionRate(),
+		Reason:        req.GetReason(),
+		RequestedBy:   req.GetRequestedBy(),
+		ExpiresAt:     expiresAt,
+	})
+
+	if err := s.publish(ctx, key, registry.Evaluation{
+		State: state, AdmissionRate: req.GetAdmissionRate(), DispatchRate: req.GetAdmissionRate(),
+		Reason: req.GetReason(), Version: version, ExpiresAt: expiresAt,
+	}, appliedAt); err != nil {
+		return nil, fmt.Errorf("publish_control_record: %w", err)
+	}
+
 	return &grpcv1.ApplyOverrideResponse{
 		Version:   version,
 		AppliedAt: timestamppb.New(appliedAt),
@@ -112,7 +155,8 @@ func (s *Server) ApplyOverride(ctx context.Context, req *grpcv1.ApplyOverrideReq
 
 // ClearOverride снимает override и аудирует это как отдельную запись
 // (ACTIVE, rate=1.0, reason="override_cleared") — тот же аудит-след, что и
-// применение, симметрично.
+// применение, симметрично. См. ApplyOverride для обоснования порядка
+// audit->registry->publish.
 func (s *Server) ClearOverride(ctx context.Context, req *grpcv1.ClearOverrideRequest) (*grpcv1.ApplyOverrideResponse, error) {
 	if req.GetRequestedBy() == "" {
 		return nil, fmt.Errorf("requested_by обязателен для аудита override")
@@ -120,8 +164,6 @@ func (s *Server) ClearOverride(ctx context.Context, req *grpcv1.ClearOverrideReq
 
 	scope := scopeFromProto(req.GetScope())
 	key := registry.ScopeKey{Scope: scope, ScopeID: req.GetScopeId()}
-
-	version := s.registry.ClearOverride(key)
 	appliedAt := time.Now().UTC()
 
 	if s.audit != nil {
@@ -136,8 +178,27 @@ func (s *Server) ClearOverride(ctx context.Context, req *grpcv1.ClearOverrideReq
 		}
 	}
 
+	version := s.registry.ClearOverride(key)
+
+	if err := s.publish(ctx, key, registry.Evaluation{
+		State: hysteresis.StateActive, AdmissionRate: 1.0, DispatchRate: 1.0,
+		Reason: "override_cleared", Version: version,
+	}, appliedAt); err != nil {
+		return nil, fmt.Errorf("publish_control_record: %w", err)
+	}
+
 	return &grpcv1.ApplyOverrideResponse{
 		Version:   version,
 		AppliedAt: timestamppb.New(appliedAt),
 	}, nil
+}
+
+// publish — сборка + отправка ExecutionControlRecord. publisher может быть
+// nil в тестах, которые не проверяют Kafka-путь отдельно.
+func (s *Server) publish(ctx context.Context, key registry.ScopeKey, eval registry.Evaluation, now time.Time) error {
+	if s.publisher == nil {
+		return nil
+	}
+	rec := kafkaio.BuildControlRecord(key, eval, now)
+	return s.publisher.Publish(ctx, key, rec)
 }

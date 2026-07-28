@@ -50,11 +50,13 @@ type Evaluation struct {
 }
 
 type scopeEntry struct {
-	loop     *hysteresis.ControlLoop
-	override *Override
-	version  int64
-	tickNo   int
-	rate     float64 // текущий admission/dispatch rate вне override — управляется ramp-логикой в Evaluate
+	loop      *hysteresis.ControlLoop
+	override  *Override
+	version   int64
+	tickNo    int
+	rate      float64 // текущий admission/dispatch rate вне override — управляется ramp-логикой в Evaluate
+	lastState hysteresis.State
+	hasState  bool
 }
 
 // Registry — потокобезопасный держатель scope-состояний.
@@ -115,6 +117,18 @@ func (r *Registry) Evaluate(key ScopeKey, metric float64, now time.Time) Evaluat
 		e.rate = hysteresis.RampSteps[1]
 	case hysteresis.StateActive:
 		e.rate = hysteresis.ComputeRampStep(state, e.rate)
+	}
+
+	// version инкрементируется на каждый реальный переход состояния — иначе
+	// scope без истории manual override навсегда несёт version=0 в
+	// публикуемых записях, даже когда состояние легитимно меняется
+	// ACTIVE->DEGRADED->PAUSED->... (CODE_REVIEW.md finding: консьюмер,
+	// доверяющий version, а не сырому порядку Kafka-офсетов, никогда не
+	// увидит изменение).
+	if !e.hasState || e.lastState != state {
+		e.version++
+		e.hasState = true
+		e.lastState = state
 	}
 
 	return Evaluation{

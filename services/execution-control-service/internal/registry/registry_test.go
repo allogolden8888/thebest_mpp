@@ -111,6 +111,33 @@ func TestClearOverrideRestoresMetricDrivenEvaluation(t *testing.T) {
 	}
 }
 
+func TestVersionIncrementsOnMetricDrivenStateTransition(t *testing.T) {
+	r := New(testThresholds)
+	key := ScopeKey{Scope: hysteresis.ScopePartner, ScopeID: "acme"}
+	now := time.Now()
+
+	first := r.Evaluate(key, 0.1, now)
+	if first.Version != 1 {
+		t.Fatalf("ожидали версию 1 на первом evaluate (ACTIVE), получили %d", first.Version)
+	}
+
+	var last Evaluation
+	for i := 0; i < 5; i++ {
+		last = r.Evaluate(key, 0.6, now)
+	}
+	if last.State != hysteresis.StateDegraded {
+		t.Fatalf("setup: ожидали DEGRADED после устойчивой деградации, получили %v", last.State)
+	}
+	if last.Version <= first.Version {
+		t.Fatalf("ожидали рост версии при переходе ACTIVE->DEGRADED, было %d стало %d", first.Version, last.Version)
+	}
+
+	stable := r.Evaluate(key, 0.6, now)
+	if stable.Version != last.Version {
+		t.Fatalf("версия не должна расти при повторном evaluate без смены состояния: было %d, стало %d", last.Version, stable.Version)
+	}
+}
+
 func TestScopesAreIndependent(t *testing.T) {
 	r := New(testThresholds)
 	partnerKey := ScopeKey{Scope: hysteresis.ScopePartner, ScopeID: "acme"}

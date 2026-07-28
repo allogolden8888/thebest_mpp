@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -88,6 +89,16 @@ func runGlobalControlLoop(ctx context.Context, reg *registry.Registry, prom *sig
 				log.Printf("collect_signals: prometheus query failed: %v", err)
 				continue
 			}
+			if math.IsNaN(sig.Value) || math.IsInf(sig.Value, 0) {
+				// CODE_REVIEW.md MEDIUM finding: 0/0 (низкий/нулевой трафик)
+				// легитимно даёт NaN на этот запрос; без явной проверки
+				// сравнения в гистерезисе с NaN всегда false, поэтому scope,
+				// застрявший в PAUSED в тихий период, никогда не подтвердит
+				// восстановление, и это никак не логируется. Пропускаем тик
+				// вместо того, чтобы подавать гистерезису мусорное значение.
+				log.Printf("collect_signals: global_error_rate вернул нечисловое значение (%v), пропускаем тик", sig.Value)
+				continue
+			}
 
 			eval := reg.Evaluate(key, sig.Value, now)
 			rec := kafkaio.BuildControlRecord(key, eval, now)
@@ -122,8 +133,20 @@ func main() {
 
 	reg := registry.New(defaultThresholds)
 
+	brokers := strings.Split(env("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap.mpp.svc:9092"), ",")
+	publisher, err := kafkaio.NewPublisher(brokers)
+	if err != nil {
+		log.Fatalf("не удалось создать Kafka producer: %v", err)
+	}
+	defer publisher.Close()
+
+	// publisher передаётся в gRPC-сервер, чтобы ApplyOverride/ClearOverride
+	// публиковали ExecutionControlRecord для ЛЮБОГО scope, а не только
+	// GLOBAL через runGlobalControlLoop (CODE_REVIEW.md CRITICAL finding —
+	// freeze/unfreeze для PARTNER_STAGE от Billing Reconciliation раньше
+	// никогда не доходил до Kafka).
 	grpcServer := grpc.NewServer()
-	grpcv1.RegisterExecutionControlServiceServer(grpcServer, grpcserver.New(reg, audit))
+	grpcv1.RegisterExecutionControlServiceServer(grpcServer, grpcserver.New(reg, audit, publisher))
 
 	lis, err := net.Listen("tcp", ":9000")
 	if err != nil {
@@ -137,13 +160,6 @@ func main() {
 	}()
 
 	promClient := signals.NewClient(env("PROMETHEUS_URL", "http://prometheus-operated.mpp.svc:9090"))
-
-	brokers := strings.Split(env("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap.mpp.svc:9092"), ",")
-	publisher, err := kafkaio.NewPublisher(brokers)
-	if err != nil {
-		log.Fatalf("не удалось создать Kafka producer: %v", err)
-	}
-	defer publisher.Close()
 
 	loopCtx, loopCancel := context.WithCancel(context.Background())
 	defer loopCancel()
