@@ -57,6 +57,12 @@ func NewPostgres(pool *pgxpool.Pool) *Postgres {
 	return &Postgres{pool: pool}
 }
 
+// Ping — используется /readyz (CODE_REVIEW.md MEDIUM finding), не запросами
+// приложения.
+func (p *Postgres) Ping(ctx context.Context) error {
+	return p.pool.Ping(ctx)
+}
+
 func clampLimit(limit int) int {
 	if limit <= 0 || limit > 200 {
 		return 50
@@ -94,8 +100,12 @@ func (p *Postgres) DlqBrowse(ctx context.Context, filter DlqFilter) ([]DlqRecord
 	var results []DlqRecord
 	for rows.Next() {
 		var r DlqRecord
-		if err := rows.Scan(&r.StageExecutionID, &r.MessageID, &r.StageName, &r.Attempt, &r.ReasonCode, &r.ErrorDetail, &r.CreatedAt, &r.ReplayStatus); err != nil {
+		var errorDetail *string // migrations/V006__dlq_record.sql: error_detail TEXT, nullable
+		if err := rows.Scan(&r.StageExecutionID, &r.MessageID, &r.StageName, &r.Attempt, &r.ReasonCode, &errorDetail, &r.CreatedAt, &r.ReplayStatus); err != nil {
 			return nil, fmt.Errorf("dlq_browse scan: %w", err)
+		}
+		if errorDetail != nil {
+			r.ErrorDetail = *errorDetail
 		}
 		results = append(results, r)
 	}

@@ -56,7 +56,7 @@ func handleConfigCreateVersion(client grpcv1.ConfigServiceClient) http.HandlerFu
 			RequestedBy: claims.Subject,
 		})
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			internalError(w, http.StatusBadGateway, "config_create_version: gRPC-вызов Configuration Service не удался", err)
 			return
 		}
 
@@ -79,7 +79,7 @@ func handleConfigGetActiveVersion(client grpcv1.ConfigServiceClient) http.Handle
 			EntityId:   q.Get("entity_id"),
 		})
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			internalError(w, http.StatusBadGateway, "config_get_active_version: gRPC-вызов Configuration Service не удался", err)
 			return
 		}
 		writeConfigVersionResponse(w, resp)
@@ -113,7 +113,7 @@ func handleConfigListVersions(client grpcv1.ConfigServiceClient) http.HandlerFun
 			PageToken:  q.Get("page_token"),
 		})
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			internalError(w, http.StatusBadGateway, "config_list_versions: gRPC-вызов Configuration Service не удался", err)
 			return
 		}
 
@@ -162,7 +162,7 @@ func handleConfigArchiveVersion(client grpcv1.ConfigServiceClient) http.HandlerF
 			RequestedBy: claims.Subject,
 		})
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			internalError(w, http.StatusBadGateway, "config_archive_version: gRPC-вызов Configuration Service не удался", err)
 			return
 		}
 		writeConfigVersionResponse(w, resp)

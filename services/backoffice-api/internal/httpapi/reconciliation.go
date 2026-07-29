@@ -37,9 +37,9 @@ func handleReconciliationBrowse(pg *store.Postgres) http.HandlerFunc {
 			filter.Limit = n
 		}
 		if offset := q.Get("offset"); offset != "" {
-			n, err := strconv.Atoi(offset)
-			if err != nil {
-				http.Error(w, "неверный offset", http.StatusBadRequest)
+			n, ok := parseNonNegativeInt(offset)
+			if !ok {
+				http.Error(w, "неверный offset: ожидалось неотрицательное целое", http.StatusBadRequest)
 				return
 			}
 			filter.Offset = n
@@ -47,7 +47,7 @@ func handleReconciliationBrowse(pg *store.Postgres) http.HandlerFunc {
 
 		rows, err := pg.ReconciliationBrowse(r.Context(), filter)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			internalError(w, http.StatusInternalServerError, "reconciliation_browse: ошибка чтения из PostgreSQL", err)
 			return
 		}
 

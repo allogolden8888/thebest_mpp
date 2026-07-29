@@ -34,6 +34,12 @@ func NewPublisher(brokers []string) (*Publisher, error) {
 
 func (p *Publisher) Close() { p.client.Close() }
 
+// Ping — используется /readyz для реальной проверки доступности брокеров
+// (CODE_REVIEW.md MEDIUM finding), не для публикации.
+func (p *Publisher) Ping(ctx context.Context) error {
+	return p.client.Ping(ctx)
+}
+
 // BuildCriticalCommand — чистая функция: HTTP-вход -> protobuf-событие.
 // taskType ограничен разрешённым списком (FORCE_TIMEOUT/FORCE_RETRY) —
 // защита от использования Scheduler как открытого редиректа внутри Kafka

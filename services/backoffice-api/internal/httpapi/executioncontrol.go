@@ -67,6 +67,14 @@ func handleExecutionControlApplyOverride(client grpcv1.ExecutionControlServiceCl
 			return
 		}
 
+		// CODE_REVIEW.md MEDIUM finding: деструктивная операция (например
+		// GLOBAL/PAUSED — остановка всей обработки трафика платформы) не
+		// должна проходить с пустым audit-обоснованием.
+		if body.Reason == "" {
+			http.Error(w, "reason обязателен для execution-control override", http.StatusBadRequest)
+			return
+		}
+
 		req := &grpcv1.ApplyOverrideRequest{
 			Scope:         scope,
 			ScopeId:       body.ScopeID,
@@ -86,7 +94,7 @@ func handleExecutionControlApplyOverride(client grpcv1.ExecutionControlServiceCl
 
 		resp, err := client.ApplyOverride(r.Context(), req)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			internalError(w, http.StatusBadGateway, "execution_control_apply_override: gRPC-вызов Execution Control Service не удался", err)
 			return
 		}
 		writeOverrideResponse(w, resp)
@@ -124,7 +132,7 @@ func handleExecutionControlClearOverride(client grpcv1.ExecutionControlServiceCl
 			RequestedBy: claims.Subject,
 		})
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			internalError(w, http.StatusBadGateway, "execution_control_clear_override: gRPC-вызов Execution Control Service не удался", err)
 			return
 		}
 		writeOverrideResponse(w, resp)

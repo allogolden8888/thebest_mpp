@@ -29,17 +29,30 @@ import (
 	"mpp/backoffice-api/internal/auth"
 )
 
-func testToken(t *testing.T, key *rsa.PrivateKey, subject string) string {
+func testToken(t *testing.T, key *rsa.PrivateKey, subject string, roles ...string) string {
 	t.Helper()
-	claims := auth.Claims{
+	claims := struct {
+		jwt.RegisteredClaims
+		RealmAccess struct {
+			Roles []string `json:"roles"`
+		} `json:"realm_access"`
+	}{
 		RegisteredClaims: jwt.RegisteredClaims{Subject: subject, ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))},
 	}
+	claims.RealmAccess.Roles = roles
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	signed, err := token.SignedString(key)
 	if err != nil {
 		t.Fatalf("подпись тестового токена failed: %v", err)
 	}
 	return signed
+}
+
+// adminToken — токен с ролью auth.AdminRole, для тестов, использующих
+// деструктивные маршруты (см. auth.RequireRole в router.go).
+func adminToken(t *testing.T, key *rsa.PrivateKey, subject string) string {
+	t.Helper()
+	return testToken(t, key, subject, auth.AdminRole)
 }
 
 // fakeConfigServer — фиксирует последний CreateVersionRequest.RequestedBy,
@@ -131,7 +144,7 @@ func TestHandleConfigCreateVersionUsesRequestedByFromJWT(t *testing.T) {
 	srv := httptest.NewServer(router)
 	defer srv.Close()
 
-	token := testToken(t, key, "ops@mpp")
+	token := adminToken(t, key, "ops@mpp")
 	body := `{"entity_type":"CONFIG_ENTITY_TYPE_PIPELINE","entity_id":"pl-1","payload_json":{"a":1}}`
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/config/versions", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -168,7 +181,7 @@ func TestHandleExecutionControlApplyOverrideEndToEnd(t *testing.T) {
 	srv := httptest.NewServer(router)
 	defer srv.Close()
 
-	token := testToken(t, key, "ops@mpp")
+	token := adminToken(t, key, "ops@mpp")
 	body := `{"scope":"EXECUTION_CONTROL_SCOPE_GLOBAL","scope_id":"","state":"EXECUTION_CONTROL_STATE_PAUSED","admission_rate":0,"reason":"инцидент"}`
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/execution-control/override", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -193,7 +206,7 @@ func TestHandleReplayRequestRejection(t *testing.T) {
 	srv := httptest.NewServer(router)
 	defer srv.Close()
 
-	token := testToken(t, key, "ops@mpp")
+	token := adminToken(t, key, "ops@mpp")
 	body := `{"stage_execution_id":"reject-me"}`
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/replay", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -226,7 +239,7 @@ func TestHandleForceSchedulerCommandRejectsUnknownTaskType(t *testing.T) {
 	srv := httptest.NewServer(router)
 	defer srv.Close()
 
-	token := testToken(t, key, "ops@mpp")
+	token := adminToken(t, key, "ops@mpp")
 	body := `{"stage_execution_id":"abc","task_type":"BOGUS"}`
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/scheduler/force-command", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -237,5 +250,61 @@ func TestHandleForceSchedulerCommandRejectsUnknownTaskType(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("ожидали 400, получили %d", resp.StatusCode)
+	}
+}
+
+// TestNonAdminTokenRejectedOnDestructiveRoutes — CODE_REVIEW.md CRITICAL
+// finding: раньше ЛЮБОЙ валидный токен realm'а (включая read-only
+// support-аккаунт без единой роли) мог поставить платформу на паузу через
+// execution-control override. Проверяем, что токен без роли auth.AdminRole
+// получает 403 на всех деструктивных маршрутах, а read-only browse
+// остаётся доступным.
+func TestNonAdminTokenRejectedOnDestructiveRoutes(t *testing.T) {
+	deps, _ := testDeps(t)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("генерация ключа failed: %v", err)
+	}
+	deps.Validator = auth.NewValidator(&key.PublicKey)
+	router := NewRouter(deps)
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	token := testToken(t, key, "readonly@mpp") // без ролей вообще
+
+	destructive := []struct {
+		method, path, body string
+	}{
+		{http.MethodPost, "/v1/config/versions", `{"entity_type":"CONFIG_ENTITY_TYPE_PIPELINE","entity_id":"pl-1","payload_json":{}}`},
+		{http.MethodPost, "/v1/config/versions/archive", `{"entity_type":"CONFIG_ENTITY_TYPE_PIPELINE","entity_id":"pl-1","version":1}`},
+		{http.MethodPost, "/v1/execution-control/override", `{"scope":"EXECUTION_CONTROL_SCOPE_GLOBAL","state":"EXECUTION_CONTROL_STATE_PAUSED","reason":"x"}`},
+		{http.MethodPost, "/v1/execution-control/override/clear", `{"scope":"EXECUTION_CONTROL_SCOPE_GLOBAL"}`},
+		{http.MethodPost, "/v1/scheduler/force-command", `{"stage_execution_id":"abc","task_type":"CRITICAL_COMMAND_TYPE_FORCE_RETRY","reason":"x"}`},
+		{http.MethodPost, "/v1/replay", `{"stage_execution_id":"abc"}`},
+	}
+
+	for _, tc := range destructive {
+		req, _ := http.NewRequest(tc.method, srv.URL+tc.path, strings.NewReader(tc.body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: request failed: %v", tc.method, tc.path, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s %s: ожидали 403 без роли backoffice-admin, получили %d", tc.method, tc.path, resp.StatusCode)
+		}
+	}
+
+	// Read-only маршрут должен остаться доступным без AdminRole.
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/config/versions?entity_type=CONFIG_ENTITY_TYPE_PIPELINE&entity_id=pl-1", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("read-only request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusForbidden {
+		t.Fatalf("read-only маршрут не должен требовать AdminRole, получили 403")
 	}
 }

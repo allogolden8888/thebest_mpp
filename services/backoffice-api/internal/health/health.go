@@ -4,12 +4,16 @@
 package health
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"sync/atomic"
+	"time"
 )
 
 type State struct {
-	ready atomic.Bool
+	ready  atomic.Bool
+	checks map[string]func(context.Context) error
 }
 
 func (s *State) SetReady(v bool) {
@@ -18,6 +22,16 @@ func (s *State) SetReady(v bool) {
 
 func (s *State) Ready() bool {
 	return s.ready.Load()
+}
+
+// SetDependencyChecks регистрирует реальные health-check функции для
+// внешних зависимостей (Postgres/ClickHouse/Kafka/gRPC-бэкенды).
+// CODE_REVIEW.md MEDIUM finding: /readyz раньше был статическим флагом,
+// выставленным один раз при старте, и никогда не отражал реальное
+// состояние зависимостей — под мог оставаться "ready" и получать трафик,
+// даже если, например, соединение с Configuration Service давно оборвалось.
+func (s *State) SetDependencyChecks(checks map[string]func(context.Context) error) {
+	s.checks = checks
 }
 
 func Router(state *State) *http.ServeMux {
@@ -29,13 +43,33 @@ func Router(state *State) *http.ServeMux {
 	})
 
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		if state.Ready() {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("ready"))
+		if !state.Ready() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("not ready"))
 			return
 		}
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte("not ready"))
+
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+
+		failed := map[string]string{}
+		for name, check := range state.checks {
+			if err := check(ctx); err != nil {
+				failed[name] = err.Error()
+			}
+		}
+		if len(failed) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(struct {
+				Ready  bool              `json:"ready"`
+				Failed map[string]string `json:"failed_dependencies"`
+			}{Ready: false, Failed: failed})
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ready"))
 	})
 
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {

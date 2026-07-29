@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 
 	grpcv1 "mpp/platformcontracts/grpc/v1"
@@ -69,6 +70,35 @@ func loadJWTPublicKey() (*rsa.PublicKey, error) {
 		return nil, fmt.Errorf("JWT_PUBLIC_KEY_PEM не является RSA-ключом")
 	}
 	return rsaPub, nil
+}
+
+// dialGRPC — insecure.NewCredentials() здесь НАМЕРЕННО, не пропущенный mTLS
+// (CODE_REVIEW.md отметило это как HIGH — расследовано, тот же false
+// positive, что уже разобран в services/partner-notification-service/internal/notify/grpc_client.go:47-62,
+// см. этот файл за полным обоснованием). Все три адреса ниже — ConfigurationService/
+// ExecutionControlService/ReplayService — резолвятся как `*.mpp.svc:9000`,
+// то есть in-namespace: namespace `mpp` целиком помечен
+// `istio-injection: enabled` (k8s/generate_manifests.py), и
+// `infra/istio/peer-authentication-strict.yaml` держит режим STRICT — Envoy
+// sidecar каждого пода прозрачно поднимает mTLS между собой, приложение
+// видит только localhost-плейнтекст до своего sidecar. Добавление TLS
+// здесь поверх mesh было бы double-mTLS без документированного источника
+// certs/CA на уровне приложения.
+// grpcConnCheck — /readyz dependency check для gRPC-соединения: считает
+// зависимость недоступной только в определённо-нерабочих состояниях
+// (TRANSIENT_FAILURE/SHUTDOWN); IDLE/CONNECTING не блокируют readiness —
+// gRPC ленивое соединение может легитимно простаивать в IDLE между
+// вызовами. Connect(false) лишь читает текущее состояние, не форсирует
+// новую попытку подключения на каждый health-check тик.
+func grpcConnCheck(conn *grpc.ClientConn) func(context.Context) error {
+	return func(ctx context.Context) error {
+		switch state := conn.GetState(); state {
+		case connectivity.TransientFailure, connectivity.Shutdown:
+			return fmt.Errorf("gRPC-соединение %s: %s", conn.Target(), state)
+		default:
+			return nil
+		}
+	}
 }
 
 func dialGRPC(addr string) (*grpc.ClientConn, error) {
@@ -149,7 +179,15 @@ func main() {
 		TracerProvider:   tp,
 	})
 
-	httpSrv := &http.Server{Addr: ":8080", Handler: router}
+	// CODE_REVIEW.md Low finding: без ReadTimeout/WriteTimeout/IdleTimeout
+	// сервер уязвим к slow-client (Slowloris-класс) исчерпанию соединений.
+	httpSrv := &http.Server{
+		Addr:         ":8080",
+		Handler:      router,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
 	go func() {
 		log.Println("HTTP Backoffice API слушает :8080")
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -157,6 +195,14 @@ func main() {
 		}
 	}()
 
+	healthState.SetDependencyChecks(map[string]func(context.Context) error{
+		"postgres":                  pg.Ping,
+		"clickhouse":                ch.Ping,
+		"kafka":                     publisher.Ping,
+		"configuration-service":     grpcConnCheck(configConn),
+		"execution-control-service": grpcConnCheck(execControlConn),
+		"replay-service":            grpcConnCheck(replayConn),
+	})
 	healthState.SetReady(true)
 	log.Println("backoffice-api готов")
 

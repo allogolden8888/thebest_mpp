@@ -52,9 +52,14 @@ func handleForceSchedulerCommand(publisher *kafkaio.Publisher) http.HandlerFunc 
 			return
 		}
 
+		if body.Reason == "" {
+			http.Error(w, "reason обязателен для force scheduler command", http.StatusBadRequest)
+			return
+		}
+
 		cmd := kafkaio.BuildCriticalCommand(body.StageExecutionID, taskType, claims.Subject, body.Reason, time.Now())
 		if err := publisher.PublishCriticalCommand(r.Context(), cmd); err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			internalError(w, http.StatusBadGateway, "force_scheduler_command: публикация в Kafka не удалась", err)
 			return
 		}
 

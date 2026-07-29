@@ -38,7 +38,7 @@ func handleReplayRequest(client grpcv1.ReplayServiceClient) http.HandlerFunc {
 			RequestedBy:      claims.Subject,
 		})
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			internalError(w, http.StatusBadGateway, "replay_request: gRPC-вызов Replay Service не удался", err)
 			return
 		}
 
