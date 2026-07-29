@@ -54,7 +54,7 @@ func handleReportQuery(ch *store.ClickHouse) http.HandlerFunc {
 
 		rows, err := ch.Report(r.Context(), filter)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			internalError(w, http.StatusInternalServerError, "report_query: ошибка чтения из ClickHouse", err)
 			return
 		}
 

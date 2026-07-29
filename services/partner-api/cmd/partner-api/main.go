@@ -99,7 +99,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("не удалось загрузить JWT public key: %v", err)
 	}
-	validator := auth.NewValidator(pubKey)
+	validator := auth.NewValidator(pubKey, env("PARTNER_API_JWT_AUDIENCE", "partner-api"), env("PARTNER_API_JWT_ISSUER", "https://keycloak.mpp.svc/realms/mpp"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	pool, err := pgxpool.New(ctx, buildPostgresDSN())
@@ -126,7 +126,16 @@ func main() {
 
 	router := httpapi.NewRouter(validator, pg, ch, tp)
 
-	httpSrv := &http.Server{Addr: ":8080", Handler: router}
+	// CODE_REVIEW.md Medium finding: без ReadTimeout/WriteTimeout/IdleTimeout
+	// externally-reachable сервер уязвим к slow-client исчерпанию соединений
+	// — более прямо эксплуатируемо здесь, чем на внутренних сервисах.
+	httpSrv := &http.Server{
+		Addr:         ":8080",
+		Handler:      router,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
 	go func() {
 		log.Println("HTTP Partner API слушает :8080")
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -134,6 +143,10 @@ func main() {
 		}
 	}()
 
+	healthState.SetDependencyChecks(map[string]func(context.Context) error{
+		"postgres":   pg.Ping,
+		"clickhouse": ch.Ping,
+	})
 	healthState.SetReady(true)
 	log.Println("partner-api готов")
 

@@ -24,11 +24,24 @@ import (
 	"mpp/partner-api/internal/store"
 )
 
+const (
+	testAudience = "partner-api"
+	testIssuer   = "https://keycloak.mpp.svc/realms/mpp"
+)
+
+func newTestValidator(pubKey *rsa.PublicKey) *auth.Validator {
+	return auth.NewValidator(pubKey, testAudience, testIssuer)
+}
+
 func testToken(t *testing.T, key *rsa.PrivateKey, partnerID string) string {
 	t.Helper()
 	claims := auth.Claims{
-		PartnerID:        partnerID,
-		RegisteredClaims: jwt.RegisteredClaims{ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))},
+		PartnerID: partnerID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			Audience:  jwt.ClaimStrings{testAudience},
+			Issuer:    testIssuer,
+		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	signed, err := token.SignedString(key)
@@ -66,7 +79,7 @@ func TestHandleStatusQueryEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("генерация ключа failed: %v", err)
 	}
-	validator := auth.NewValidator(&key.PublicKey)
+	validator := newTestValidator(&key.PublicKey)
 	tp := sdktrace.NewTracerProvider()
 	defer tp.Shutdown(context.Background())
 
@@ -111,7 +124,7 @@ func TestHandleStatusQueryWithoutAuthReturns401(t *testing.T) {
 	if err != nil {
 		t.Fatalf("генерация ключа failed: %v", err)
 	}
-	validator := auth.NewValidator(&key.PublicKey)
+	validator := newTestValidator(&key.PublicKey)
 	tp := sdktrace.NewTracerProvider()
 	defer tp.Shutdown(context.Background())
 
@@ -138,7 +151,7 @@ func TestHandleStatusQueryMissingParamsReturns400(t *testing.T) {
 	if err != nil {
 		t.Fatalf("генерация ключа failed: %v", err)
 	}
-	validator := auth.NewValidator(&key.PublicKey)
+	validator := newTestValidator(&key.PublicKey)
 	tp := sdktrace.NewTracerProvider()
 	defer tp.Shutdown(context.Background())
 
@@ -168,7 +181,7 @@ func TestHandleSearchQueryEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("генерация ключа failed: %v", err)
 	}
-	validator := auth.NewValidator(&key.PublicKey)
+	validator := newTestValidator(&key.PublicKey)
 	tp := sdktrace.NewTracerProvider()
 	defer tp.Shutdown(context.Background())
 

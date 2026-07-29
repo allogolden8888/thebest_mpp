@@ -22,10 +22,22 @@ type Claims struct {
 
 type Validator struct {
 	publicKey *rsa.PublicKey
+	audience  string
+	issuer    string
 }
 
-func NewValidator(publicKey *rsa.PublicKey) *Validator {
-	return &Validator{publicKey: publicKey}
+// NewValidator — audience/issuer — CODE_REVIEW.md HIGH finding: раньше
+// проверялась только подпись, без `aud`/`iss`. Если тот же Keycloak realm
+// (тот же подписывающий ключ) выпускает токены и для других клиентов,
+// токен, минтированный для другого клиента, но подписанный тем же ключом,
+// раньше принимался здесь — token-confusion/cross-service replay риск.
+// Ни один LLD не фиксирует конкретные значения `aud`/`iss` для Partner API
+// (services_specifictaion.md §8.2 говорит только "JWT / Keycloak
+// validation", без деталей claim'ов) — поэтому оба значения обязательны и
+// настраиваются деплоем (PARTNER_API_JWT_AUDIENCE/PARTNER_API_JWT_ISSUER в
+// main.go), не захардкожены наугад.
+func NewValidator(publicKey *rsa.PublicKey, audience, issuer string) *Validator {
+	return &Validator{publicKey: publicKey, audience: audience, issuer: issuer}
 }
 
 var (
@@ -42,12 +54,16 @@ func (v *Validator) ParseBearer(header string) (*Claims, error) {
 	tokenString := strings.TrimPrefix(header, prefix)
 
 	claims := &Claims{}
+	// CODE_REVIEW.md: WithExpirationRequired — токен без claim exp раньше
+	// принимался как никогда не истекающий (jwt/v5 по умолчанию проверяет
+	// exp, только если он присутствует). WithAudience/WithIssuer — см.
+	// NewValidator.
 	token, err := jwt.ParseWithClaims(tokenString, claims, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
 			return nil, fmt.Errorf("неожидаемый метод подписи: %v", t.Method.Alg())
 		}
 		return v.publicKey, nil
-	})
+	}, jwt.WithExpirationRequired(), jwt.WithAudience(v.audience), jwt.WithIssuer(v.issuer))
 	if err != nil {
 		return nil, fmt.Errorf("проверка токена не пройдена: %w", err)
 	}

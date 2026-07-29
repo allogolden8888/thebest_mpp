@@ -2,7 +2,15 @@
 
 **Основание:** `development_plan.md` — Субагент 1. Реализует `service_internal_methods.md` §7.2 целиком: `handle_status_query`, `handle_search_query`, `handle_report_query`. HTTP-only (`external_port=8080`, `k8s/generate_manifests.py`), без внутреннего gRPC-сервера — в отличие от Backoffice API, ни один метод §7.2 не проксирует в другой сервис.
 
-**Статус:** реально компилируется и тестируется — `go build ./... && go test ./...`, не псевдокод.
+**Статус:** реально компилируется и тестируется — `go build ./... && go test ./...`, не псевдокод. `-race` чисто.
+
+**CODE_REVIEW.md — что исправлено после первого прохода ревью:**
+* **HIGH — JWT проверял только подпись, не `aud`/`iss`.** Если тот же Keycloak realm выпускает токены и для других клиентов, токен для чужого клиента, но подписанный тем же ключом, раньше принимался здесь (token-confusion риск). `internal/auth.NewValidator` теперь требует `audience`/`issuer` (`PARTNER_API_JWT_AUDIENCE`/`PARTNER_API_JWT_ISSUER`, ни один LLD не фиксирует конкретные значения, поэтому настраиваются деплоем) и передаёт их в `jwt.WithAudience`/`jwt.WithIssuer`. Заодно (Low finding) добавлен `jwt.WithExpirationRequired()` — токен без `exp` раньше принимался как никогда не истекающий. `jwt_test.go` — новые тесты на оба класса.
+* **MEDIUM — без rate limiting.** Партнёр или утёкший токен мог забросать Postgres/ClickHouse неограниченным объёмом фильтрованных запросов. Новый `internal/ratelimit` — простой per-partner in-memory token bucket (20 req/s, burst 40; не distributed — см. package doc), применён как middleware после JWT (лимит по `partner_id`, не по IP).
+* **MEDIUM — `/readyz` статический.** `internal/health` теперь поддерживает `SetDependencyChecks`, `main.go` пингует Postgres/ClickHouse.
+* **Medium — без HTTP-таймаутов.** `httpSrv` в `main.go` — `ReadTimeout`/`WriteTimeout`/`IdleTimeout` (более прямо эксплуатируемо здесь, чем на внутренних сервисах — этот API внешний).
+* **Low — утечка внутренних ошибок внешним партнёрам.** Новый `internalError` (`internal/httpapi/errors.go`) — партнёру только generic-сообщение, полная ошибка в лог сервиса; применено в status/search/report.
+* **Low — отрицательный `offset`.** `parseNonNegativeInt` отклоняет его в `search.go`.
 
 ```bash
 brew services start postgresql@17   # если ещё не запущен

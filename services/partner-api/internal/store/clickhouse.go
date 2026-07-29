@@ -41,6 +41,12 @@ func NewClickHouseFromConn(conn driver.Conn) *ClickHouse {
 	return &ClickHouse{conn: conn}
 }
 
+// Ping — используется /readyz для реальной проверки состояния зависимости
+// (CODE_REVIEW.md MEDIUM finding), а не для запросов приложения.
+func (c *ClickHouse) Ping(ctx context.Context) error {
+	return c.conn.Ping(ctx)
+}
+
 type ReportFilter struct {
 	PartnerID string
 	From      time.Time

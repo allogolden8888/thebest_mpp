@@ -65,7 +65,7 @@ func handleStatusQuery(pg *store.Postgres) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			internalError(w, http.StatusInternalServerError, "status_query: ошибка чтения из PostgreSQL", err)
 			return
 		}
 
@@ -84,7 +84,7 @@ func handleStatusQuery(pg *store.Postgres) http.HandlerFunc {
 		if r.URL.Query().Get("history") == "1" {
 			events, err := pg.LifecycleHistory(r.Context(), claims.PartnerID, status.MessageID)
 			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				internalError(w, http.StatusInternalServerError, "status_query_history: ошибка чтения из PostgreSQL", err)
 				return
 			}
 			for _, e := range events {

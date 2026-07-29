@@ -53,6 +53,12 @@ func NewPostgres(pool *pgxpool.Pool) *Postgres {
 	return &Postgres{pool: pool}
 }
 
+// Ping — используется /readyz (CODE_REVIEW.md MEDIUM finding), не запросами
+// приложения.
+func (p *Postgres) Ping(ctx context.Context) error {
+	return p.pool.Ping(ctx)
+}
+
 func scanMessageStatus(row pgx.Row) (MessageStatus, error) {
 	var m MessageStatus
 	err := row.Scan(&m.MessageID, &m.PartnerID, &m.ApplicationID, &m.TraceID, &m.PipelineID,
