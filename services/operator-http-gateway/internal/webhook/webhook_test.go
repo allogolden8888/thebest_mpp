@@ -59,6 +59,38 @@ func TestHandlerAcceptsValidRequestAndInvokesCallback(t *testing.T) {
 	}
 }
 
+// TestParseDlrWebhookPayloadWithSegmentID — CODE_REVIEW.md MEDIUM finding
+// #6: segment_id раньше отсутствовал в payload вообще и никогда не
+// доходил до OperatorDlr.
+func TestParseDlrWebhookPayloadWithSegmentID(t *testing.T) {
+	dlr, err := ParseDlrWebhookPayload([]byte(`{"smsc_message_id":"smsc-1","segment_id":2,"status":"DELIVRD"}`))
+	if err != nil {
+		t.Fatalf("ParseDlrWebhookPayload failed: %v", err)
+	}
+	if dlr.SegmentID != 2 {
+		t.Fatalf("segment_id = %d, want 2", dlr.SegmentID)
+	}
+}
+
+// TestHandlerRejectsOversizedBody — CODE_REVIEW.md CRITICAL finding:
+// раньше io.ReadAll(r.Body) не имел http.MaxBytesReader — неаутентифи-
+// цированный вызывающий мог прислать произвольно большое тело и вызвать
+// неограниченную буферизацию в памяти.
+func TestHandlerRejectsOversizedBody(t *testing.T) {
+	auth := StaticTokenAuthenticator{Token: "secret"}
+	handler := Handler(auth, func(dlr RawDlr) {})
+
+	oversized := bytes.Repeat([]byte("a"), maxWebhookBodyBytes+1)
+	req := httptest.NewRequest(http.MethodPost, "/webhook/dlr", bytes.NewReader(oversized))
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("ожидали 413 для тела больше %d байт, получили %d", maxWebhookBodyBytes, rec.Code)
+	}
+}
+
 func TestHandlerRejectsMalformedBody(t *testing.T) {
 	auth := StaticTokenAuthenticator{Token: "secret"}
 	handler := Handler(auth, func(dlr RawDlr) {})

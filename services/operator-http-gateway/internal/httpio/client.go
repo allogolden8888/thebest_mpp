@@ -91,13 +91,32 @@ type Client struct {
 	httpClient *http.Client
 }
 
+// NewClient — production-конструктор: транспорт использует
+// ssrfSafeDialer (см. ssrf_guard.go, CODE_REVIEW.md MEDIUM finding) —
+// каждый фактический TCP dial проверяется на приватный/loopback/
+// link-local/metadata-класс адрес.
 func NewClient(timeout time.Duration) *Client {
+	return &Client{httpClient: &http.Client{
+		Timeout:   timeout,
+		Transport: &http.Transport{DialContext: ssrfSafeDialer(timeout).DialContext},
+	}}
+}
+
+// NewClientForTests — как NewClient, но БЕЗ SSRF-guard: тесты этого
+// сервиса намеренно шлют запросы на httptest.Server, который слушает на
+// 127.0.0.1 — ровно тот loopback-класс, который guard блокирует по
+// назначению. Не использовать вне _test.go.
+func NewClientForTests(timeout time.Duration) *Client {
 	return &Client{httpClient: &http.Client{Timeout: timeout}}
 }
 
 // SubmitSegment — send_http_submit + handle_http_submit_response целиком:
 // реальный HTTP POST на endpointURL.
 func (c *Client) SubmitSegment(ctx context.Context, endpointURL, destinationAddress string, content []byte, encoding, queueMsgID string) (SubmitOutcome, error) {
+	if err := checkScheme(endpointURL); err != nil {
+		return SubmitOutcome{}, err
+	}
+
 	body, err := BuildSubmitRequest(destinationAddress, content, encoding, queueMsgID)
 	if err != nil {
 		return SubmitOutcome{}, err

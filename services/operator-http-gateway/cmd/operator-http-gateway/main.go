@@ -104,7 +104,20 @@ func main() {
 	}()
 
 	// handle_dlr_webhook + normalize_and_publish_dlr
-	authenticator := webhook.StaticTokenAuthenticator{Token: env("WEBHOOK_AUTH_TOKEN", "demo-webhook-token")}
+	//
+	// CODE_REVIEW.md HIGH finding: раньше был insecure-дефолт
+	// "demo-webhook-token", если WEBHOOK_AUTH_TOKEN не задан — под мог
+	// годами принимать DLR с общеизвестным демо-токеном, если деплой забыл
+	// переопределить переменную. Теперь обязателен, как и JWT_PUBLIC_KEY_PEM
+	// в backoffice-api/partner-api — сервис не стартует без него, а не
+	// тихо работает с угадываемым секретом. Остаётся общим на все операторы
+	// этого пода (per-operator секрет из config.changes не подключён — см.
+	// README "Что НЕ реализовано"), но хотя бы не предсказуем по умолчанию.
+	webhookToken := os.Getenv("WEBHOOK_AUTH_TOKEN")
+	if webhookToken == "" {
+		log.Fatalf("WEBHOOK_AUTH_TOKEN не задан — сервис не может аутентифицировать входящие DLR")
+	}
+	authenticator := webhook.StaticTokenAuthenticator{Token: webhookToken}
 	webhookHandler := webhook.Handler(authenticator, func(dlr webhook.RawDlr) {
 		event := kafkaio.BuildDlrEvent(operatorID, dlr, time.Now())
 		if err := publisher.PublishDlr(context.Background(), event); err != nil {
@@ -113,7 +126,20 @@ func main() {
 	})
 	webhookMux := http.NewServeMux()
 	webhookMux.HandleFunc("/webhook/dlr", webhookHandler)
-	webhookSrv := &http.Server{Addr: ":8080", Handler: webhookMux}
+	// CODE_REVIEW.md CRITICAL finding: этот сервер обязан быть доступен из
+	// интернета (реальные операторы шлют DLR сюда) и раньше не имел ни
+	// ReadTimeout/WriteTimeout/IdleTimeout, ни MaxHeaderBytes — тривиальный
+	// неаутентифицированный DoS (медленно льющееся тело/заголовки без
+	// таймаута на прерывание чтения). webhook.Handler отдельно ограничивает
+	// размер тела через http.MaxBytesReader (см. webhook.go).
+	webhookSrv := &http.Server{
+		Addr:           ":8080",
+		Handler:        webhookMux,
+		ReadTimeout:    10 * time.Second,
+		WriteTimeout:   10 * time.Second,
+		IdleTimeout:    60 * time.Second,
+		MaxHeaderBytes: 16 * 1024,
+	}
 	go func() {
 		log.Println("webhook HTTP-сервер слушает :8080")
 		if err := webhookSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -131,6 +157,9 @@ func main() {
 		}
 	}()
 
+	healthState.SetDependencyChecks(map[string]func(context.Context) error{
+		"redis": redisClient.Ping,
+	})
 	healthState.SetReady(true)
 	log.Println("operator-http-gateway готов")
 

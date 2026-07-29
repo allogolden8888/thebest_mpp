@@ -27,10 +27,11 @@ func BuildSubmitAcceptedEvent(messageID, stageExecutionID, operatorID, smscMessa
 // BuildDlrEvent — normalize_and_publish_dlr: тот же формат, что сырой SMPP DLR.
 func BuildDlrEvent(operatorID string, dlr webhook.RawDlr, now time.Time) *eventsv1.OperatorDlr {
 	return &eventsv1.OperatorDlr{
-		OperatorId:   operatorID,
-		Protocol:     commonv1.Protocol_PROTOCOL_HTTP,
+		OperatorId:    operatorID,
+		Protocol:      commonv1.Protocol_PROTOCOL_HTTP,
 		SmscMessageId: dlr.SmscMessageID,
-		RawStatus:    dlr.RawStatus,
-		ReceivedAt:   timestamppb.New(now),
+		SegmentId:     dlr.SegmentID,
+		RawStatus:     dlr.RawStatus,
+		ReceivedAt:    timestamppb.New(now),
 	}
 }

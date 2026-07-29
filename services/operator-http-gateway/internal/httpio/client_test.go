@@ -85,7 +85,7 @@ func TestClientSubmitSegmentRealHttpRoundTrip(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewClient(2 * time.Second)
+	client := NewClientForTests(2 * time.Second)
 	outcome, err := client.SubmitSegment(t.Context(), srv.URL, "998901234567", []byte("hello"), "GSM7", "queue-1")
 	if err != nil {
 		t.Fatalf("SubmitSegment failed: %v", err)

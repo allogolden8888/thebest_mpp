@@ -26,7 +26,7 @@ func TestBuildSubmitAcceptedEventMapsFields(t *testing.T) {
 
 func TestBuildDlrEventMapsFields(t *testing.T) {
 	now := time.Now()
-	dlr := webhook.RawDlr{SmscMessageID: "smsc-1", RawStatus: "DELIVRD"}
+	dlr := webhook.RawDlr{SmscMessageID: "smsc-1", SegmentID: 2, RawStatus: "DELIVRD"}
 	event := BuildDlrEvent("ucell_uz", dlr, now)
 
 	if event.GetOperatorId() != "ucell_uz" || event.GetSmscMessageId() != "smsc-1" || event.GetRawStatus() != "DELIVRD" {
@@ -34,5 +34,10 @@ func TestBuildDlrEventMapsFields(t *testing.T) {
 	}
 	if event.GetProtocol() != commonv1.Protocol_PROTOCOL_HTTP {
 		t.Fatalf("ожидали PROTOCOL_HTTP, получили %v", event.GetProtocol())
+	}
+	// CODE_REVIEW.md MEDIUM finding #6: segment_id раньше никогда не
+	// заполнялся в OperatorDlr.
+	if event.GetSegmentId() != 2 {
+		t.Fatalf("segment_id = %d, want 2", event.GetSegmentId())
 	}
 }

@@ -33,6 +33,13 @@ func NewClientFromRedis(rdb *redis.Client, owningInstanceID string, heartbeatTTL
 
 func (c *Client) Close() error { return c.rdb.Close() }
 
+// Ping — используется /readyz (CODE_REVIEW.md Low finding: раньше
+// неудачная register_route на старте только логировалась, /readyz был
+// безусловным 200 независимо от реального состояния Redis).
+func (c *Client) Ping(ctx context.Context) error {
+	return c.rdb.Ping(ctx).Err()
+}
+
 func key(operatorID, routeID string) string {
 	return fmt.Sprintf("operator_route:%s:%s", operatorID, routeID)
 }
