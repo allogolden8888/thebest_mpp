@@ -36,6 +36,24 @@ func (s *Snapshot) Apply(scope commonv1.ExecutionControlScope, scopeID string, s
 	s.state[key{scope, scopeID}] = state
 }
 
+// Delete — применение tombstone-записи (value=nil) компактированного
+// execution.control: ключ (scope, scope_id) больше не имеет применимого
+// override, удаляется из снапшота целиком, а не переводится в какое-то
+// state-значение (CODE_REVIEW.md finding #4, internal/kafkaio.ControlSnapshotConsumer).
+func (s *Snapshot) Delete(scope commonv1.ExecutionControlScope, scopeID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.state, key{scope, scopeID})
+}
+
+// Len — число примененных (scope, scope_id) записей — используется для
+// диагностики warm-up консьюмера (main.go), не для бизнес-логики.
+func (s *Snapshot) Len() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.state)
+}
+
 // IsPaused — check_execution_control: PAUSED побеждает по всей
 // scope-иерархии — если GLOBAL или STAGE(stageName) в PAUSED, retry
 // придерживается (HLD §8, "повторная проверка перед retry"). PARTNER/

@@ -45,6 +45,45 @@ func TestDecodeManualCommandRejectsGarbage(t *testing.T) {
 	}
 }
 
+// TestParseRecordKeyRoundTripsAllScopes — CODE_REVIEW.md finding #4:
+// ParseRecordKey должен разбирать формат ключа, реально производимый
+// execution-control-service (services/execution-control-service/internal/
+// kafkaio/publisher.go::RecordKey) — единственным producer'ом этого топика.
+func TestParseRecordKeyRoundTripsAllScopes(t *testing.T) {
+	cases := []struct {
+		scope   commonv1.ExecutionControlScope
+		scopeID string
+	}{
+		{commonv1.ExecutionControlScope_EXECUTION_CONTROL_SCOPE_GLOBAL, ""},
+		{commonv1.ExecutionControlScope_EXECUTION_CONTROL_SCOPE_STAGE, "BILLING"},
+		{commonv1.ExecutionControlScope_EXECUTION_CONTROL_SCOPE_PARTNER, "partner-1"},
+		{commonv1.ExecutionControlScope_EXECUTION_CONTROL_SCOPE_PARTNER_STAGE, "partner-1:BILLING"},
+		{commonv1.ExecutionControlScope_EXECUTION_CONTROL_SCOPE_OPERATOR_ROUTE, "route-7"},
+	}
+	for _, tc := range cases {
+		key := []byte(tc.scope.String() + ":" + tc.scopeID)
+		gotScope, gotScopeID, err := ParseRecordKey(key)
+		if err != nil {
+			t.Fatalf("ParseRecordKey(%q) failed: %v", key, err)
+		}
+		if gotScope != tc.scope || gotScopeID != tc.scopeID {
+			t.Fatalf("ParseRecordKey(%q) = (%v, %q), want (%v, %q)", key, gotScope, gotScopeID, tc.scope, tc.scopeID)
+		}
+	}
+}
+
+func TestParseRecordKeyRejectsMissingSeparator(t *testing.T) {
+	if _, _, err := ParseRecordKey([]byte("no-separator-here")); err == nil {
+		t.Fatalf("ожидали ошибку для ключа без ':'")
+	}
+}
+
+func TestParseRecordKeyRejectsUnknownScope(t *testing.T) {
+	if _, _, err := ParseRecordKey([]byte("NOT_A_REAL_SCOPE:foo")); err == nil {
+		t.Fatalf("ожидали ошибку для неизвестного scope")
+	}
+}
+
 func TestDecodeControlRecordRoundTrips(t *testing.T) {
 	original := &eventsv1.ExecutionControlRecord{
 		Scope:   commonv1.ExecutionControlScope_EXECUTION_CONTROL_SCOPE_STAGE,
