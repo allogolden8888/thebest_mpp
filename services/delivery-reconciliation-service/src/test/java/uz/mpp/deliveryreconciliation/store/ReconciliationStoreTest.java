@@ -6,6 +6,8 @@ import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import uz.mpp.deliveryreconciliation.core.Evidence;
+import uz.mpp.deliveryreconciliation.core.EvidenceCodec;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -72,7 +74,36 @@ class ReconciliationStoreTest {
         store.persistEvidence(created.caseId(), "{\"submit_accepted\":true}");
 
         ReconciliationCase reloaded = store.loadByMessageId(messageId).orElseThrow();
-        assertEquals("{\"submit_accepted\":true}", reloaded.evidenceJson());
+        // Колонка — JSONB (migrations/V010__reconciliation_cases.sql):
+        // PostgreSQL нормализует whitespace при хранении/чтении (напр.
+        // добавляет пробел после ":"), поэтому побайтовое сравнение сырой
+        // строки хрупко — сравниваем через EvidenceCodec, тот же уровень
+        // абстракции, что использует Main (CODE_REVIEW.md #11).
+        assertEquals(Evidence.empty().withSubmitAccepted(), EvidenceCodec.decode(reloaded.evidenceJson()));
+    }
+
+    @Test
+    void persistEvidenceRoundTripsAllThreeFieldsThroughRealJsonb() {
+        UUID messageId = UUID.randomUUID();
+        ReconciliationCase created = store.create(messageId, UUID.randomUUID(), "ucell_uz", Instant.now().plus(1, ChronoUnit.HOURS));
+        Evidence evidence = Evidence.empty()
+            .withSubmitAccepted()
+            .withDeliveryStatus(Evidence.DeliveryOutcome.FAILURE)
+            .withQuerySm(Evidence.QuerySmOutcome.INCONCLUSIVE);
+
+        store.persistEvidence(created.caseId(), EvidenceCodec.encode(evidence));
+
+        ReconciliationCase reloaded = store.loadByMessageId(messageId).orElseThrow();
+        assertEquals(evidence, EvidenceCodec.decode(reloaded.evidenceJson()));
+    }
+
+    @Test
+    void createInitializesEvidenceToEmptyJsonObject() {
+        UUID messageId = UUID.randomUUID();
+        store.create(messageId, UUID.randomUUID(), "beeline_uz", Instant.now().plus(1, ChronoUnit.HOURS));
+
+        ReconciliationCase reloaded = store.loadByMessageId(messageId).orElseThrow();
+        assertEquals(Evidence.empty(), EvidenceCodec.decode(reloaded.evidenceJson()));
     }
 
     @Test
