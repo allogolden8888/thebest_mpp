@@ -5,6 +5,7 @@ package kafkaio
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -46,6 +47,59 @@ func entityTypeToProto(s string) commonv1.ConfigEntityType {
 	}
 }
 
+// ResolveStatus — CODE_REVIEW.md Critical, compliance-sensitive finding:
+// старый код резолвил status через SQL `COALESCE(cv.status, 'active')`
+// (internal/outbox/outbox.go), но config_version_id — и потому cv.status —
+// всегда NULL для policy_template/subscriber_consent (V003 комментарий,
+// это entity_type, у которых собственные исходные таблицы, не
+// config_versions) — так что status для ОБОИХ навсегда резолвился в
+// "active", и subscriber_consent revocation (status=archived) не мог
+// опубликоваться как archived НИКОГДА.
+//
+// Разрешено по-разному для двух entity_type без config_versions строки:
+//
+//   - policy_template: config_schemas/policy_template.schema.json требует
+//     поле "status" прямо в payload_json — читаем оттуда. Это настоящий
+//     фикс: policy_template archival теперь реально доходит до
+//     потребителей config.changes.
+//   - subscriber_consent: config_schemas/subscriber_consent.schema.json
+//     НЕ содержит поля status ("append/delete по PRIMARY KEY, не
+//     version-based" — этот payload физически не может закодировать
+//     revocation), и ничто в репозитории сегодня не создаёт для этого
+//     entity_type outbox-строку, сигнализирующую archived —
+//     configuration-service.ArchiveVersion (internal/store/store.go) не
+//     пишет в config_outbox вообще ни для одного entity_type, только
+//     CreateImmutableVersionAndOutbox — вне scope этого сервиса,
+//     подтверждено чтением кода, не только предположением ревьюера.
+//     Технически неразрешимо в config-event-publisher в одиночку без
+//     придумывания нового контракта, которым этот сервис не владеет — см.
+//     README "Что НЕ реализовано". "active" — единственное безопасное
+//     предположение, не изобретающее архитектуру, но unresolved=true
+//     теперь явно сообщает вызывающей стороне, что это предположение
+//     (было тихо, теперь громко логируется — см. cmd/.../main.go).
+func ResolveStatus(e outbox.Entry) (status string, unresolved bool, err error) {
+	if e.Status != "" {
+		return e.Status, false, nil
+	}
+	switch e.EntityType {
+	case "policy_template":
+		var p struct {
+			Status string `json:"status"`
+		}
+		if unmarshalErr := json.Unmarshal(e.Payload, &p); unmarshalErr != nil {
+			return "", false, fmt.Errorf("policy_template outbox id=%d: payload_json не парсится: %w", e.ID, unmarshalErr)
+		}
+		if p.Status != "active" && p.Status != "archived" {
+			return "", false, fmt.Errorf("policy_template outbox id=%d: payload_json.status=%q — ожидали active/archived", e.ID, p.Status)
+		}
+		return p.Status, false, nil
+	default:
+		// subscriber_consent (и любой будущий entity_type без
+		// config_versions-строки и без status в payload_json).
+		return "active", true, nil
+	}
+}
+
 // BuildConfigChangeEvent — чистая функция, без сети.
 func BuildConfigChangeEvent(e outbox.Entry) (*eventsv1.ConfigChangeEvent, error) {
 	entityType := entityTypeToProto(e.EntityType)
@@ -53,12 +107,17 @@ func BuildConfigChangeEvent(e outbox.Entry) (*eventsv1.ConfigChangeEvent, error)
 		return nil, fmt.Errorf("неизвестный entity_type %q для outbox id=%d", e.EntityType, e.ID)
 	}
 
+	status, _, err := ResolveStatus(e)
+	if err != nil {
+		return nil, err
+	}
+
 	return &eventsv1.ConfigChangeEvent{
 		EntityType:  entityType,
 		EntityId:    e.EntityID,
 		Version:     e.Version,
 		PayloadJson: e.Payload,
-		Status:      e.Status,
+		Status:      status,
 		CreatedAt:   timestamppb.New(e.CreatedAt),
 	}, nil
 }
@@ -76,6 +135,10 @@ func NewPublisher(brokers []string) (*Publisher, error) {
 }
 
 func (p *Publisher) Close() { p.client.Close() }
+
+// Ping — /readyz dependency check (CODE_REVIEW.md: "/readyz never reflects
+// real downstream health after startup").
+func (p *Publisher) Ping(ctx context.Context) error { return p.client.Ping(ctx) }
 
 // Publish — ключ = entity_id, compacted-топик по (entity_type, entity_id)
 // был бы точнее, но mpp.events.v1.ConfigChangeEvent не даёт составного

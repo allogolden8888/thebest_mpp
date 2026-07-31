@@ -23,6 +23,7 @@ V014__subscriber_consent.sql
 V015__partition_maintenance.sql
 V016__execution_control_audit.sql
 V017__backoffice_stub.sql
+V018__config_outbox_claim_and_retry.sql
 ```
 
 Применить локально:
@@ -38,6 +39,10 @@ for f in V*.sql; do psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"; done
 3. **CHECK-ограничения реально блокируют некорректные данные**, не только написаны: compensating billing-запись без `source_charge_id` — отклонена; шаблон с зарезервированной категорией `BLOCKED` — отклонён.
 4. **Идемпотентность billing_ledger** — повторная вставка с тем же `charge_id` через `ON CONFLICT DO NOTHING` реально не создаёт вторую строку.
 5. **Партиционирование и retention-функции** — создание почасовых партиций, автоматическая маршрутизация вставки в нужную партицию, drop партиций старше заданного окна — всё выполнено вручную на реальных данных, не просто прочитано глазами.
+
+## V018 — добавлена после CODE_REVIEW.md (config-event-publisher)
+
+`config.config_outbox` получила `claimed_at`/`attempts`/`last_error` — `poll_outbox` (config-event-publisher) раньше не координировал несколько реплик (не было `SELECT ... FOR UPDATE SKIP LOCKED`) и мог опрашивать одну и ту же не-публикуемую (poison) строку вечно, вытесняя реальные pending-строки из `ORDER BY created_at ASC LIMIT N`. См. `services/config-event-publisher/README.md` за подробности и `internal/outbox/outbox.go`.
 
 ## Найдено только на этапе реального DDL (не было видно на уровне концептуальной спеки)
 
