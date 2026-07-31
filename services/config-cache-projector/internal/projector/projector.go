@@ -60,6 +60,10 @@ func NewClientFromRedis(rdb *redis.Client) *Client {
 
 func (c *Client) Close() error { return c.rdb.Close() }
 
+// Ping — /readyz dependency check (CODE_REVIEW.md: "/readyz never
+// reflects real downstream health after startup").
+func (c *Client) Ping(ctx context.Context) error { return c.rdb.Ping(ctx).Err() }
+
 func currentKey(entityType, entityID string) string {
 	return fmt.Sprintf("config:current:%s:%s", entityType, entityID)
 }
@@ -73,21 +77,41 @@ func versionKey(entityType, entityID string, version int64) string {
 // только для status="active" — архивная версия не должна становиться
 // текущей для bootstrap hot-path сервисов (data_infrastructure_spec.md
 // §2.2: "Только bootstrap/cache-miss").
+//
+// CODE_REVIEW.md finding #2: entityTypeString возвращает "unspecified" по
+// умолчанию для незнакомых значений — раньше это тихо принималось и
+// писало данные под бракованным ключом config:version:unspecified:....
+// kafkaio.DecodeConfigChangeEvent теперь отклоняет такие события ДО
+// вызова WriteProjection, но здесь оставлена та же проверка defense in
+// depth — WriteProjection не должен быть единственной линией защиты, но
+// и не должен молча доверять вызывающей стороне.
+//
+// CODE_REVIEW.md finding #3: раньше это были два независимых SET без
+// пайплайна/транзакции — если первый (version) успевал, а второй
+// (current) падал по сети, читатели видели новую версию в истории, но
+// старый current-указатель, и (из-за cross-cutting автокоммит-бага,
+// отдельно исправленного) это скорее всего никогда не переигрывалось.
+// Теперь оба SET идут через TxPipelined (MULTI/EXEC) — Redis применяет их
+// атомарно; либо оба применились, либо (при сетевой ошибке до EXEC) ни
+// один — никакого частично применённого состояния.
 func (c *Client) WriteProjection(ctx context.Context, event *eventsv1.ConfigChangeEvent) error {
 	entityType := entityTypeString(event.GetEntityType())
+	if entityType == "unspecified" {
+		return fmt.Errorf("write_projection: неизвестный/unset entity_type %v для entity_id=%q — отклонено", event.GetEntityType(), event.GetEntityId())
+	}
 	entityID := event.GetEntityId()
 	version := event.GetVersion()
 
-	if err := c.rdb.Set(ctx, versionKey(entityType, entityID, version), event.GetPayloadJson(), 0).Err(); err != nil {
-		return fmt.Errorf("SET %s: %w", versionKey(entityType, entityID, version), err)
-	}
-
-	if event.GetStatus() == "active" {
-		if err := c.rdb.Set(ctx, currentKey(entityType, entityID), version, 0).Err(); err != nil {
-			return fmt.Errorf("SET %s: %w", currentKey(entityType, entityID), err)
+	_, err := c.rdb.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.Set(ctx, versionKey(entityType, entityID, version), event.GetPayloadJson(), 0)
+		if event.GetStatus() == "active" {
+			pipe.Set(ctx, currentKey(entityType, entityID), version, 0)
 		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("write_projection tx pipeline (entity_type=%s entity_id=%s version=%d): %w", entityType, entityID, version, err)
 	}
-
 	return nil
 }
 

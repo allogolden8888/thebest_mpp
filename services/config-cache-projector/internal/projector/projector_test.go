@@ -91,6 +91,68 @@ func TestWriteProjectionDoesNotUpdateCurrentForArchived(t *testing.T) {
 	}
 }
 
+// CODE_REVIEW.md finding #2: malformed/unset entity_type is silently
+// accepted and projected under a bogus "unspecified" key. Fixed:
+// kafkaio.DecodeConfigChangeEvent already rejects this before it reaches
+// WriteProjection, but WriteProjection itself must not silently trust
+// that — defense in depth.
+func TestWriteProjectionRejectsUnspecifiedEntityType(t *testing.T) {
+	c := newTestClient(t)
+	ctx := context.Background()
+
+	event := &eventsv1.ConfigChangeEvent{
+		EntityType:  commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_UNSPECIFIED,
+		EntityId:    "x",
+		Version:     1,
+		PayloadJson: []byte(`{}`),
+		Status:      "active",
+	}
+	if err := c.WriteProjection(ctx, event); err == nil {
+		t.Fatalf("ожидали ошибку для entity_type=UNSPECIFIED")
+	}
+
+	if _, err := c.CurrentVersion(ctx, "unspecified", "x"); err == nil {
+		t.Fatalf("не должно быть записи под config:current:unspecified:x — WriteProjection должен был отклонить событие до записи")
+	}
+}
+
+// CODE_REVIEW.md finding #3: WriteProjection did two non-atomic Redis
+// writes with no compensation on partial failure. This test doesn't
+// simulate a mid-write network failure (miniredis doesn't expose that
+// hook), but it does assert that a single WriteProjection call for
+// status=active leaves both keys mutually consistent — a regression test
+// for the shape of the bug (split-brain between config:version and
+// config:current), even though the atomicity guarantee itself
+// (TxPipelined/MULTI-EXEC) is exercised structurally, not by fault
+// injection.
+func TestWriteProjectionKeepsVersionAndCurrentConsistentForActive(t *testing.T) {
+	c := newTestClient(t)
+	ctx := context.Background()
+
+	event := &eventsv1.ConfigChangeEvent{
+		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_ROUTING_TABLE, EntityId: "default",
+		Version: 5, PayloadJson: []byte(`{"v":5}`), Status: "active",
+	}
+	if err := c.WriteProjection(ctx, event); err != nil {
+		t.Fatalf("WriteProjection failed: %v", err)
+	}
+
+	current, err := c.CurrentVersion(ctx, "routing_table", "default")
+	if err != nil {
+		t.Fatalf("CurrentVersion failed: %v", err)
+	}
+	if current != 5 {
+		t.Fatalf("ожидали current=5, получили %d", current)
+	}
+	payload, err := c.VersionPayload(ctx, "routing_table", "default", 5)
+	if err != nil {
+		t.Fatalf("VersionPayload failed: %v", err)
+	}
+	if string(payload) != `{"v":5}` {
+		t.Fatalf("payload не совпадает: %s", payload)
+	}
+}
+
 func TestEntityTypeStringMatchesPostgresConvention(t *testing.T) {
 	cases := map[commonv1.ConfigEntityType]string{
 		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PIPELINE:           "pipeline",
