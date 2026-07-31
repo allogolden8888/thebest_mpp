@@ -2,17 +2,29 @@
 // handle_config_crud (service_internal_methods.md §7.3) — CreateVersion/
 // GetActiveVersion/ListVersions/ArchiveVersion, gRPC-проксирование в
 // Configuration Service на стороне Backoffice API.
+//
+// CODE_REVIEW.md findings fixed in this view (subagent-1 / backoffice-ui):
+// #1 — Create/Archive actions disabled for non-admins (RequireAdmin gates
+//      the mutating form; listing versions stays read-only-visible to any
+//      authenticated user, matching backend router.go — GET routes have no
+//      role requirement).
+// #2 — confirmation dialog before "Архивировать" fires.
+// #5 — errors rendered via extractErrorMessage(), not `String(errObject)`.
 import { h, ref } from "vue";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/vue-query";
-import { NCard, NForm, NFormItem, NInput, NButton, NDataTable, NSpace, useMessage, type DataTableColumns } from "naive-ui";
+import { NCard, NForm, NFormItem, NInput, NButton, NDataTable, NSpace, NAlert, useMessage, useDialog, type DataTableColumns } from "naive-ui";
 import { useApi } from "../api/useApi";
+import { extractErrorMessage } from "../api/errorMessage";
+import { useAuthStore } from "../stores/auth";
 import type { components } from "../api/schema";
 
 type ConfigVersion = components["schemas"]["ConfigVersion"];
 
 const api = useApi();
 const message = useMessage();
+const dialog = useDialog();
 const queryClient = useQueryClient();
+const auth = useAuthStore();
 
 const entityType = ref("CONFIG_ENTITY_TYPE_PIPELINE");
 const entityId = ref("");
@@ -48,7 +60,7 @@ const createMutation = useMutation({
     message.success("Версия создана");
     queryClient.invalidateQueries({ queryKey: ["config-versions"] });
   },
-  onError: (err: unknown) => message.error(String(err)),
+  onError: (err: unknown) => message.error(extractErrorMessage(err)),
 });
 
 const archiveMutation = useMutation({
@@ -63,8 +75,18 @@ const archiveMutation = useMutation({
     message.success("Версия архивирована");
     queryClient.invalidateQueries({ queryKey: ["config-versions"] });
   },
-  onError: (err: unknown) => message.error(String(err)),
+  onError: (err: unknown) => message.error(extractErrorMessage(err)),
 });
+
+function confirmArchive(version: number) {
+  dialog.warning({
+    title: "Подтвердите архивирование",
+    content: `Версия ${version} (${entityType.value}/${entityId.value}) будет архивирована.`,
+    positiveText: "Архивировать",
+    negativeText: "Отмена",
+    onPositiveClick: () => archiveMutation.mutate(version),
+  });
+}
 
 const columns: DataTableColumns<ConfigVersion> = [
   { title: "Version", key: "version" },
@@ -74,7 +96,11 @@ const columns: DataTableColumns<ConfigVersion> = [
     title: "Действие",
     key: "actions",
     render: (row) =>
-      h(NButton, { size: "small", onClick: () => archiveMutation.mutate(row.version) }, () => "Архивировать"),
+      h(
+        NButton,
+        { size: "small", disabled: !auth.isAdmin(), onClick: () => confirmArchive(row.version) },
+        () => "Архивировать",
+      ),
   },
 ];
 </script>
@@ -93,14 +119,25 @@ const columns: DataTableColumns<ConfigVersion> = [
           <NInput v-model:value="payloadJson" type="textarea" style="width: 320px" />
         </NFormItem>
         <NFormItem label=" ">
-          <NButton type="primary" :loading="createMutation.isPending.value" @click="createMutation.mutate()">
+          <NButton
+            type="primary"
+            :disabled="!auth.isAdmin()"
+            :loading="createMutation.isPending.value"
+            @click="createMutation.mutate()"
+          >
             Создать версию
           </NButton>
         </NFormItem>
       </NForm>
+      <NAlert v-if="!auth.isAdmin()" type="info" style="margin-top: 12px">
+        Создание/архивирование версий конфигурации требует роль backoffice-admin. Просмотр версий ниже доступен.
+      </NAlert>
     </NCard>
 
     <NCard title="Версии">
+      <NAlert v-if="listQuery.isError.value" type="error" style="margin-bottom: 12px">
+        {{ extractErrorMessage(listQuery.error.value) }}
+      </NAlert>
       <NDataTable
         :columns="columns"
         :data="listQuery.data.value?.versions ?? []"
