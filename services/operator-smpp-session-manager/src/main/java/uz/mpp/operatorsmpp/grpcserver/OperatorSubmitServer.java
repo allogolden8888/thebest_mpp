@@ -29,13 +29,24 @@ public final class OperatorSubmitServer extends OperatorSubmitServiceGrpc.Operat
     private final TokenBucket tpsBucket;
     private final PriorityGate priorityGate;
     private final OperatorEventPublisher eventPublisher;
+    private final long submitTimeoutMs;
 
     public OperatorSubmitServer(OperatorSmppClient client, TokenBucket tpsBucket,
                                  PriorityGate priorityGate, OperatorEventPublisher eventPublisher) {
+        this(client, tpsBucket, priorityGate, eventPublisher, SUBMIT_TIMEOUT_MS);
+    }
+
+    /**
+     * Тестовый конструктор (CODE_REVIEW.md finding #2, тест ambiguous-таймаута) — короткий
+     * {@code submitTimeoutMs}, чтобы не ждать реальные 5с {@link #SUBMIT_TIMEOUT_MS} в тестах.
+     */
+    public OperatorSubmitServer(OperatorSmppClient client, TokenBucket tpsBucket, PriorityGate priorityGate,
+                                 OperatorEventPublisher eventPublisher, long submitTimeoutMs) {
         this.client = client;
         this.tpsBucket = tpsBucket;
         this.priorityGate = priorityGate;
         this.eventPublisher = eventPublisher;
+        this.submitTimeoutMs = submitTimeoutMs;
     }
 
     @Override
@@ -63,7 +74,7 @@ public final class OperatorSubmitServer extends OperatorSubmitServiceGrpc.Operat
 
                 Pdu resp;
                 try {
-                    resp = client.submitSm(body, SUBMIT_TIMEOUT_MS);
+                    resp = client.submitSm(body, submitTimeoutMs);
                 } catch (TimeoutException e) {
                     reply(responseObserver, SubmitOutcomeStatus.SUBMIT_OUTCOME_STATUS_AMBIGUOUS, "", "SUBMIT_TIMEOUT");
                     return;

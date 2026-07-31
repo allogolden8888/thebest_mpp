@@ -4,6 +4,7 @@ import com.google.protobuf.Timestamp;
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
 import uz.mpp.operatorsmpp.client.OperatorSmppClient;
+import uz.mpp.operatorsmpp.client.SmppConnectionSupervisor;
 import uz.mpp.operatorsmpp.core.PriorityGate;
 import uz.mpp.operatorsmpp.core.TokenBucket;
 import uz.mpp.operatorsmpp.grpcserver.OperatorQuerySmServer;
@@ -50,6 +51,18 @@ public final class Main {
 
         connectAndBindWithRetry(client, operatorId, routeId, routeRegistry);
 
+        // reconnect (CODE_REVIEW.md CRITICAL #1, было: connectAndBindWithRetry запускался
+        // только здесь, один раз, при старте — обрыв после этой точки никогда не приводил
+        // к повторному connect+bind, и health.setReady никогда не переоценивался). Supervisor
+        // вешает слушателя на channel.closeFuture(), при обрыве роняет readiness и запускает
+        // тот же connectAndBindWithRetry в отдельном потоке; после успеха — readiness назад
+        // в true, слушатель перевешивается на новый channel.
+        SmppConnectionSupervisor connectionSupervisor = new SmppConnectionSupervisor(
+            client,
+            () -> connectAndBindWithRetry(client, operatorId, routeId, routeRegistry),
+            health::setReady);
+        connectionSupervisor.arm();
+
         Timer enquireLinkTimer = new Timer("enquire-link-tick", true);
         enquireLinkTimer.scheduleAtFixedRate(new TimerTask() {
             @Override
@@ -77,6 +90,7 @@ public final class Main {
         health.setReady(true);
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            connectionSupervisor.stop();
             enquireLinkTimer.cancel();
             grpcServer.shutdown();
             client.close();
@@ -90,10 +104,14 @@ public final class Main {
     }
 
     /**
-     * reconnect (service_internal_methods.md §1.3) — простая retry-петля с
-     * фиксированной паузой. Реальная reconnect_policy (backoff, jitter,
-     * лимит попыток) из partner config snapshot не подключена в этом срезе
-     * (см. README "Что НЕ реализовано").
+     * connect_and_bind с retry — простая retry-петля с линейным backoff
+     * ({@code min(30s, attempt*1s)}). Используется и при первом старте (блокирующе, в
+     * {@code main}), и как {@link SmppConnectionSupervisor.Connector} для реального
+     * reconnect после обрыва (CODE_REVIEW.md CRITICAL #1) — до фикса эта петля
+     * запускалась ровно один раз за жизнь процесса. Реальная reconnect_policy
+     * (backoff, jitter, лимит попыток) из partner config snapshot по-прежнему не
+     * подключена в этом срезе (см. README "Что НЕ реализовано") — attempt-счётчик
+     * локален для каждого вызова, т.е. каждый reconnect снова начинает backoff с 1с.
      */
     private static void connectAndBindWithRetry(OperatorSmppClient client, String operatorId, String routeId, OperatorRouteRegistry routeRegistry) throws InterruptedException {
         String host = env("OPERATOR_SMSC_HOST", "localhost");

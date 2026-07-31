@@ -24,6 +24,7 @@ public final class FakeSmscServer {
     private EventLoopGroup workerGroup;
     private Channel serverChannel;
     private final AtomicReference<Channel> lastChannel = new AtomicReference<>();
+    private volatile boolean dropSubmitResponses = false;
 
     public int start() throws InterruptedException {
         bossGroup = new NioEventLoopGroup(1);
@@ -46,9 +47,15 @@ public final class FakeSmscServer {
                                 case CommandId.BIND_TRANSCEIVER ->
                                     respond(ctx, CommandId.BIND_TRANSCEIVER_RESP, CommandStatus.ESME_ROK, seq,
                                         new BindTransceiverResp(((BindTransceiver) pdu.body()).systemId()));
-                                case CommandId.SUBMIT_SM ->
-                                    respond(ctx, CommandId.SUBMIT_SM_RESP, CommandStatus.ESME_ROK, seq,
-                                        new ShortMessagePduResp("smsc-msg-1"));
+                                case CommandId.SUBMIT_SM -> {
+                                    // dropSubmitResponses имитирует реальный failure mode SMSC
+                                    // из CODE_REVIEW.md finding #2 — "тихая" потеря ответа
+                                    // без обрыва TCP-канала, не только явный timeout по TPS.
+                                    if (!dropSubmitResponses) {
+                                        respond(ctx, CommandId.SUBMIT_SM_RESP, CommandStatus.ESME_ROK, seq,
+                                            new ShortMessagePduResp("smsc-msg-1"));
+                                    }
+                                }
                                 case CommandId.ENQUIRE_LINK ->
                                     respond(ctx, CommandId.ENQUIRE_LINK_RESP, CommandStatus.ESME_ROK, seq, null);
                                 case CommandId.DELIVER_SM_RESP -> {
@@ -64,6 +71,23 @@ public final class FakeSmscServer {
 
         serverChannel = bootstrap.bind(0).sync().channel();
         return ((InetSocketAddress) serverChannel.localAddress()).getPort();
+    }
+
+    /** CODE_REVIEW.md finding #2 (тест) — не отвечать на submit_sm, имитируя тихую потерю ответа SMSC. */
+    public void setDropSubmitResponses(boolean drop) {
+        this.dropSubmitResponses = drop;
+    }
+
+    /**
+     * CODE_REVIEW.md CRITICAL #1 (тест) — обрывает TCP-соединение с текущим клиентом,
+     * не останавливая сам сервер (который продолжает слушать и примет reconnect).
+     * Симулирует сетевой блип/рестарт SMSC, а не graceful close с клиентской стороны.
+     */
+    public void disconnectClient() {
+        Channel ch = lastChannel.get();
+        if (ch != null) {
+            ch.close();
+        }
     }
 
     public void pushDeliverSm(ShortMessagePdu body, int sequenceNumber) {

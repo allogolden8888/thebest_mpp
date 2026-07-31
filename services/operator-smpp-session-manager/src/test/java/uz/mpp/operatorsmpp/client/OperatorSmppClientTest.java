@@ -7,6 +7,7 @@ import uz.mpp.operatorsmpp.codec.*;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -72,6 +73,34 @@ class OperatorSmppClientTest {
         assertTrue(latch.await(2, TimeUnit.SECONDS), "ожидали получить DLR через dlrSink в течение 2с");
         assertEquals(1, receivedDlrs.size());
         assertArrayEquals(dlrText, receivedDlrs.get(0).shortMessage());
+    }
+
+    @Test
+    void pendingResponseEntryIsClearedAfterTimeoutWithoutAnyChannelError() throws Exception {
+        // CODE_REVIEW.md HIGH #2 — конгестия/тихая потеря ответа оператором (не разрыв
+        // канала: exceptionCaught тут НЕ участвует) не должна оставлять запись в
+        // pendingResponses навсегда. FakeSmscServer.setDropSubmitResponses имитирует
+        // именно этот failure mode.
+        smsc = new FakeSmscServer();
+        int port = smsc.start();
+        smsc.setDropSubmitResponses(true);
+
+        client = new OperatorSmppClient(null);
+        client.connect("127.0.0.1", port);
+        client.bind("mpp_esme", "s3cr3t", "", 2000);
+        assertEquals(0, client.pendingResponseCount(), "после успешного bind ничего не должно ждать ответа");
+
+        ShortMessagePdu submitBody = new ShortMessagePdu("", (byte) 0, (byte) 1, "mpp_esme",
+            (byte) 0, (byte) 1, "998901234567", (byte) 0, (byte) 0, (byte) 0,
+            (byte) 1, (byte) 0, (byte) 0, (byte) 0, "hello".getBytes());
+
+        long shortTimeoutMs = 300; // не ждём реальные 5с SUBMIT_TIMEOUT_MS gRPC-слоя
+        assertThrows(TimeoutException.class, () -> client.submitSm(submitBody, shortTimeoutMs));
+
+        assertEquals(0, client.pendingResponseCount(),
+            "запись должна быть снята из pendingResponses сразу после таймаута — иначе утечка (finding #2)");
+        // соединение при этом остаётся живым — таймаут не должен рвать канал (finding #4 отдельно).
+        assertTrue(client.isActive());
     }
 
     @Test
