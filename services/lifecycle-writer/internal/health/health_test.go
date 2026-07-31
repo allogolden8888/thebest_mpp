@@ -23,13 +23,19 @@ func TestReadyz503UntilReady(t *testing.T) {
 	state := &State{}
 	srv := httptest.NewServer(Router(state))
 	defer srv.Close()
-	resp, _ := http.Get(srv.URL + "/readyz")
+	resp, err := http.Get(srv.URL + "/readyz")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("ожидали 503, получили %d", resp.StatusCode)
 	}
 	state.SetReady(true)
-	resp2, _ := http.Get(srv.URL + "/readyz")
+	resp2, err := http.Get(srv.URL + "/readyz")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
 	defer resp2.Body.Close()
 	if resp2.StatusCode != http.StatusOK {
 		t.Fatalf("ожидали 200, получили %d", resp2.StatusCode)

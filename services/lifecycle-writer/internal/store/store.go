@@ -22,7 +22,9 @@ func New(pool *pgxpool.Pool) *Store {
 
 // InsertReadModel — первая строка read model (INSERT, ON CONFLICT DO NOTHING
 // — IncomingMessage не должен переопределять уже существующую строку, если
-// consumer перечитывает после рестарта).
+// consumer перечитывает после рестарта). Оставлен для read-only/одиночных
+// вызовов (например тестов) — реальный consume-путь использует
+// BatchInsertReadModel, см. ниже.
 func (s *Store) InsertReadModel(ctx context.Context, row core.ReadModelRow) error {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO messaging.message_read_model
@@ -37,15 +39,76 @@ func (s *Store) InsertReadModel(ctx context.Context, row core.ReadModelRow) erro
 	return nil
 }
 
+// BatchInsertReadModel — batch-версия InsertReadModel (CODE_REVIEW.md
+// MEDIUM finding: read model писался синхронно по одной строке за раз,
+// не батчем вместе с history/dlq, как описывает service_internal_methods.md
+// §6.1 — риск отставания consumer'а под нагрузкой).
+func (s *Store) BatchInsertReadModel(ctx context.Context, rows []core.ReadModelRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	batch := &pgx.Batch{}
+	for _, row := range rows {
+		batch.Queue(`
+			INSERT INTO messaging.message_read_model
+				(message_id, partner_id, application_id, trace_id, pipeline_id, pipeline_version, current_status, terminal, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+			ON CONFLICT (message_id) DO NOTHING
+		`, row.MessageID, row.PartnerID, row.ApplicationID, row.TraceID, row.PipelineID, row.PipelineVersion,
+			row.CurrentStatus, row.Terminal, row.Timestamp)
+	}
+	br := s.pool.SendBatch(ctx, batch)
+	defer br.Close()
+	for range rows {
+		if _, err := br.Exec(); err != nil {
+			return fmt.Errorf("batch insert message_read_model: %w", err)
+		}
+	}
+	return nil
+}
+
 // UpdateReadModel — обновление current_status/terminal по message.lifecycle.
+// Оставлен для read-only/одиночных вызовов — реальный consume-путь
+// использует BatchUpdateReadModel, см. ниже.
+//
+// lifecycle_version — CODE_REVIEW.md MEDIUM finding: раньше обновление
+// было безусловным, без защиты от переупорядоченной/повторной доставки —
+// партиционный rebalance, редоставивший старый SUBMITTED уже ПОСЛЕ того,
+// как был применён более новый DELIVERED, откатывал партнёр-facing read
+// model назад. `AND lifecycle_version < $5` — обновление применяется,
+// только если оно новее уже применённого (миграция V019).
 func (s *Store) UpdateReadModel(ctx context.Context, update core.ReadModelUpdate) error {
 	_, err := s.pool.Exec(ctx, `
 		UPDATE messaging.message_read_model
-		SET current_status = $2, terminal = $3, updated_at = $4
-		WHERE message_id = $1
-	`, update.MessageID, update.CurrentStatus, update.Terminal, update.UpdatedAt)
+		SET current_status = $2, terminal = $3, updated_at = $4, lifecycle_version = $5
+		WHERE message_id = $1 AND lifecycle_version < $5
+	`, update.MessageID, update.CurrentStatus, update.Terminal, update.UpdatedAt, update.LifecycleVersion)
 	if err != nil {
 		return fmt.Errorf("update message_read_model: %w", err)
+	}
+	return nil
+}
+
+// BatchUpdateReadModel — batch-версия UpdateReadModel, та же
+// lifecycle_version-защита от out-of-order/дубликатов.
+func (s *Store) BatchUpdateReadModel(ctx context.Context, updates []core.ReadModelUpdate) error {
+	if len(updates) == 0 {
+		return nil
+	}
+	batch := &pgx.Batch{}
+	for _, update := range updates {
+		batch.Queue(`
+			UPDATE messaging.message_read_model
+			SET current_status = $2, terminal = $3, updated_at = $4, lifecycle_version = $5
+			WHERE message_id = $1 AND lifecycle_version < $5
+		`, update.MessageID, update.CurrentStatus, update.Terminal, update.UpdatedAt, update.LifecycleVersion)
+	}
+	br := s.pool.SendBatch(ctx, batch)
+	defer br.Close()
+	for range updates {
+		if _, err := br.Exec(); err != nil {
+			return fmt.Errorf("batch update message_read_model: %w", err)
+		}
 	}
 	return nil
 }

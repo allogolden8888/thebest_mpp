@@ -98,10 +98,11 @@ func FromLifecycleEvent(event *eventsv1.MessageLifecycleEvent) (ReadModelUpdate,
 	occurredAt := event.GetOccurredAt().AsTime()
 
 	update := ReadModelUpdate{
-		MessageID:     event.GetMessageId(),
-		CurrentStatus: status,
-		Terminal:      event.GetTerminal(),
-		UpdatedAt:     occurredAt,
+		MessageID:        event.GetMessageId(),
+		CurrentStatus:    status,
+		Terminal:         event.GetTerminal(),
+		UpdatedAt:        occurredAt,
+		LifecycleVersion: event.GetLifecycleVersion(),
 	}
 	history := LifecycleHistoryRow{
 		MessageID:        event.GetMessageId(),
@@ -115,11 +116,16 @@ func FromLifecycleEvent(event *eventsv1.MessageLifecycleEvent) (ReadModelUpdate,
 }
 
 // ReadModelUpdate — частичное обновление message_read_model по message.lifecycle.
+//
+// LifecycleVersion — CODE_REVIEW.md MEDIUM finding: без него UpdateReadModel
+// не может отличить редоставленное старое событие (после rebalance) от
+// настоящего нового — см. store.Store.UpdateReadModel/BatchUpdateReadModel.
 type ReadModelUpdate struct {
-	MessageID     string
-	CurrentStatus string
-	Terminal      bool
-	UpdatedAt     time.Time
+	MessageID        string
+	CurrentStatus    string
+	Terminal         bool
+	UpdatedAt        time.Time
+	LifecycleVersion int64
 }
 
 func stageNameString(s commonv1.StageName) string {

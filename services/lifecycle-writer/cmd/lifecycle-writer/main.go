@@ -1,6 +1,37 @@
 // Lifecycle Writer (services_specifictaion.md §7.1): incoming.messages +
 // message.lifecycle + stage.*.dlq -> PostgreSQL (read model, lifecycle
 // history, DLQ record). stage.completed сознательно не читается.
+//
+// CODE_REVIEW.md HIGH findings — что изменилось в этом файле и почему:
+//   - Раньше buf.history/buf.dlq очищались ПОД ЛОКОМ до подтверждения
+//     успешной записи (flush читал+обнулял буфер, потом писал в Postgres)
+//     — при сбое записи данные терялись безвозвратно, лог был единственным
+//     следом. Плюс InsertReadModel/UpdateReadModel писались синхронно по
+//     одной строке в consume-цикле — та же "запись без подтверждения"
+//     проблема, только без буфера вообще.
+//   - Плюс kgo.NewClient не передавал kgo.DisableAutoCommit() — franz-go
+//     автокоммитил позицию раз в 5с НЕЗАВИСИМО от того, успела ли
+//     запись в Postgres пройти. Транзиентный сбой Postgres на несколько
+//     секунд означал permanent data loss для всего, что было
+//     забуферизовано/обработано в этом окне — при рестарте consumer
+//     продолжал бы с уже закоммиченной (за пределами реально записанных
+//     данных) позиции.
+//   - Плюс graceful shutdown не дренировал буфер — SIGTERM просто
+//     отменял контекст, обычный rolling deploy терял всё, что было
+//     накоплено с последнего тика.
+//
+// Исправлено единой моделью: consume-цикл только декодирует и
+// буферизует (никаких синхронных записей в БД в hot path — заодно
+// закрывает MEDIUM-находку про несовпадение с §6.1, который описывает
+// батчинг всех таблиц вместе), commit смещений — ПОЛНОСТЬЮ ручной
+// (kgo.DisableAutoCommit()) и происходит только ПОСЛЕ того, как flush
+// подтвердил успешную запись всех накопленных данных. При сбое записи
+// весь снятый с буфера набор (включая связанные *kgo.Record) возвращается
+// обратно в буфер для повтора на следующем тике — ничего не теряется, а
+// SQL идемпотентен (ON CONFLICT DO NOTHING для INSERT,
+// lifecycle_version-guard для UPDATE), так что повторная попытка частично
+// уже применённого набора безопасна. При остановке — WaitGroup вокруг
+// обоих goroutine + финальный flush перед выходом.
 package main
 
 import (
@@ -43,11 +74,48 @@ func buildPostgresDSN() string {
 	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s", user, password, host, port, db)
 }
 
-// buffer — batch_buffer: накопление per-таблица между flush_batch тиками.
+// buffer — batch_buffer: накопление между flush_batch тиками. Все поля
+// защищены mu; records несёт *kgo.Record для КАЖДОЙ порции данных выше
+// (в т.ч. для строк, приведших только к synchronous-в-старом-смысле
+// insert/update) — коммитится только после подтверждённой записи всей
+// порции, см. flush().
 type buffer struct {
-	mu        sync.Mutex
-	history   []core.LifecycleHistoryRow
-	dlq       []core.DlqRow
+	mu      sync.Mutex
+	inserts []core.ReadModelRow
+	updates []core.ReadModelUpdate
+	history []core.LifecycleHistoryRow
+	dlq     []core.DlqRow
+	records []*kgo.Record
+}
+
+func (b *buffer) empty() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.inserts) == 0 && len(b.updates) == 0 && len(b.history) == 0 && len(b.dlq) == 0
+}
+
+// drain — атомарно забирает всё накопленное и обнуляет буфер (НЕ
+// подтверждение успеха — вызывающий обязан restore() при сбое записи).
+func (b *buffer) drain() (inserts []core.ReadModelRow, updates []core.ReadModelUpdate, history []core.LifecycleHistoryRow, dlq []core.DlqRow, records []*kgo.Record) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	inserts, updates, history, dlq, records = b.inserts, b.updates, b.history, b.dlq, b.records
+	b.inserts, b.updates, b.history, b.dlq, b.records = nil, nil, nil, nil, nil
+	return
+}
+
+// restore — возвращает снятую drain() порцию обратно в начало буфера
+// (перед тем, что успело накопиться после drain) — используется, когда
+// запись в Postgres провалилась, чтобы следующий тик повторил ровно то
+// же самое (плюс всё новое, накопленное за это время).
+func (b *buffer) restore(inserts []core.ReadModelRow, updates []core.ReadModelUpdate, history []core.LifecycleHistoryRow, dlq []core.DlqRow, records []*kgo.Record) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.inserts = append(inserts, b.inserts...)
+	b.updates = append(updates, b.updates...)
+	b.history = append(history, b.history...)
+	b.dlq = append(dlq, b.dlq...)
+	b.records = append(records, b.records...)
 }
 
 func main() {
@@ -74,6 +142,11 @@ func main() {
 		kgo.SeedBrokers(brokers...),
 		kgo.ConsumerGroup("lifecycle-writer"),
 		kgo.ConsumeTopics(topics...),
+		// CODE_REVIEW.md HIGH finding: коммит смещений теперь полностью
+		// ручной (client.CommitRecords в flush()), только после
+		// подтверждённой записи — не на 5-секундном таймере, независимо
+		// от успеха.
+		kgo.DisableAutoCommit(),
 	)
 	if err != nil {
 		log.Fatalf("не удалось создать Kafka consumer: %v", err)
@@ -85,8 +158,10 @@ func main() {
 	loopCtx, loopCancel := context.WithCancel(context.Background())
 	defer loopCancel()
 
-	go runConsumeLoop(loopCtx, client, pool, buf)
-	go runFlushLoop(loopCtx, db, buf)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); runConsumeLoop(loopCtx, client, buf) }()
+	go func() { defer wg.Done(); runFlushLoop(loopCtx, db, client, buf) }()
 
 	healthState.SetReady(true)
 	log.Println("lifecycle-writer готов")
@@ -97,13 +172,17 @@ func main() {
 
 	log.Println("остановка lifecycle-writer")
 	loopCancel()
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	wg.Wait()
+	// Финальный drain — не даём последней порции буфера (накопленной
+	// между последним тиком и остановкой) пропасть на обычном rolling
+	// deploy.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
+	flush(shutdownCtx, db, client, buf)
 	_ = healthSrv.Shutdown(shutdownCtx)
 }
 
-func runConsumeLoop(ctx context.Context, client *kgo.Client, pool *pgxpool.Pool, buf *buffer) {
-	db := store.New(pool)
+func runConsumeLoop(ctx context.Context, client *kgo.Client, buf *buffer) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -123,9 +202,10 @@ func runConsumeLoop(ctx context.Context, client *kgo.Client, pool *pgxpool.Pool,
 					log.Printf("decode incoming.messages failed: %v", err)
 					return
 				}
-				if err := db.InsertReadModel(ctx, core.FromIncomingMessage(msg)); err != nil {
-					log.Printf("InsertReadModel failed: %v", err)
-				}
+				buf.mu.Lock()
+				buf.inserts = append(buf.inserts, core.FromIncomingMessage(msg))
+				buf.records = append(buf.records, rec)
+				buf.mu.Unlock()
 			case "message.lifecycle":
 				event, err := kafkaio.DecodeLifecycleEvent(rec.Value)
 				if err != nil {
@@ -133,11 +213,10 @@ func runConsumeLoop(ctx context.Context, client *kgo.Client, pool *pgxpool.Pool,
 					return
 				}
 				update, historyRow := core.FromLifecycleEvent(event)
-				if err := db.UpdateReadModel(ctx, update); err != nil {
-					log.Printf("UpdateReadModel failed: %v", err)
-				}
 				buf.mu.Lock()
+				buf.updates = append(buf.updates, update)
 				buf.history = append(buf.history, historyRow)
+				buf.records = append(buf.records, rec)
 				buf.mu.Unlock()
 			default:
 				rec2, err := kafkaio.DecodeDlqRecord(rec.Value)
@@ -152,13 +231,14 @@ func runConsumeLoop(ctx context.Context, client *kgo.Client, pool *pgxpool.Pool,
 				}
 				buf.mu.Lock()
 				buf.dlq = append(buf.dlq, dlqRow)
+				buf.records = append(buf.records, rec)
 				buf.mu.Unlock()
 			}
 		})
 	}
 }
 
-func runFlushLoop(ctx context.Context, db *store.Store, buf *buffer) {
+func runFlushLoop(ctx context.Context, db *store.Store, client *kgo.Client, buf *buffer) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -166,23 +246,54 @@ func runFlushLoop(ctx context.Context, db *store.Store, buf *buffer) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			flush(ctx, db, buf)
+			flush(ctx, db, client, buf)
 		}
 	}
 }
 
-func flush(ctx context.Context, db *store.Store, buf *buffer) {
-	buf.mu.Lock()
-	history := buf.history
-	dlq := buf.dlq
-	buf.history = nil
-	buf.dlq = nil
-	buf.mu.Unlock()
+// flush — flush_batch. Не очищает буфер до подтверждённой успешной
+// записи (см. package doc): при любой ошибке весь снятый набор
+// возвращается в буфер через restore() для повтора на следующем тике, и
+// офсеты НЕ коммитятся — падение процесса до следующей успешной попытки
+// безопасно передоставит эти же записи (SQL идемпотентен).
+func flush(ctx context.Context, db *store.Store, client *kgo.Client, buf *buffer) {
+	if buf.empty() {
+		return
+	}
+	inserts, updates, history, dlq, records := buf.drain()
 
+	if err := db.BatchInsertReadModel(ctx, inserts); err != nil {
+		log.Printf("flush_batch (message_read_model insert) failed, будет повторено: %v", err)
+		buf.restore(inserts, updates, history, dlq, records)
+		return
+	}
+	if err := db.BatchUpdateReadModel(ctx, updates); err != nil {
+		log.Printf("flush_batch (message_read_model update) failed, будет повторено: %v", err)
+		buf.restore(nil, updates, history, dlq, records)
+		return
+	}
 	if err := db.BatchInsertLifecycleHistory(ctx, history); err != nil {
-		log.Printf("flush_batch (lifecycle_history) failed: %v", err)
+		log.Printf("flush_batch (lifecycle_history) failed, будет повторено: %v", err)
+		buf.restore(nil, nil, history, dlq, records)
+		return
 	}
 	if err := db.BatchInsertDlq(ctx, dlq); err != nil {
-		log.Printf("flush_batch (dlq_record) failed: %v", err)
+		log.Printf("flush_batch (dlq_record) failed, будет повторено: %v", err)
+		buf.restore(nil, nil, nil, dlq, records)
+		return
+	}
+
+	if len(records) == 0 {
+		return
+	}
+	if err := client.CommitRecords(ctx, records...); err != nil {
+		// Запись в Postgres уже подтверждена и идемпотентна — при
+		// перезапуске до успешного коммита эти же записи передоставятся
+		// и безопасно no-op'нут (ON CONFLICT DO NOTHING /
+		// lifecycle_version-guard), поэтому здесь НЕ восстанавливаем
+		// буфер — иначе они попытались бы записаться в Postgres ещё раз
+		// без необходимости на каждом следующем тике до тех пор, пока
+		// commit не пройдёт.
+		log.Printf("commit offsets failed (данные уже записаны, будет передоставлено при рестарте до следующего успешного commit): %v", err)
 	}
 }
