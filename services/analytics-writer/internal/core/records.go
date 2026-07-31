@@ -12,16 +12,32 @@ import (
 )
 
 // NormalizedRecord — одна строка analytics.stage_events (ClickHouse,
-// широкая денормализованная таблица, см. store/schema.go).
+// широкая денормализованная таблица, см. store/store.go).
+//
+// EventID — CODE_REVIEW.md MEDIUM/HIGH finding: raw-таблица не имела
+// никакого dedup-ключа (`MergeTree()`, без `ReplacingMergeTree`/version
+// column), а redelivery при at-least-once Kafka (обычное дело на
+// rebalance/restart) вставляла событие второй раз как новую строку,
+// молча раздувая `count()`-агрегаты, которые Backoffice/Partner API
+// report-запросы строят прямо по этой таблице. EventID — стабильный
+// идентификатор конкретного события (не сообщения в целом), одинаковый
+// при повторной доставке того же самого события: для incoming —
+// message_id (одно "incoming"-событие на сообщение), для stage_completed
+// — stage_execution_id (тот же ключ идемпотентности, что используется
+// по всей платформе), для lifecycle — event_id из самого события. См.
+// store.go — таблица теперь ReplacingMergeTree по (occurred_at, event_id,
+// message_id), а Report-запросы в backoffice-api/partner-api читают её
+// с FINAL, чтобы дубликаты не попадали в агрегаты на чтении.
 type NormalizedRecord struct {
-	EventType     string // "incoming" | "stage_completed" | "lifecycle"
-	MessageID     string
-	PartnerID     string
-	StageName     string
-	Outcome       string
-	ReasonCode    string
+	EventType       string // "incoming" | "stage_completed" | "lifecycle"
+	EventID         string
+	MessageID       string
+	PartnerID       string
+	StageName       string
+	Outcome         string
+	ReasonCode      string
 	LifecycleStatus string
-	OccurredAt    time.Time
+	OccurredAt      time.Time
 }
 
 func stageNameString(s commonv1.StageName) string {
@@ -87,9 +103,13 @@ func lifecycleStatusString(status commonv1.MessageLifecycleStatus) string {
 	}
 }
 
+// FromIncomingMessage — event_id = message_id: ровно одно "incoming"
+// событие публикуется на сообщение, так что message_id уже однозначно
+// идентифицирует его для дедупликации при redelivery.
 func FromIncomingMessage(msg *eventsv1.IncomingMessage) NormalizedRecord {
 	return NormalizedRecord{
 		EventType:  "incoming",
+		EventID:    msg.GetMessageId(),
 		MessageID:  msg.GetMessageId(),
 		PartnerID:  msg.GetPartnerId(),
 		OccurredAt: msg.GetReceivedAt().AsTime(),
@@ -99,6 +119,7 @@ func FromIncomingMessage(msg *eventsv1.IncomingMessage) NormalizedRecord {
 func FromStageCompleted(event *commonv1.StageCompletedEvent) NormalizedRecord {
 	return NormalizedRecord{
 		EventType:  "stage_completed",
+		EventID:    event.GetEventId(),
 		MessageID:  event.GetMessageId(),
 		StageName:  stageNameString(event.GetStageName()),
 		Outcome:    outcomeString(event.GetOutcome()),
@@ -110,6 +131,7 @@ func FromStageCompleted(event *commonv1.StageCompletedEvent) NormalizedRecord {
 func FromLifecycleEvent(event *eventsv1.MessageLifecycleEvent) NormalizedRecord {
 	return NormalizedRecord{
 		EventType:       "lifecycle",
+		EventID:         event.GetEventId(),
 		MessageID:       event.GetMessageId(),
 		LifecycleStatus: lifecycleStatusString(event.GetStatus()),
 		OccurredAt:      event.GetOccurredAt().AsTime(),

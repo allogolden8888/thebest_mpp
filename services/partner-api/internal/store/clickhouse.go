@@ -59,10 +59,17 @@ type ReportFilter struct {
 // уже свёрнут по всем партнёрам, см. analytics-writer/internal/store/store.go)
 // — партнёрский срез строится напрямую из analytics.stage_events (сырые
 // строки), не из MV. Открытый вопрос по этому расхождению — см. README.
+//
+// FINAL — analytics-writer/CODE_REVIEW.md finding: analytics.stage_events
+// теперь ReplacingMergeTree по (occurred_at, event_id, message_id) —
+// at-least-once redelivery одного события может оставить дубликат-строку
+// до фонового merge. FINAL форсирует merge-on-read, чтобы count() здесь
+// не раздувался на ещё не смерженных дубликатах (цена — дороже обычного
+// SELECT, приемлемо для low-QPS report-эндпоинта).
 func (c *ClickHouse) Report(ctx context.Context, filter ReportFilter) ([]ReportRow, error) {
 	query := `
 		SELECT toStartOfHour(occurred_at) AS hour, stage_name, outcome, count() AS event_count
-		FROM analytics.stage_events
+		FROM analytics.stage_events FINAL
 		WHERE event_type = 'stage_completed' AND partner_id = ?
 	`
 	args := []interface{}{filter.PartnerID}

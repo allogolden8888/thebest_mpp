@@ -29,9 +29,14 @@ func testClickHouseConn(t *testing.T) chdriver.Conn {
 	if err := conn.Exec(ctx, "CREATE DATABASE IF NOT EXISTS analytics"); err != nil {
 		t.Fatalf("create database failed: %v", err)
 	}
+	// Схема должна совпадать с analytics-writer/internal/store/store.go
+	// (владелец таблицы) — ReplacingMergeTree/event_id, иначе тест `FINAL`
+	// в Report() (см. clickhouse.go) проверял бы не то, что реально
+	// работает в проде.
 	if err := conn.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS analytics.stage_events (
 			event_type       String,
+			event_id         String,
 			message_id       String,
 			partner_id       String,
 			stage_name       String,
@@ -40,8 +45,8 @@ func testClickHouseConn(t *testing.T) chdriver.Conn {
 			lifecycle_status String,
 			occurred_at      DateTime64(3),
 			ingested_at      DateTime64(3) DEFAULT now64(3)
-		) ENGINE = MergeTree()
-		ORDER BY (occurred_at, message_id)
+		) ENGINE = ReplacingMergeTree()
+		ORDER BY (occurred_at, event_id, message_id)
 	`); err != nil {
 		t.Fatalf("create table failed: %v", err)
 	}

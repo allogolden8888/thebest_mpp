@@ -55,10 +55,17 @@ type ReportFilter struct {
 	StageName string
 }
 
+// FINAL — analytics-writer/CODE_REVIEW.md finding: analytics.stage_events
+// is a ReplacingMergeTree keyed on (occurred_at, event_id, message_id) —
+// at-least-once Kafka redelivery of the same event can leave duplicate
+// rows until a background merge collapses them. FINAL forces merge-on-read
+// so count() here isn't inflated by not-yet-merged duplicates (real cost:
+// more expensive than a plain SELECT — acceptable for a low-QPS reporting
+// endpoint, see services/analytics-writer/internal/store/store.go).
 func (c *ClickHouse) Report(ctx context.Context, filter ReportFilter) ([]ReportRow, error) {
 	query := `
 		SELECT toStartOfHour(occurred_at) AS hour, partner_id, stage_name, outcome, count() AS event_count
-		FROM analytics.stage_events
+		FROM analytics.stage_events FINAL
 		WHERE event_type = 'stage_completed'
 	`
 	var args []interface{}
