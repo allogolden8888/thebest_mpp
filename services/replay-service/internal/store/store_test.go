@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -108,6 +110,109 @@ func TestChargeExistsInLedgerRealCheck(t *testing.T) {
 	}
 	if !exists {
 		t.Fatalf("charge_id должен существовать после вставки")
+	}
+}
+
+// TestClaimForReplaySucceedsOnce — CODE_REVIEW.md CRITICAL finding #2:
+// baseline single-claim behavior.
+func TestClaimForReplaySucceedsOnce(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	s := New(pool)
+	ctx := context.Background()
+
+	stageExecutionID := uniqueUUID()
+	insertDlqRecord(t, pool, stageExecutionID, uniqueUUID(), "BILLING", time.Now().Add(time.Hour))
+
+	record, claimed, err := s.ClaimForReplay(ctx, stageExecutionID)
+	if err != nil {
+		t.Fatalf("ClaimForReplay failed: %v", err)
+	}
+	if !claimed {
+		t.Fatalf("ожидали claimed=true для pending записи")
+	}
+	if record.ReplayStatus != "in_progress" {
+		t.Fatalf("ожидали replay_status=in_progress, получили %s", record.ReplayStatus)
+	}
+
+	// Повторный claim той же записи (ещё in_progress) должен провалиться.
+	_, claimedAgain, err := s.ClaimForReplay(ctx, stageExecutionID)
+	if err != nil {
+		t.Fatalf("ClaimForReplay (второй раз) failed: %v", err)
+	}
+	if claimedAgain {
+		t.Fatalf("повторный claim уже in_progress записи не должен проходить")
+	}
+}
+
+// TestClaimForReplayConcurrentClaimsOnlyOneWins — CODE_REVIEW.md CRITICAL
+// finding #2: реальный TOCTOU-регрессионный тест против настоящего
+// PostgreSQL. Раньше (LoadDlqRecord + отдельный MarkReplayed после
+// republish) 20 конкурентных вызовов для одной stage_execution_id все
+// прошли бы check_idempotency и все республиковали бы — DELIVERY-стадийная
+// запись ушла бы абоненту физически много раз. Атомарный
+// UPDATE ... WHERE replay_status='pending' ... RETURNING гарантирует
+// ровно одного победителя.
+func TestClaimForReplayConcurrentClaimsOnlyOneWins(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	s := New(pool)
+
+	stageExecutionID := uniqueUUID()
+	insertDlqRecord(t, pool, stageExecutionID, uniqueUUID(), "DELIVERY", time.Now().Add(time.Hour))
+
+	const concurrency = 20
+	var wg sync.WaitGroup
+	var claimedCount int64
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, claimed, err := s.ClaimForReplay(context.Background(), stageExecutionID)
+			if err != nil {
+				t.Errorf("ClaimForReplay failed: %v", err)
+				return
+			}
+			if claimed {
+				atomic.AddInt64(&claimedCount, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if claimedCount != 1 {
+		t.Fatalf("ожидали ровно 1 успешный claim из %d конкурентных вызовов, получили %d", concurrency, claimedCount)
+	}
+}
+
+// TestReleaseClaimReturnsToPending — billing/delivery-unsafe путь должен
+// оставлять запись доступной для будущей попытки, не "успешно
+// обработанной" и не зависшей в in_progress навсегда.
+func TestReleaseClaimReturnsToPending(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	s := New(pool)
+	ctx := context.Background()
+
+	stageExecutionID := uniqueUUID()
+	insertDlqRecord(t, pool, stageExecutionID, uniqueUUID(), "BILLING", time.Now().Add(time.Hour))
+
+	if _, claimed, err := s.ClaimForReplay(ctx, stageExecutionID); err != nil || !claimed {
+		t.Fatalf("setup claim failed: claimed=%v err=%v", claimed, err)
+	}
+	if err := s.ReleaseClaim(ctx, stageExecutionID); err != nil {
+		t.Fatalf("ReleaseClaim failed: %v", err)
+	}
+
+	record, claimed, err := s.ClaimForReplay(ctx, stageExecutionID)
+	if err != nil {
+		t.Fatalf("re-claim after release failed: %v", err)
+	}
+	if !claimed {
+		t.Fatalf("после ReleaseClaim запись должна снова быть claim-able (pending)")
+	}
+	if record.StageName != "BILLING" {
+		t.Fatalf("неверные данные после re-claim: %+v", record)
 	}
 }
 

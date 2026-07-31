@@ -20,11 +20,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 
+	"mpp/replay-service/internal/controlsnapshot"
 	"mpp/replay-service/internal/grpcserver"
 	"mpp/replay-service/internal/health"
 	"mpp/replay-service/internal/kafkaio"
 	"mpp/replay-service/internal/store"
 
+	commonv1 "mpp/platformcontracts/common/v1"
+	eventsv1 "mpp/platformcontracts/events/v1"
 	grpcv1 "mpp/platformcontracts/grpc/v1"
 )
 
@@ -73,7 +76,33 @@ func main() {
 	}
 	defer publisher.Close()
 
-	srv := grpcserver.New(st, st, st, st, publisher)
+	// check_execution_control (CODE_REVIEW.md HIGH finding #4) —
+	// снапшот execution.control как локальный full-mirror (см. package doc
+	// в internal/kafkaio/controlconsumer.go). Пустой снапшот на старте не
+	// блокирует ни один replay (fail-open до первого прогона консьюмера,
+	// как и у остальных потребителей execution.control этой сессии) — не
+	// делает readiness зависимым от прогрева снапшота, потому что
+	// RequestReplay — редкая, ручная операция, а не постоянный hot-path
+	// цикл, где узкое окно fail-open на старте пода несёт тот же риск.
+	controlConsumer, err := kafkaio.NewControlConsumer(brokers)
+	if err != nil {
+		log.Fatalf("не удалось создать Kafka consumer для execution.control: %v", err)
+	}
+	defer controlConsumer.Close()
+	snapshot := controlsnapshot.New()
+	controlCtx, controlCancel := context.WithCancel(context.Background())
+	defer controlCancel()
+	go controlConsumer.Run(controlCtx, func(rec *eventsv1.ExecutionControlRecord, scope commonv1.ExecutionControlScope, scopeID string, tombstone bool) {
+		if tombstone {
+			snapshot.Delete(scope, scopeID)
+			return
+		}
+		snapshot.Apply(scope, scopeID, rec.GetState())
+	}, func(err error) {
+		log.Printf("execution.control consume error: %v", err)
+	})
+
+	srv := grpcserver.New(st, st, st, st, snapshot, publisher)
 
 	grpcServer := grpc.NewServer()
 	grpcv1.RegisterReplayServiceServer(grpcServer, srv)

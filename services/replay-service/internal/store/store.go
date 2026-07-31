@@ -7,9 +7,11 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mpp/replay-service/internal/core"
@@ -27,12 +29,16 @@ func New(pool *pgxpool.Pool) *Store {
 }
 
 // LoadDlqRecord — load_dlq_record: stage_execution_id -> DlqRecord (+ message_ttl из original_command).
+// Только для read-only просмотра — сам replay-путь использует
+// ClaimForReplay (см. ниже), не этот метод (CODE_REVIEW.md CRITICAL
+// finding #2 — TOCTOU-гонка).
 func (s *Store) LoadDlqRecord(ctx context.Context, stageExecutionID string) (core.DlqRecord, error) {
 	var (
-		messageID, stageName, reasonCode, errorDetail, replayStatus string
-		attempt                                                     int32
-		originalCommand                                             []byte
-		createdAt                                                   time.Time
+		messageID, stageName, reasonCode, replayStatus string
+		errorDetail                                     *string // nullable, migrations/V006__dlq_record.sql
+		attempt                                          int32
+		originalCommand                                  []byte
+		createdAt                                        time.Time
 	)
 	err := s.pool.QueryRow(ctx, `
 		SELECT message_id, stage_name, attempt, original_command, reason_code, error_detail, created_at, replay_status
@@ -50,9 +56,11 @@ func (s *Store) LoadDlqRecord(ctx context.Context, stageExecutionID string) (cor
 		Attempt:          attempt,
 		OriginalCommand:  originalCommand,
 		ReasonCode:       reasonCode,
-		ErrorDetail:      errorDetail,
 		CreatedAt:        createdAt,
 		ReplayStatus:     replayStatus,
+	}
+	if errorDetail != nil {
+		record.ErrorDetail = *errorDetail
 	}
 
 	var cmd commonv1.StageExecuteCommand
@@ -60,6 +68,86 @@ func (s *Store) LoadDlqRecord(ctx context.Context, stageExecutionID string) (cor
 		record.MessageTTL = cmd.GetMessageTtl().AsTime()
 	}
 	return record, nil
+}
+
+// ClaimForReplay — CODE_REVIEW.md CRITICAL finding #2: раньше
+// load_dlq_record (SELECT) и MarkReplayed (UPDATE, только после успешного
+// republish) были два отдельных шага без единого атомарного "claim" между
+// ними. Два конкурентных RequestReplay для одного stage_execution_id
+// (двойной клик в Backoffice UI, gRPC-ретрай после таймаута, два Backoffice
+// API пода, проксирующих одно действие) оба читали replay_status='pending',
+// оба проходили check_idempotency (единственную защиту от повторной
+// обработки), и оба республиковали — DELIVERY-стадийная запись могла уйти
+// абоненту физически дважды, BILLING-стадийная — списаться дважды.
+//
+// Атомарный UPDATE ... WHERE replay_status='pending' ... RETURNING —
+// только ОДИН конкурентный вызов может успешно перевести запись
+// pending -> in_progress; остальные видят 0 обновлённых строк и получают
+// claimed=false с текущим (уже не pending) статусом, из которого
+// вызывающий формирует точную причину отказа (уже реплеена/просрочена/
+// реплеится прямо сейчас), не проходя дальше ни к каким safety-проверкам.
+func (s *Store) ClaimForReplay(ctx context.Context, stageExecutionID string) (record core.DlqRecord, claimed bool, err error) {
+	var (
+		messageID, stageName, reasonCode string
+		errorDetail                       *string
+		attempt                           int32
+		originalCommand                   []byte
+		createdAt                         time.Time
+	)
+	scanErr := s.pool.QueryRow(ctx, `
+		UPDATE messaging.dlq_record
+		SET replay_status = 'in_progress'
+		WHERE stage_execution_id = $1 AND replay_status = 'pending'
+		RETURNING message_id, stage_name, attempt, original_command, reason_code, error_detail, created_at
+	`, stageExecutionID).Scan(&messageID, &stageName, &attempt, &originalCommand, &reasonCode, &errorDetail, &createdAt)
+
+	if scanErr == nil {
+		record = core.DlqRecord{
+			StageExecutionID: stageExecutionID,
+			MessageID:        messageID,
+			StageName:        stageName,
+			Attempt:          attempt,
+			OriginalCommand:  originalCommand,
+			ReasonCode:       reasonCode,
+			CreatedAt:        createdAt,
+			ReplayStatus:     "in_progress",
+		}
+		if errorDetail != nil {
+			record.ErrorDetail = *errorDetail
+		}
+		var cmd commonv1.StageExecuteCommand
+		if err := proto.Unmarshal(originalCommand, &cmd); err == nil && cmd.GetMessageTtl() != nil {
+			record.MessageTTL = cmd.GetMessageTtl().AsTime()
+		}
+		return record, true, nil
+	}
+	if !errors.Is(scanErr, pgx.ErrNoRows) {
+		return core.DlqRecord{}, false, fmt.Errorf("claim_for_replay: %w", scanErr)
+	}
+
+	// 0 строк обновлено — либо записи не существует, либо она не в
+	// 'pending' (уже in_progress/replayed/expired). Читаем текущий статус
+	// отдельно, чтобы вызывающий мог вернуть точную причину, а не общий
+	// NOT_FOUND для обоих случаев.
+	var currentStatus string
+	lookupErr := s.pool.QueryRow(ctx, `SELECT replay_status FROM messaging.dlq_record WHERE stage_execution_id = $1`, stageExecutionID).Scan(&currentStatus)
+	if lookupErr != nil {
+		return core.DlqRecord{}, false, fmt.Errorf("claim_for_replay: запись не найдена: %w", lookupErr)
+	}
+	return core.DlqRecord{StageExecutionID: stageExecutionID, ReplayStatus: currentStatus}, false, nil
+}
+
+// ReleaseClaim — откатывает in_progress обратно в pending: используется,
+// когда safety-проверка (billing/delivery) провалилась ПОСЛЕ claim — та же
+// семантика, что и раньше (запись остаётся pending, доступна для будущей
+// повторной попытки, если условие перестанет быть unsafe), не "успешно
+// обработана".
+func (s *Store) ReleaseClaim(ctx context.Context, stageExecutionID string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE messaging.dlq_record SET replay_status = 'pending' WHERE stage_execution_id = $1 AND replay_status = 'in_progress'`, stageExecutionID)
+	if err != nil {
+		return fmt.Errorf("release_claim: %w", err)
+	}
+	return nil
 }
 
 // ChargeExistsInLedger — вход check_billing_side_effect.
