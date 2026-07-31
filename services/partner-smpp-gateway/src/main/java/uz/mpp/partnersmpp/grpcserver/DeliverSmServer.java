@@ -22,6 +22,20 @@ import uz.mpp.platformcontracts.grpc.v1.PartnerDeliverSmServiceGrpc;
  * возвращается сразу после успешной записи в канал, не после реального
  * deliver_sm_resp от партнёра (корреляция по sequence_number с ожидающим
  * gRPC-вызовом не реализована в этом срезе, см. README "Что НЕ реализовано").
+ *
+ * <p><b>Кодревью (CODE_REVIEW.md, "partner-smpp-gateway" #1, CRITICAL) —
+ * расследовано, см. README "Проверено кодревью".</b> Нет interceptor'а/TLS
+ * здесь в коде — сервер полагается на mTLS + identity-аутентификацию Istio
+ * mesh (namespace-wide {@code PeerAuthentication STRICT},
+ * {@code infra/istio/peer-authentication-strict.yaml}) в сочетании с
+ * {@code NetworkPolicy}, сгенерированной из явного
+ * {@code CALL_GRAPH}-ребра {@code partner-notification-service ->
+ * partner-smpp-gateway} ({@code k8s/network_policies.py}) — на сетевом
+ * уровне порт 9000 доступен ТОЛЬКО подам Partner Notification Service, и
+ * каждое такое соединение обязано пройти mTLS с проверкой identity пода на
+ * уровне mesh. "Любой сосед по namespace" из находки кодревью не
+ * подтверждается: без соответствующего NetworkPolicy-правила подключиться
+ * к этому порту не может ни один под, кроме явно разрешённого.
  */
 public final class DeliverSmServer extends PartnerDeliverSmServiceGrpc.PartnerDeliverSmServiceImplBase {
 

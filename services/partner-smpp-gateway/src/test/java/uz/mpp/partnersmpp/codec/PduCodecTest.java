@@ -134,6 +134,42 @@ class PduCodecTest {
         assertEquals(buf.readableBytes(), commandLength, "command_length должен совпадать с реальным размером фрейма");
     }
 
+    /**
+     * Прямое доказательство реального бага, найденного при исправлении
+     * HIGH #3 (SmppServerHandler.respond(..., null) на отклонённый bind —
+     * ESME_RINVPASWD — строит Pdu.headerOnly(...) с body=null НАМЕРЕННО):
+     * раньше {@code encodeBody}'s BIND_TRANSCEIVER_RESP ветка безусловно
+     * кастовала body и звала {@code .systemId()}, давая NullPointerException
+     * прямо при попытке закодировать сам ответ об отказе — партнёр никогда
+     * не получал ответ на неверный пароль вообще (соединение просто
+     * зависало без ответа при отсутствии exceptionCaught, или падало
+     * невидимо для клиента при его наличии).
+     */
+    @Test
+    void bindTransceiverRespWithNullBodyEncodesAsEmptySystemIdNotNPE() {
+        Pdu original = Pdu.headerOnly(CommandId.BIND_TRANSCEIVER_RESP, CommandStatus.ESME_RINVPASWD, 1);
+
+        ByteBuf buf = Unpooled.buffer();
+        PduCodec.encode(original, buf); // не должно бросить NullPointerException
+        Pdu decoded = PduCodec.decode(buf);
+
+        assertEquals(CommandStatus.ESME_RINVPASWD, decoded.header().commandStatus());
+        assertEquals("", ((BindTransceiverResp) decoded.body()).systemId(), "null body -> пустой systemId, симметрично декодируемый");
+    }
+
+    /** Тот же класс бага, что выше, для SUBMIT_SM_RESP/DELIVER_SM_RESP (ESME_RINVBNDSTS/ESME_RTHROTTLED/ESME_RINVMSGLEN). */
+    @Test
+    void submitSmRespWithNullBodyEncodesAsEmptyMessageIdNotNPE() {
+        Pdu original = Pdu.headerOnly(CommandId.SUBMIT_SM_RESP, CommandStatus.ESME_RINVBNDSTS, 2);
+
+        ByteBuf buf = Unpooled.buffer();
+        PduCodec.encode(original, buf); // не должно бросить NullPointerException
+        Pdu decoded = PduCodec.decode(buf);
+
+        assertEquals(CommandStatus.ESME_RINVBNDSTS, decoded.header().commandStatus());
+        assertEquals("", ((ShortMessagePduResp) decoded.body()).messageId());
+    }
+
     @Test
     void genericNackCarriesErrorStatus() {
         Pdu original = Pdu.headerOnly(CommandId.GENERIC_NACK, CommandStatus.ESME_RINVCMDID, 3);

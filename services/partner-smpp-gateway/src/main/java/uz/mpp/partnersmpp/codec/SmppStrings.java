@@ -16,12 +16,27 @@ public final class SmppStrings {
         out.writeByte(0);
     }
 
+    /**
+     * HIGH находка кодревью (CODE_REVIEW.md, "partner-smpp-gateway" #3):
+     * раньше цикл читал {@code in.readByte()} без границы — {@code system_id}
+     * без NUL-терминатора читал через границы поля до полного исчерпания
+     * 64 KiB фрейма, бросая {@link IndexOutOfBoundsException} без единого
+     * обработчика в пайплайне. Теперь ограничено {@code in.readableBytes()}
+     * (уже гарантированно == остаток ОДНОГО PDU-фрейма, framing решён
+     * frame decoder'ом раньше — см. {@link PduCodec}) и бросает
+     * {@link MalformedPduException}, которую {@code SmppServerHandler}
+     * ловит явно и отвечает GENERIC_NACK, вместо неявного краха на
+     * over-read.
+     */
     public static String readCString(ByteBuf in) {
         StringBuilder sb = new StringBuilder();
-        byte b;
-        while ((b = in.readByte()) != 0) {
+        while (in.isReadable()) {
+            byte b = in.readByte();
+            if (b == 0) {
+                return sb.toString();
+            }
             sb.append((char) b);
         }
-        return sb.toString();
+        throw new MalformedPduException("C-string без NUL-терминатора: фрейм исчерпан после " + sb.length() + " байт");
     }
 }
