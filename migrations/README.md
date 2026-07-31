@@ -23,7 +23,7 @@ V014__subscriber_consent.sql
 V015__partition_maintenance.sql
 V016__execution_control_audit.sql
 V017__backoffice_stub.sql
-V018__config_outbox_claim_and_retry.sql
+V020__config_outbox_claim_and_retry.sql
 ```
 
 Применить локально:

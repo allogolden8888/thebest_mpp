@@ -1,4 +1,4 @@
--- V018__config_outbox_claim_and_retry.sql
+-- V020__config_outbox_claim_and_retry.sql
 -- CODE_REVIEW.md (services/config-event-publisher) findings #2 ("poison
 -- message head-of-line blocking, no bound, no DLQ") and #3 ("no
 -- SELECT ... FOR UPDATE SKIP LOCKED for multi-replica safety").
