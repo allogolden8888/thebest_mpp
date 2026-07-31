@@ -25,13 +25,40 @@ type ExpiredEntry struct {
 // состояние Pipeline Engine.
 type ExecutionState struct {
 	MessageID          string
-	PipelineVersion     string
-	NodeID              string
-	StageExecutionID    string
-	StageName           string // "DESTINATION_RESOLUTION" | "POLICY" | "BILLING" | "ROUTING" | "DELIVERY" | "DELIVERY_RECONCILIATION"
-	Attempt             int32
-	Deadline            time.Time
-	LastAppliedEventID  string
+	PipelineVersion    string
+	NodeID             string
+	StageExecutionID   string
+	StageName          string // "DESTINATION_RESOLUTION" | "POLICY" | "BILLING" | "ROUTING" | "DELIVERY" | "DELIVERY_RECONCILIATION"
+	Attempt            int32
+	Deadline           time.Time
+	LastAppliedEventID string
+
+	// Накопленные результаты предыдущих стадий — CODE_REVIEW.md finding #1/#2:
+	// нужны, чтобы восстановить правильный stage_extension при republish
+	// (BuildRetryCommand), иначе republish уходит без oneof stage_extension и
+	// гарантированно REJECTED на стороне стадии-потребителя (проверено против
+	// destination-resolution-service/src/kafka_io.rs).
+	//
+	// **Не входят в текущую документированную схему exec:{message_id}**
+	// (data_infrastructure_spec.md §2.1 перечисляет только
+	// pipeline_version/node_id/stage_execution_id/current_state/attempt/
+	// deadline/last_applied_event_id) — читаются оппортунистически в
+	// redisio.LoadExecutionState (отсутствующее поле HGETALL = пустая
+	// строка/0, не ошибка), пока Pipeline Engine не начнёт их писать. Это
+	// НЕ придуманные с потолка имена полей: они дословно совпадают с тем,
+	// что реальный Pipeline Engine (services/pipeline-engine/src/redis_cas.rs
+	// + lua/cas_transition.lua в основном репозитории, независимая
+	// реализация той же сессии) уже атомарно пишет в exec:{message_id} той
+	// же Lua-транзакцией, что CAS — сильный сигнал, что это правильное
+	// направление, но НЕ подтверждённый смёрженный контракт. См. README.md
+	// "Открытый вопрос".
+	DestinationAddress string // -> DestinationResolutionExtension (msisdn/адрес назначения)
+	ResolvedOperatorID string // -> PolicyExtension / RoutingExtension
+	Category           string // -> BillingExtension (вместе с ResolvedOperatorID/SegmentCount)
+	SegmentCount       int32  // -> BillingExtension
+	RouteID            string // -> DeliveryExtension
+	Protocol           int32  // -> DeliveryExtension (commonv1.Protocol как int32)
+	RouteVersion       string // -> DeliveryExtension
 }
 
 // RetryPolicy — параметры повторной попытки для стадии. Не описаны отдельной

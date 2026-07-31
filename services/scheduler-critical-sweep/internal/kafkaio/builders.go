@@ -14,28 +14,126 @@ import (
 	"mpp/scheduler-critical-sweep/internal/sweep"
 )
 
-// BuildRetryCommand — publish_retry: тот же stage_execution_id, attempt+1,
-// новый deadline. **Известное ограничение этого среза**: exec:{message_id}
-// не хранит payload_ref/stage_extension исходной команды (см.
-// data_infrastructure_spec.md §2.1 — HASH exec:{message_id} перечисляет
-// только pipeline_version/node_id/stage_execution_id/current_state/attempt/
-// deadline/last_applied_event_id), поэтому здесь собирается частичная
-// StageExecuteCommand — без oneof stage_extension и без payload_ref.
-// Стадия-потребитель должна уметь дочитать message context самостоятельно
-// (msgctx:{message_id}), либо схема Runtime Redis должна быть расширена —
-// см. README.md "Открытый вопрос".
-func BuildRetryCommand(state sweep.ExecutionState, eventID string, newDeadline time.Time, traceparent string) *commonv1.StageExecuteCommand {
-	return &commonv1.StageExecuteCommand{
+// buildPayloadRef — StagePayloadRef детерминированно строится из message_id:
+// runtime_redis_key = "msgctx:" + message_id (data_infrastructure_spec.md
+// §2.1, msgctx:{message_id}) — в отличие от stage_extension (см.
+// buildStageExtension), это НЕ требует дополнительных данных из
+// exec:{message_id}, поэтому всегда полностью заполняется, без условия "ok".
+func buildPayloadRef(state sweep.ExecutionState) *commonv1.StagePayloadRef {
+	return &commonv1.StagePayloadRef{
+		MessageId:       state.MessageID,
+		RuntimeRedisKey: "msgctx:" + state.MessageID,
+	}
+}
+
+// buildStageExtension — восстанавливает oneof stage_extension из
+// накопленных в ExecutionState результатов предыдущих стадий (см. докстринг
+// полей в internal/sweep/types.go) и присваивает его cmd.StageExtension
+// напрямую (oneof-поле сгенерированного protobuf-типа — неэкспортируемый
+// интерфейс, конкретные *StageExecuteCommand_* обёртки им, конечно,
+// удовлетворяют, но НАЗВАТЬ этот интерфейсный тип как тип возврата функции
+// из пакета kafkaio нельзя — присваивание полю, а не возврат по значению).
+// Возвращает ok=false, если данных, необходимых именно для этого
+// stage_name, нет (сегодня это ожидаемый путь для всех стадий, пока
+// Pipeline Engine не начнёт писать эти поля — см. README "Открытый
+// вопрос") — вызывающая сторона (main.go) не должна публиковать retry без
+// extension (CODE_REVIEW.md finding #1: republish без stage_extension
+// гарантированно REJECTED на стороне стадии-потребителя).
+func buildStageExtension(cmd *commonv1.StageExecuteCommand, state sweep.ExecutionState) (ok bool) {
+	switch StageNameFromString(state.StageName) {
+	case commonv1.StageName_STAGE_NAME_DESTINATION_RESOLUTION:
+		if state.DestinationAddress == "" {
+			return false
+		}
+		cmd.StageExtension = &commonv1.StageExecuteCommand_DestinationResolution{
+			DestinationResolution: &commonv1.DestinationResolutionExtension{
+				DestinationAddress: state.DestinationAddress,
+			},
+		}
+		return true
+
+	case commonv1.StageName_STAGE_NAME_POLICY:
+		if state.ResolvedOperatorID == "" {
+			return false
+		}
+		cmd.StageExtension = &commonv1.StageExecuteCommand_Policy{
+			Policy: &commonv1.PolicyExtension{ResolvedOperatorId: state.ResolvedOperatorID},
+		}
+		return true
+
+	case commonv1.StageName_STAGE_NAME_BILLING:
+		if state.ResolvedOperatorID == "" || state.Category == "" {
+			return false
+		}
+		cmd.StageExtension = &commonv1.StageExecuteCommand_Billing{
+			Billing: &commonv1.BillingExtension{
+				ResolvedOperatorId: state.ResolvedOperatorID,
+				SegmentCount:       state.SegmentCount,
+				Category:           state.Category,
+			},
+		}
+		return true
+
+	case commonv1.StageName_STAGE_NAME_ROUTING:
+		if state.ResolvedOperatorID == "" {
+			return false
+		}
+		cmd.StageExtension = &commonv1.StageExecuteCommand_Routing{
+			Routing: &commonv1.RoutingExtension{ResolvedOperatorId: state.ResolvedOperatorID},
+		}
+		return true
+
+	case commonv1.StageName_STAGE_NAME_DELIVERY:
+		if state.RouteID == "" {
+			return false
+		}
+		cmd.StageExtension = &commonv1.StageExecuteCommand_Delivery{
+			Delivery: &commonv1.DeliveryExtension{
+				RouteId:      state.RouteID,
+				Protocol:     commonv1.Protocol(state.Protocol),
+				RouteVersion: state.RouteVersion,
+			},
+		}
+		return true
+
+	default:
+		// DELIVERY_RECONCILIATION: DeliveryReconciliationExtension не входит
+		// в накопленные поля ExecutionState вовсе (triggering_outcome/
+		// queue_msg_id — не результат предыдущей стадии, а обстоятельства
+		// самого reconciliation) — честно не восстанавливаем, ok=false.
+		return false
+	}
+}
+
+// BuildRetryCommand — publish_retry: тот же stage_execution_id, явный
+// attempt (не всегда +1 — см. ниже), новый deadline, payload_ref всегда
+// заполнен (buildPayloadRef), stage_extension — если данных достаточно
+// (buildStageExtension). Второй возврат — ok: false означает "republish
+// этой команды гарантированно будет REJECTED на стороне стадии-потребителя
+// (нет stage_extension) — не публикуй, уходи в DLQ с честной причиной"
+// (CODE_REVIEW.md finding #1, main.go::processTick).
+//
+// attempt передаётся явно, а не вычисляется как state.Attempt+1 внутри —
+// finding #2: раньше эта же функция переиспользовалась для original_command
+// в DlqRecord и всегда прибавляла 1, из-за чего в DLQ попадал номер попытки
+// на единицу больше реально исчерпанной. Теперь вызывающая сторона
+// (main.go) явно решает: attempt+1 для настоящего retry, state.Attempt для
+// DLQ-снимка исчерпанной попытки.
+func BuildRetryCommand(state sweep.ExecutionState, eventID string, attempt int32, newDeadline time.Time, traceparent string) (*commonv1.StageExecuteCommand, bool) {
+	cmd := &commonv1.StageExecuteCommand{
 		EventId:          eventID,
 		MessageId:        state.MessageID,
 		PipelineVersion:  state.PipelineVersion,
 		NodeId:           state.NodeID,
 		StageName:        StageNameFromString(state.StageName),
 		StageExecutionId: state.StageExecutionID,
-		Attempt:          state.Attempt + 1,
+		Attempt:          attempt,
 		Deadline:         timestamppb.New(newDeadline),
 		Traceparent:      traceparent,
+		PayloadRef:       buildPayloadRef(state),
 	}
+	ok := buildStageExtension(cmd, state)
+	return cmd, ok
 }
 
 // BuildTimeoutEvent — publish_timeout_result: stage.completed с
@@ -55,9 +153,11 @@ func BuildTimeoutEvent(state sweep.ExecutionState, eventID string, now time.Time
 	}
 }
 
-// BuildDlqRecord — publish_dlq: попытки исчерпаны (RETRY_EXHAUSTED).
-// original_command — тот же частичный BuildRetryCommand (см. её докстринг
-// про ограничение payload_ref/stage_extension).
+// BuildDlqRecord — publish_dlq: попытки исчерпаны (RETRY_EXHAUSTED), либо
+// (main.go) состояние недостаточно для безопасного retry. original_command —
+// снимок команды на исчерпанной/непригодной для retry попытке, собранный
+// через BuildRetryCommand с attempt=state.Attempt (см. её докстринг про
+// finding #2).
 func BuildDlqRecord(state sweep.ExecutionState, originalCommand *commonv1.StageExecuteCommand, errorDetail string, now time.Time) *eventsv1.DlqRecord {
 	return &eventsv1.DlqRecord{
 		StageExecutionId: state.StageExecutionID,
