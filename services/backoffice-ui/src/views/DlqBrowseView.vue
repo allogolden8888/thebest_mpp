@@ -3,17 +3,28 @@
 // §7.3) — одна страница: браузер DLQ с кнопкой Replay на каждую строку
 // (естественный UX-поток HLD §20 — сначала посмотреть, что в очереди, потом
 // решить, что реплеить).
+//
+// CODE_REVIEW.md findings fixed in this view (subagent-1 / backoffice-ui):
+// #1 — Replay button disabled for non-admins (browse itself stays visible
+//      to any authenticated user, matching backend router.go).
+// #2 — confirmation dialog before Replay fires.
+// #5 — errors rendered via extractErrorMessage(), not `String(errObject)`;
+//      list-query failures are now surfaced too, not silently empty.
 import { h, ref } from "vue";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/vue-query";
-import { NCard, NForm, NFormItem, NInput, NButton, NDataTable, NSpace, useMessage, type DataTableColumns } from "naive-ui";
+import { NCard, NForm, NFormItem, NInput, NButton, NDataTable, NSpace, NAlert, useMessage, useDialog, type DataTableColumns } from "naive-ui";
 import { useApi } from "../api/useApi";
+import { extractErrorMessage } from "../api/errorMessage";
+import { useAuthStore } from "../stores/auth";
 import type { components } from "../api/schema";
 
 type DlqRecord = components["schemas"]["DlqRecord"];
 
 const api = useApi();
 const message = useMessage();
+const dialog = useDialog();
 const queryClient = useQueryClient();
+const auth = useAuthStore();
 
 const stageName = ref("");
 const replayStatus = ref("");
@@ -43,8 +54,18 @@ const replayMutation = useMutation({
     }
     queryClient.invalidateQueries({ queryKey: ["dlq-records"] });
   },
-  onError: (err: unknown) => message.error(String(err)),
+  onError: (err: unknown) => message.error(extractErrorMessage(err)),
 });
+
+function confirmReplay(row: DlqRecord) {
+  dialog.warning({
+    title: "Подтвердите Replay",
+    content: `stage_execution_id=${row.stage_execution_id} (stage=${row.stage_name}, attempt=${row.attempt}) будет реплеен.`,
+    positiveText: "Replay",
+    negativeText: "Отмена",
+    onPositiveClick: () => replayMutation.mutate(row.stage_execution_id),
+  });
+}
 
 const columns: DataTableColumns<DlqRecord> = [
   { title: "stage_execution_id", key: "stage_execution_id" },
@@ -61,8 +82,8 @@ const columns: DataTableColumns<DlqRecord> = [
         NButton,
         {
           size: "small",
-          disabled: row.replay_status !== "pending",
-          onClick: () => replayMutation.mutate(row.stage_execution_id),
+          disabled: row.replay_status !== "pending" || !auth.isAdmin(),
+          onClick: () => confirmReplay(row),
         },
         () => "Replay",
       ),
@@ -84,6 +105,9 @@ const columns: DataTableColumns<DlqRecord> = [
           <NButton @click="listQuery.refetch()">Обновить</NButton>
         </NFormItem>
       </NForm>
+      <NAlert v-if="listQuery.isError.value" type="error" style="margin-bottom: 12px">
+        {{ extractErrorMessage(listQuery.error.value) }}
+      </NAlert>
       <NDataTable
         :columns="columns"
         :data="listQuery.data.value?.records ?? []"

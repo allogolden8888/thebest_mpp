@@ -2,8 +2,9 @@
 // handle_reconciliation_browse (service_internal_methods.md §7.3).
 import { ref } from "vue";
 import { useQuery } from "@tanstack/vue-query";
-import { NCard, NForm, NFormItem, NInput, NButton, NDataTable, type DataTableColumns } from "naive-ui";
+import { NCard, NForm, NFormItem, NInput, NButton, NDataTable, NAlert, type DataTableColumns } from "naive-ui";
 import { useApi } from "../api/useApi";
+import { extractErrorMessage } from "../api/errorMessage";
 import type { components } from "../api/schema";
 
 type ReconciliationCase = components["schemas"]["ReconciliationCase"];
@@ -46,6 +47,9 @@ const columns: DataTableColumns<ReconciliationCase> = [
         <NButton @click="listQuery.refetch()">Обновить</NButton>
       </NFormItem>
     </NForm>
+    <NAlert v-if="listQuery.isError.value" type="error" style="margin-bottom: 12px">
+      {{ extractErrorMessage(listQuery.error.value) }}
+    </NAlert>
     <NDataTable
       :columns="columns"
       :data="listQuery.data.value?.cases ?? []"

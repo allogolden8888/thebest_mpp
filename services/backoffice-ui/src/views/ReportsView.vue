@@ -3,8 +3,9 @@
 // агрегаты по партнёру/стадии/исходу (ClickHouse read через Backoffice API).
 import { ref } from "vue";
 import { useQuery } from "@tanstack/vue-query";
-import { NCard, NForm, NFormItem, NInput, NButton, NDataTable, type DataTableColumns } from "naive-ui";
+import { NCard, NForm, NFormItem, NInput, NButton, NDataTable, NAlert, type DataTableColumns } from "naive-ui";
 import { useApi } from "../api/useApi";
+import { extractErrorMessage } from "../api/errorMessage";
 import type { components } from "../api/schema";
 
 type ReportRow = components["schemas"]["ReportRow"];
@@ -46,6 +47,9 @@ const columns: DataTableColumns<ReportRow> = [
         <NButton @click="reportQuery.refetch()">Обновить</NButton>
       </NFormItem>
     </NForm>
+    <NAlert v-if="reportQuery.isError.value" type="error" style="margin-bottom: 12px">
+      {{ extractErrorMessage(reportQuery.error.value) }}
+    </NAlert>
     <NDataTable
       :columns="columns"
       :data="reportQuery.data.value?.rows ?? []"
