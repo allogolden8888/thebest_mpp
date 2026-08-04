@@ -135,6 +135,130 @@ class StandardLaneTopologyTest {
         assertTrue(routingOutput.isEmpty(), "GLOBAL PAUSED должен блокировать любую стадию");
     }
 
+    // Регрессии на CODE_REVIEW.md находки, реальный TopologyTestDriver
+    // end-to-end (не юнит на голых классах) — доказывает, что фикс реально
+    // подключён в топологию, не только корректен изолированно.
+
+    @Test
+    void unspecifiedControlStateIsLoggedAndSkippedNotCrashing() {
+        // Critical #1: раньше ExecutionControlState.UNSPECIFIED заставлял
+        // ControlSnapshot.State.valueOf(...) бросить необработанный
+        // IllegalArgumentException на GlobalStreamThread — здесь просто
+        // проверяем, что pipeInput не бросает (driver.close() в @AfterEach
+        // тоже не должен бы упасть) и что последующие записи всё ещё
+        // нормально обрабатываются — сервис не "падает" после этой записи.
+        controlInput.pipeInput("PARTNER:partner-1", controlRecord(
+            uz.mpp.platformcontracts.common.v1.ExecutionControlScope.EXECUTION_CONTROL_SCOPE_PARTNER, "partner-1",
+            uz.mpp.platformcontracts.common.v1.ExecutionControlState.EXECUTION_CONTROL_STATE_UNSPECIFIED, 0.0
+        ).toByteArray());
+
+        // Сервис должен продолжать нормально работать после UNSPECIFIED-записи.
+        controlInput.pipeInput("GLOBAL:", controlRecord(
+            uz.mpp.platformcontracts.common.v1.ExecutionControlScope.EXECUTION_CONTROL_SCOPE_GLOBAL, "",
+            uz.mpp.platformcontracts.common.v1.ExecutionControlState.EXECUTION_CONTROL_STATE_ACTIVE, 1.0
+        ).toByteArray());
+        holdInput.pipeInput("msg-unspecified", holdCommand("msg-unspecified", "exec-unspecified", StageName.STAGE_NAME_BILLING).toByteArray());
+        driver.advanceWallClockTime(Duration.ofSeconds(1));
+
+        TestOutputTopic<String, byte[]> billingOutput = driver.createOutputTopic(
+            "stage.billing", Serdes.String().deserializer(), Serdes.ByteArray().deserializer());
+        assertFalse(billingOutput.isEmpty(), "топология должна продолжать работать после UNSPECIFIED control record, не падать");
+    }
+
+    @Test
+    void unknownStageNameHoldCommandIsRejectedNotStored() {
+        // High #3 (poison-pill): SchedulerHoldCommand с STAGE_NAME_UNSPECIFIED
+        // не должен попасть в standard-holds-store вообще — раньше он бы
+        // застревал там навсегда и валил releaseTick на каждом тике.
+        SchedulerHoldCommand poison = SchedulerHoldCommand.newBuilder()
+            .setMessageId("msg-poison")
+            .setStageExecutionId("exec-poison")
+            .setScope(uz.mpp.platformcontracts.common.v1.ExecutionControlScope.EXECUTION_CONTROL_SCOPE_STAGE)
+            .setScopeId("UNSPECIFIED")
+            .setStageName(StageName.STAGE_NAME_UNSPECIFIED)
+            .setHeldAt(Timestamp.newBuilder().setSeconds(Instant.now().getEpochSecond()).build())
+            .build();
+        holdInput.pipeInput("msg-poison", poison.toByteArray());
+
+        assertNull(holdsStore().get("exec-poison"), "STAGE_NAME_UNSPECIFIED hold command не должен попасть в store");
+
+        // releaseTick не должен упасть на последующих тиках.
+        driver.advanceWallClockTime(Duration.ofSeconds(1));
+        driver.advanceWallClockTime(Duration.ofSeconds(1));
+    }
+
+    @Test
+    void partnerScopedPauseBlocksReleaseEvenWhenGlobalAndStageAreActive() {
+        // Critical #2 end-to-end: раньше ControlSnapshot только читал
+        // GLOBAL/STAGE на release-стороне — PARTNER-запись в byKey существовала,
+        // но никогда не блокировала releaseTick. Теперь held item несёт
+        // собственный scope/scope_id и releaseTick обязан их проверить.
+        controlInput.pipeInput("GLOBAL:", controlRecord(
+            uz.mpp.platformcontracts.common.v1.ExecutionControlScope.EXECUTION_CONTROL_SCOPE_GLOBAL, "",
+            uz.mpp.platformcontracts.common.v1.ExecutionControlState.EXECUTION_CONTROL_STATE_ACTIVE, 1.0
+        ).toByteArray());
+        controlInput.pipeInput("PARTNER:partner-42", controlRecord(
+            uz.mpp.platformcontracts.common.v1.ExecutionControlScope.EXECUTION_CONTROL_SCOPE_PARTNER, "partner-42",
+            uz.mpp.platformcontracts.common.v1.ExecutionControlState.EXECUTION_CONTROL_STATE_PAUSED, 0.0
+        ).toByteArray());
+
+        SchedulerHoldCommand partnerHold = SchedulerHoldCommand.newBuilder()
+            .setMessageId("msg-partner")
+            .setStageExecutionId("exec-partner")
+            .setScope(uz.mpp.platformcontracts.common.v1.ExecutionControlScope.EXECUTION_CONTROL_SCOPE_PARTNER)
+            .setScopeId("partner-42")
+            .setStageName(StageName.STAGE_NAME_BILLING)
+            .setHeldAt(Timestamp.newBuilder().setSeconds(Instant.now().getEpochSecond()).build())
+            .build();
+        holdInput.pipeInput("msg-partner", partnerHold.toByteArray());
+        driver.advanceWallClockTime(Duration.ofSeconds(1));
+
+        TestOutputTopic<String, byte[]> billingOutput = driver.createOutputTopic(
+            "stage.billing", Serdes.String().deserializer(), Serdes.ByteArray().deserializer());
+        assertTrue(billingOutput.isEmpty(), "PARTNER-scoped PAUSED должен блокировать release этого held item'а, даже если GLOBAL/STAGE ACTIVE");
+        assertNotNull(holdsStore().get("exec-partner"), "held item должен остаться в store, пока его собственный scope PAUSED");
+    }
+
+    @Test
+    void releaseOrderFollowsHeldAtTimeNotStageExecutionIdKeyOrder() {
+        // High #4: RocksDB-backed store итерирует в KEY order (keyed по
+        // stageExecutionId), не по held_at — раньше release order был
+        // произвольным относительно времени hold'а. Здесь stageExecutionId
+        // сортируется в ОБРАТНОМ порядке относительно held_at, чтобы явно
+        // отличить "по ключу" от "по времени": если фикс работает, "exec-b"
+        // (held раньше, более поздний по алфавиту ключ) освобождается ПЕРЕД
+        // "exec-a" (held позже, более ранний по алфавиту ключ).
+        controlInput.pipeInput("GLOBAL:", controlRecord(
+            uz.mpp.platformcontracts.common.v1.ExecutionControlScope.EXECUTION_CONTROL_SCOPE_GLOBAL, "",
+            uz.mpp.platformcontracts.common.v1.ExecutionControlState.EXECUTION_CONTROL_STATE_ACTIVE, 1.0
+        ).toByteArray());
+
+        long now = Instant.now().getEpochSecond();
+        SchedulerHoldCommand earlyHeldLaterKey = SchedulerHoldCommand.newBuilder()
+            .setMessageId("msg-b").setStageExecutionId("exec-b")
+            .setScope(uz.mpp.platformcontracts.common.v1.ExecutionControlScope.EXECUTION_CONTROL_SCOPE_STAGE)
+            .setScopeId("BILLING").setStageName(StageName.STAGE_NAME_BILLING)
+            .setHeldAt(Timestamp.newBuilder().setSeconds(now).build()) // held раньше
+            .build();
+        SchedulerHoldCommand lateHeldEarlierKey = SchedulerHoldCommand.newBuilder()
+            .setMessageId("msg-a").setStageExecutionId("exec-a")
+            .setScope(uz.mpp.platformcontracts.common.v1.ExecutionControlScope.EXECUTION_CONTROL_SCOPE_STAGE)
+            .setScopeId("BILLING").setStageName(StageName.STAGE_NAME_BILLING)
+            .setHeldAt(Timestamp.newBuilder().setSeconds(now + 100).build()) // held позже
+            .build();
+        holdInput.pipeInput("msg-b", earlyHeldLaterKey.toByteArray());
+        holdInput.pipeInput("msg-a", lateHeldEarlierKey.toByteArray());
+
+        driver.advanceWallClockTime(Duration.ofSeconds(1));
+
+        TestOutputTopic<String, byte[]> billingOutput = driver.createOutputTopic(
+            "stage.billing", Serdes.String().deserializer(), Serdes.ByteArray().deserializer());
+        assertFalse(billingOutput.isEmpty(), "хотя бы один held item должен быть освобождён в этом тике");
+        StageExecuteCommand firstReleased = parseCommand(billingOutput.readValue());
+        assertEquals("exec-b", firstReleased.getStageExecutionId(),
+            "held раньше (exec-b) должен освобождаться первым, несмотря на то, что его ключ идёт ПОСЛЕ exec-a в алфавитном/RocksDB key order");
+    }
+
     private KeyValueStore<String, HeldItem> holdsStore() {
         return driver.getKeyValueStore(HoldCommandProcessor.STORE_NAME);
     }

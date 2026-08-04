@@ -26,6 +26,7 @@ V017__backoffice_stub.sql
 V018__dlq_record_replay_in_progress.sql
 V019__message_read_model_lifecycle_version.sql
 V020__config_outbox_claim_and_retry.sql
+V021__billing_reconciliation_audit.sql
 ```
 
 Применить локально:

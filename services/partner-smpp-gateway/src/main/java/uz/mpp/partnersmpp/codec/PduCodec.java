@@ -54,8 +54,24 @@ public final class PduCodec {
                 SmppStrings.writeCString(out, b.addressRange());
             }
             case CommandId.BIND_TRANSCEIVER_RESP -> {
+                // Реальный, не гипотетический баг, найденный при исправлении
+                // HIGH #3 (см. SmppServerHandler.exceptionCaught javadoc):
+                // раньше это безусловно кастовало body и звало b.systemId() —
+                // SmppServerHandler.respond(..., null) на отклонённый bind
+                // (неверный пароль, ESME_RINVPASWD) строит Pdu.headerOnly(...)
+                // с body=null НАМЕРЕННО (никакого systemId сообщать нечего),
+                // что давало NullPointerException прямо при кодировании
+                // самого ответа — партнёр никогда не получал ответ на bind
+                // вообще (до этого тихо маскировалось отсутствием
+                // exceptionCaught — соединение просто зависало без ответа,
+                // не падало видимо; обнаружено тестом
+                // bindWithWrongPasswordIsRejectedAndConnectionClosed после
+                // добавления exceptionCaught). Пустая C-строка (только NUL,
+                // 1 байт) — валидный, симметрично декодируемый тот же
+                // decodeBody веткой ниже (не требует отдельного null-case на
+                // decode-стороне, тело всё равно 1+ байт).
                 BindTransceiverResp b = (BindTransceiverResp) body;
-                SmppStrings.writeCString(out, b.systemId());
+                SmppStrings.writeCString(out, b == null ? "" : b.systemId());
             }
             case CommandId.SUBMIT_SM, CommandId.DELIVER_SM -> {
                 ShortMessagePdu b = (ShortMessagePdu) body;
@@ -80,8 +96,15 @@ public final class PduCodec {
                 out.writeBytes(sm);
             }
             case CommandId.SUBMIT_SM_RESP, CommandId.DELIVER_SM_RESP -> {
+                // Тот же класс бага, что BIND_TRANSCEIVER_RESP выше —
+                // handleSubmitSm отвечает body=null на ESME_RINVBNDSTS/
+                // ESME_RTHROTTLED/ESME_RINVMSGLEN (реально отклонённый
+                // submit — нет message_id, о котором стоило бы сообщать),
+                // раньше это давало NPE прямо при кодировании отказа. Пустая
+                // C-строка, не пропуск поля — см. комментарий у
+                // BIND_TRANSCEIVER_RESP выше про симметрию с decodeBody.
                 ShortMessagePduResp b = (ShortMessagePduResp) body;
-                SmppStrings.writeCString(out, b.messageId());
+                SmppStrings.writeCString(out, b == null ? "" : b.messageId());
             }
             case CommandId.ENQUIRE_LINK, CommandId.ENQUIRE_LINK_RESP,
                  CommandId.UNBIND, CommandId.UNBIND_RESP, CommandId.GENERIC_NACK -> {
@@ -132,7 +155,12 @@ public final class PduCodec {
             case CommandId.SUBMIT_SM_RESP, CommandId.DELIVER_SM_RESP -> new ShortMessagePduResp(SmppStrings.readCString(in));
             case CommandId.ENQUIRE_LINK, CommandId.ENQUIRE_LINK_RESP,
                  CommandId.UNBIND, CommandId.UNBIND_RESP, CommandId.GENERIC_NACK -> null;
-            default -> throw new IllegalArgumentException("decode: неподдерживаемый command_id 0x" + Integer.toHexString(commandId));
+            // HIGH находка кодревью #3: раньше IllegalArgumentException здесь
+            // распространялось без обработчика (см. MalformedPduException
+            // javadoc) — неизвестный command_id от партнёра теперь ловится
+            // явно в SmppServerHandler и отвечается GENERIC_NACK, не висит
+            // молча.
+            default -> throw new MalformedPduException("decode: неизвестный command_id 0x" + Integer.toHexString(commandId));
         };
 
         int consumed = in.readerIndex() - startReaderIndex;

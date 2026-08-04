@@ -9,6 +9,7 @@ import uz.mpp.operatorsmpp.codec.*;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 /**
@@ -25,11 +26,30 @@ public final class OperatorSmppClientHandler extends SimpleChannelInboundHandler
         this.dlrSink = dlrSink;
     }
 
-    /** Регистрирует ожидание ответа на данный sequence_number перед отправкой запроса. */
-    public CompletableFuture<Pdu> expectResponse(int sequenceNumber) {
+    /**
+     * Регистрирует ожидание ответа на данный sequence_number перед отправкой запроса.
+     *
+     * <p>CODE_REVIEW.md HIGH #2 (было: {@code client/OperatorSmppClientHandler.java:21} —
+     * запись в {@link #pendingResponses} снималась только по совпадающему ответу или по
+     * полному {@link #exceptionCaught}; submit/bind, который тайм-аутился без разрыва
+     * канала — конгестия/тихая потеря ответа оператором, ровно тот failure mode, который
+     * этот сервис обязан переживать — оставлял {@link CompletableFuture} в карте навсегда).
+     * Теперь future сам себя завершает по {@link CompletableFuture#orTimeout} через
+     * {@code timeoutMs}, и {@code whenComplete} снимает запись из карты при ЛЮБОМ исходе —
+     * успех, {@link #exceptionCaught} или таймаут — используя conditional remove(key, value),
+     * чтобы не задеть новую запись, если sequence_number успел переиспользоваться
+     * (генератор оборачивается) до того, как отработал таймаут старой.
+     */
+    public CompletableFuture<Pdu> expectResponse(int sequenceNumber, long timeoutMs) {
         CompletableFuture<Pdu> future = new CompletableFuture<>();
         pendingResponses.put(sequenceNumber, future);
-        return future;
+        future.whenComplete((pdu, ex) -> pendingResponses.remove(sequenceNumber, future));
+        return future.orTimeout(timeoutMs, TimeUnit.MILLISECONDS);
+    }
+
+    /** Для метрик/тестов (CODE_REVIEW.md #2) — сколько submit/bind сейчас реально ждут ответа. */
+    int pendingResponseCount() {
+        return pendingResponses.size();
     }
 
     @Override

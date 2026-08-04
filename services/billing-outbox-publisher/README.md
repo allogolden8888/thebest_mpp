@@ -21,6 +21,14 @@ mvn test
 
 `core/StreamEntry` несёт `shard` явно (не восстанавливается из `redis_entry_id`) — `pollAllShards` знает, какой шард дал каждую запись, `ack` использует его напрямую, не гадая.
 
+## Проверено кодревью (CODE_REVIEW.md): CRITICAL #1 — записи, застрявшие в PEL, никогда не перечитывались — исправлено
+
+`pollAllShards` читает ТОЛЬКО через `XREADGROUP ... >` (никогда не доставленные записи) — запись, чей `publish`/`ack` не завершился (сбой Kafka, краш процесса между `XREADGROUP` и `XACK`), оставалась в PEL (pending entries list) consumer group навсегда: ни один код в сервисе никогда её не перечитывал. Поскольку charge уже атомарно применён к hot-балансу в Redis ДО записи в outbox stream (`hld.md §15.4`), это означало перманентную потерю ledger-события — до того, как reconciliation вообще заметит расхождение (возможно, днями позже), без единого сигнала до этого момента.
+
+Исправлено: `redisio/OutboxStreamReader::reclaimStalePending` — `XAUTOCLAIM`, переносит записи, простаивающие в PEL дольше `RECLAIM_MIN_IDLE` (30с), на текущего consumer'а. Заявляет их заново независимо от исходного consumer'а — естественно переживает рестарт под новым `HOSTNAME` (тоже задокументированная в исходной находке проблема), не только транзиентный сбой publish. `Main.java` гоняет отдельный, более редкий цикл (`RECLAIM_INTERVAL_SECONDS=10`, не каждые 500мс, как обычный poll — `XAUTOCLAIM` сканирует весь PEL на каждый вызов) поверх ВСЕХ шардов, переиспользуя тот же `publishAndAck` путь, что обычные свежие записи.
+
+Тесты (`OutboxStreamReaderTest`, реальный Redis): `reclaimStalePendingRecoversEntryThatWasNeverAcked` — читает запись, намеренно НЕ ack'ает (симулирует краш), подтверждает, что `pollAllShards` её больше не видит (доказывает исходную находку), затем что `reclaimStalePending` находит и возвращает её же (тот же `redisEntryId`), и что она реально ack'ается после. `reclaimStalePendingIgnoresEntryStillWithinMinIdleTime` — свежепрочитанная запись (< minIdleTime) не реклеймится — не мешает нормальной, ещё выполняющейся обработке.
+
 ## Открытый вопрос — форма полей billing:outbox:{shard}
 
 `data_infrastructure_spec.md` §2.3 документирует `billing:outbox:{shard}` как STREAM с "финансовым событием (charge/compensating)", но не специфицирует точные имена полей внутри STREAM entry. `core/StreamEntry`/`OutboxStreamReader::toStreamEntry` предполагают `charge_id, account_id, partner_id, amount_minor_units, currency_code, entry_type, source_charge_id, reason, created_at_epoch_ms` — рабочее предположение, симметричное `billing.billing_ledger` (PostgreSQL, `migrations/V008`) и `LedgerEvent` (proto). Реальный формат пишет Billing Service (Главный агент, `billing-service`) — нужна сверка полей при интеграции, не тихо предполагается совпадение.
@@ -29,5 +37,4 @@ mvn test
 
 * **`docker build` не выполнялся** — недоступный Docker daemon.
 * **Ни разу не запущено против реального Kafka-брокера.**
-* **`XPENDING`/redelivery для зависших записей** (consumer упал после `XREADGROUP`, но до `XACK`) — `Main.java` не реализует claim/redelivery через `XCLAIM`, только happy-path poll→publish→ack. Потерянная запись останется в pending до ручного вмешательства — задокументировано как пробел, не решено в этом срезе.
-* **`/metrics`** — плейсхолдер (валидный 200), без реальных счётчиков.
+* **`/metrics`** — плейсхолдер (валидный 200), без реальных счётчиков (в т.ч. глубина PEL — не видно, сколько записей ждут reclaim, см. "Проверено кодревью" выше).

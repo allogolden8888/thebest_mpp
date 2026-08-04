@@ -37,7 +37,10 @@ class PartnerSmppServerIntegrationTest {
         StaticAuthenticator auth = new StaticAuthenticator(Map.of(
             "click_uz_main", new StaticAuthenticator.Credential("s3cr3t", "click_uz", "click_uz_main")
         ));
-        server = new PartnerSmppServer(auth, sink::add, tps);
+        server = new PartnerSmppServer(auth, (msg, callback) -> {
+            sink.add(msg);
+            callback.accept(null, null);
+        }, tps);
         return server;
     }
 

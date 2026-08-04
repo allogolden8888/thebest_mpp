@@ -8,12 +8,12 @@ import uz.mpp.partnersmpp.codec.*;
 import uz.mpp.partnersmpp.core.IncomingMessageBuilder;
 import uz.mpp.partnersmpp.core.SubmitValidator;
 import uz.mpp.partnersmpp.core.TokenBucket;
+import uz.mpp.partnersmpp.kafkaio.IncomingPublishFunction;
 import uz.mpp.platformcontracts.events.v1.IncomingMessage;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.UUID;
-import java.util.function.Consumer;
 
 /**
  * handle_bind / validate_submit_pdu / check_rate_limit / build_incoming_message
@@ -33,7 +33,7 @@ public final class SmppServerHandler extends SimpleChannelInboundHandler<ByteBuf
     }
 
     private final PartnerAuthenticator authenticator;
-    private final Consumer<IncomingMessage> incomingSink;
+    private final IncomingPublishFunction incomingSink;
     private final TokenBucket rateLimiter;
     private final ChannelRegistry channelRegistry;
     private final BindListener bindListener;
@@ -44,12 +44,12 @@ public final class SmppServerHandler extends SimpleChannelInboundHandler<ByteBuf
     private String applicationId;
     private String systemId;
 
-    public SmppServerHandler(PartnerAuthenticator authenticator, Consumer<IncomingMessage> incomingSink,
+    public SmppServerHandler(PartnerAuthenticator authenticator, IncomingPublishFunction incomingSink,
                               TokenBucket rateLimiter, ChannelRegistry channelRegistry) {
         this(authenticator, incomingSink, rateLimiter, channelRegistry, null, null);
     }
 
-    public SmppServerHandler(PartnerAuthenticator authenticator, Consumer<IncomingMessage> incomingSink,
+    public SmppServerHandler(PartnerAuthenticator authenticator, IncomingPublishFunction incomingSink,
                               TokenBucket rateLimiter, ChannelRegistry channelRegistry,
                               BindListener bindListener, UnbindListener unbindListener) {
         this.authenticator = authenticator;
@@ -60,9 +60,31 @@ public final class SmppServerHandler extends SimpleChannelInboundHandler<ByteBuf
         this.unbindListener = unbindListener;
     }
 
+    /**
+     * HIGH находка кодревью #3 — раньше {@code PduCodec.decode(frame)} мог
+     * бросить исключение (неизвестный command_id, C-string без
+     * NUL-терминатора), которое распространялось необработанным в Netty
+     * default tail: молча логировалось и глушилось, партнёр зависал без
+     * ответа, GENERIC_NACK-ветка ниже (строка с {@code default ->}) была
+     * мёртвым кодом, потому что до неё никогда не доходило. Теперь decode
+     * обёрнут — malformed PDU отвечается GENERIC_NACK с лучшей попыткой
+     * извлечь sequence_number из заголовка (валиден независимо от тела).
+     */
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, ByteBuf frame) {
-        Pdu pdu = PduCodec.decode(frame);
+        frame.markReaderIndex();
+        Pdu pdu;
+        try {
+            pdu = PduCodec.decode(frame);
+        } catch (Exception e) {
+            int fallbackSeq = tryExtractSequenceNumber(frame);
+            if (fallbackSeq != -1) {
+                respond(ctx, CommandId.GENERIC_NACK, CommandStatus.ESME_RINVCMDID, fallbackSeq, null);
+            } else {
+                ctx.close();
+            }
+            return;
+        }
         int seq = pdu.header().sequenceNumber();
 
         switch (pdu.header().commandId()) {
@@ -78,6 +100,30 @@ public final class SmppServerHandler extends SimpleChannelInboundHandler<ByteBuf
             }
             default -> respond(ctx, CommandId.GENERIC_NACK, CommandStatus.ESME_RINVCMDID, seq, null);
         }
+    }
+
+    /** Заголовок (16 байт: command_length/command_id/command_status/sequence_number) — всегда фиксированного формата, читаем его напрямую, независимо от того, распарсилось ли тело. */
+    private int tryExtractSequenceNumber(ByteBuf frame) {
+        frame.resetReaderIndex();
+        if (frame.readableBytes() < 16) {
+            return -1;
+        }
+        frame.readInt(); // command_length
+        frame.readInt(); // command_id
+        frame.readInt(); // command_status
+        return frame.readInt(); // sequence_number
+    }
+
+    /**
+     * HIGH находка кодревью #3 (malformed PDU не отвечен) — обрыв
+     * соединения/необработанное исключение из любого другого источника
+     * внутри пайплайна (не только decode) не должно тихо повиснуть в Netty
+     * default tail без хотя бы диагностики; соединение закрывается, дальше
+     * решает reconnect-логика клиента (партнёр переподключится).
+     */
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+        ctx.close();
     }
 
     private void handleBind(ChannelHandlerContext ctx, BindTransceiver body, int seq) {
@@ -117,10 +163,23 @@ public final class SmppServerHandler extends SimpleChannelInboundHandler<ByteBuf
         }
 
         IncomingMessage incoming = IncomingMessageBuilder.build(body, partnerId, applicationId, Instant.now().plus(1, ChronoUnit.DAYS));
-        incomingSink.accept(incoming);
 
+        // HIGH находка кодревью #2: раньше submit_sm_resp=ESME_ROK
+        // отправлялся немедленно (fire-and-forget publish, Future
+        // отбрасывался) — транзиентная недоступность Kafka теряла
+        // сообщение НАВСЕГДА, партнёру говорилось "принято". Теперь ответ
+        // отправляется только после реального ack от Kafka (или ошибки).
+        // Callback может сработать на I/O-потоке продюсера, не на Netty
+        // event loop — запись в ctx безопасна из любого потока (Netty сам
+        // передиспетчеризует на event loop канала).
         String smscMessageId = UUID.randomUUID().toString();
-        respond(ctx, CommandId.SUBMIT_SM_RESP, CommandStatus.ESME_ROK, seq, new ShortMessagePduResp(smscMessageId));
+        incomingSink.publish(incoming, (ignored, error) -> {
+            if (error != null) {
+                respond(ctx, CommandId.SUBMIT_SM_RESP, CommandStatus.ESME_RSYSERR, seq, null);
+            } else {
+                respond(ctx, CommandId.SUBMIT_SM_RESP, CommandStatus.ESME_ROK, seq, new ShortMessagePduResp(smscMessageId));
+            }
+        });
     }
 
     private void handleUnbind(ChannelHandlerContext ctx, int seq) {

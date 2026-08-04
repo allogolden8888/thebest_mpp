@@ -27,6 +27,24 @@ public final class Topics {
         };
     }
 
+    /**
+     * CODE_REVIEW.md High #3 (poison-pill): true, если {@code stageName} есть в
+     * switch выше (реально маршрутизируется на топик), false для
+     * STAGE_NAME_UNSPECIFIED/UNRECOGNIZED — используется, чтобы отклонить такую
+     * запись ДО того, как она попадёт в store (HoldCommandProcessor.process()),
+     * не дожидаясь throw внутри stageTopic() на release-стороне. Один источник
+     * истины с stageTopic() — просто ловит его IllegalArgumentException, вместо
+     * дублирования списка валидных значений отдельным switch.
+     */
+    public static boolean hasTopic(StageName stageName) {
+        try {
+            stageTopic(stageName);
+            return true;
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
     public static StageName stageNameFromString(String s) {
         return switch (s) {
             case "DESTINATION_RESOLUTION" -> StageName.STAGE_NAME_DESTINATION_RESOLUTION;

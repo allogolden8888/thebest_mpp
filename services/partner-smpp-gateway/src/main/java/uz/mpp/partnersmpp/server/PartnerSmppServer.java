@@ -7,10 +7,12 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
+import io.netty.handler.timeout.ReadTimeoutHandler;
 import uz.mpp.partnersmpp.core.TokenBucket;
-import uz.mpp.platformcontracts.events.v1.IncomingMessage;
+import uz.mpp.partnersmpp.kafkaio.IncomingPublishFunction;
 
-import java.util.function.Consumer;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * TCP-сервер SMPP bind'ов (services_specifictaion.md §2.2: StatefulSet, TCP
@@ -19,28 +21,42 @@ import java.util.function.Consumer;
  */
 public final class PartnerSmppServer {
 
+    /**
+     * HIGH находка кодревью #4 — без {@code enquire_link} или любых других
+     * данных за это время соединение считается мёртвым и закрывается
+     * ({@code ReadTimeoutHandler}, реагирует {@code exceptionCaught} в
+     * {@code SmppServerHandler}). Конкретное число нигде не зафиксировано
+     * документами — разумный запас (типичный {@code enquire_link_interval} —
+     * десятки секунд, здесь запас в несколько раз).
+     */
+    private static final int READ_TIMEOUT_SECONDS = 120;
+
+    /** HIGH находка кодревью #4 — потолок одновременных TCP-соединений на инстанс, разумное, не найденное в документах число. */
+    private static final int MAX_CONNECTIONS = 1024;
+
     private final PartnerAuthenticator authenticator;
-    private final Consumer<IncomingMessage> incomingSink;
+    private final IncomingPublishFunction incomingSink;
     private final double rateLimitTps;
 
     private final ChannelRegistry channelRegistry;
     private final SmppServerHandler.BindListener bindListener;
     private final SmppServerHandler.UnbindListener unbindListener;
+    private final AtomicInteger activeConnections = new AtomicInteger();
 
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
     private Channel serverChannel;
 
-    public PartnerSmppServer(PartnerAuthenticator authenticator, Consumer<IncomingMessage> incomingSink, double rateLimitTps) {
+    public PartnerSmppServer(PartnerAuthenticator authenticator, IncomingPublishFunction incomingSink, double rateLimitTps) {
         this(authenticator, incomingSink, rateLimitTps, new ChannelRegistry());
     }
 
-    public PartnerSmppServer(PartnerAuthenticator authenticator, Consumer<IncomingMessage> incomingSink,
+    public PartnerSmppServer(PartnerAuthenticator authenticator, IncomingPublishFunction incomingSink,
                               double rateLimitTps, ChannelRegistry channelRegistry) {
         this(authenticator, incomingSink, rateLimitTps, channelRegistry, null, null);
     }
 
-    public PartnerSmppServer(PartnerAuthenticator authenticator, Consumer<IncomingMessage> incomingSink,
+    public PartnerSmppServer(PartnerAuthenticator authenticator, IncomingPublishFunction incomingSink,
                               double rateLimitTps, ChannelRegistry channelRegistry,
                               SmppServerHandler.BindListener bindListener, SmppServerHandler.UnbindListener unbindListener) {
         this.authenticator = authenticator;
@@ -65,6 +81,8 @@ public final class PartnerSmppServer {
             .childHandler(new ChannelInitializer<SocketChannel>() {
                 @Override
                 protected void initChannel(SocketChannel ch) {
+                    ch.pipeline().addLast(new ConnectionLimitHandler(activeConnections, MAX_CONNECTIONS));
+                    ch.pipeline().addLast(new ReadTimeoutHandler(READ_TIMEOUT_SECONDS, TimeUnit.SECONDS));
                     ch.pipeline().addLast(new SmppFrameDecoder());
                     ch.pipeline().addLast(new SmppServerHandler(
                         authenticator, incomingSink,
