@@ -18,6 +18,7 @@ public final class Main {
         GatewayRegistry gatewayRegistry = new GatewayRegistry(redisRuntimeUrl);
         ControlSnapshot controlSnapshot = new ControlSnapshot();
         OperatorSubmitClient submitClient = new OperatorSubmitClient(5000);
+        SubmitIdempotencyStore idempotencyStore = new SubmitIdempotencyStore(redisRuntimeUrl);
 
         String bootstrapServers = System.getenv().getOrDefault("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap.mpp.svc:9092");
         KafkaConsumer<String, byte[]> consumer = KafkaIo.buildConsumer(bootstrapServers, "delivery-service");
@@ -35,10 +36,11 @@ public final class Main {
             contextStore.close();
             gatewayRegistry.close();
             submitClient.close();
+            idempotencyStore.close();
         }, "delivery-service-shutdown"));
 
         try {
-            KafkaIo.run(consumer, producer, contextStore, gatewayRegistry, controlSnapshot, submitClient, running);
+            KafkaIo.run(consumer, producer, contextStore, gatewayRegistry, controlSnapshot, submitClient, idempotencyStore, running);
         } finally {
             consumer.close();
             producer.close();

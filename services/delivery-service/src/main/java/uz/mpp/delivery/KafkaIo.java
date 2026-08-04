@@ -7,7 +7,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
@@ -41,6 +40,17 @@ import uz.mpp.platformcontracts.grpc.v1.SubmitResponse;
  * (найденный кодревью класс бага — {@code commitAsync()} без аргументов
  * коммитит позицию всего фетча, не оффсет только что обработанной записи —
  * применён здесь с самого начала, не после отдельной находки).
+ *
+ * <p>Осознанно не входит в этот срез (тот же явно раскрытый класс gap, что
+ * {@code destination-resolution-service/kafka_io.rs}): DLQ на не парсящийся
+ * {@code StageExecuteCommand} (в отличие от отсутствующего msgctx — исправлено
+ * ниже — здесь нет валидного {@code message_id}/{@code stage_execution_id},
+ * StageCompletedEvent построить нечем). {@code stage.delivery.dlq} уже
+ * запланирован в {@code infra/kafka/}, но producer сюда не подключён —
+ * partition-suspend поведение ниже блокирует такую запись навсегда, до
+ * ручного вмешательства; по архитектуре (hld.md §20, "Critical Sweep")
+ * маршрутизация в DLQ по deadline — не локальная забота отдельного
+ * stage-consumer'а.</p>
  */
 public final class KafkaIo {
 
@@ -74,6 +84,7 @@ public final class KafkaIo {
         GatewayRegistry gatewayRegistry,
         ControlSnapshot controlSnapshot,
         OperatorSubmitClient submitClient,
+        SubmitIdempotencyStore idempotencyStore,
         AtomicBoolean running
     ) {
         consumer.subscribe(List.of(INPUT_TOPIC));
@@ -88,7 +99,7 @@ public final class KafkaIo {
                         continue;
                     }
                     try {
-                        processRecord(record, contextStore, gatewayRegistry, controlSnapshot, submitClient, producer);
+                        processRecord(record, contextStore, gatewayRegistry, controlSnapshot, submitClient, idempotencyStore, producer);
                         tracker.recordSuccess(tp, record.offset());
                     } catch (Exception e) {
                         LOG.log(Level.SEVERE, "не удалось обработать stage.delivery запись partition=" + tp
@@ -138,6 +149,7 @@ public final class KafkaIo {
         GatewayRegistry gatewayRegistry,
         ControlSnapshot controlSnapshot,
         OperatorSubmitClient submitClient,
+        SubmitIdempotencyStore idempotencyStore,
         KafkaProducer<String, byte[]> producer
     ) throws Exception {
         StageExecuteCommand command = StageExecuteCommand.parseFrom(record.value());
@@ -151,30 +163,77 @@ public final class KafkaIo {
             return;
         }
 
+        // Детерминированный queue_msg_id (по stage_execution_id, не
+        // UUID.randomUUID() на каждый вызов) — исправление CRITICAL находки
+        // кодревью: hld.md §21 требует "stable stage_execution_id" как одну
+        // из опор дедупликации; случайный id на каждую редеставку эту опору
+        // ломал. См. SubmitIdempotencyStore.
+        String stageExecutionId = command.getStageExecutionId();
+        String deterministicQueueMsgId = "dlv-" + stageExecutionId;
+
         MessageContext context = contextStore.fetch(command.getMessageId());
         if (context == null) {
-            throw new IllegalStateException("MessageContext не найден для " + command.getMessageId() + " — at-least-once, переобработается");
+            // HIGH находка кодревью: раньше это был throw, который блокировал
+            // партицию НАВСЕГДА, если msgctx реально никогда не появится
+            // (TTL-эвикция/несогласованность), в отличие от gateway-not-found
+            // ниже, который корректно публикует stage.completed с UNKNOWN.
+            // command уже успешно распарсен — message_id/stage_execution_id
+            // валидны, StageCompletedEvent построить можно; нет причины
+            // блокировать всю партицию ради одной записи с недостающим
+            // контекстом, если можно завершить её тем же путём, что и любой
+            // другой неопределённый исход submit'а.
+            LOG.warning("stage_execution_id=" + stageExecutionId + " MessageContext не найден для "
+                + command.getMessageId() + ", завершаем как SUBMISSION_OUTCOME_UNKNOWN вместо блокировки партиции");
+            SubmitOutcome outcome = DeliveryService.handleGrpcFailure("MESSAGE_CONTEXT_NOT_FOUND");
+            StageCompletedEvent event = DeliveryService.buildEvent(command, deterministicQueueMsgId, outcome);
+            producer.send(new ProducerRecord<>(OUTPUT_TOPIC, event.getMessageId(), event.toByteArray()))
+                .get(PRODUCER_SEND_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            return;
         }
-
-        List<Segment> segments = SegmentMessage.segment(context.body(), context.encoding());
-        String queueMsgId = UUID.randomUUID().toString();
 
         GatewayEndpoint endpoint = gatewayRegistry.resolve(extension.getResolvedOperatorId(), extension.getRouteId());
 
         SubmitOutcome outcome;
+        String queueMsgId;
         if (endpoint == null) {
             // Registry-запись отсутствует (владеющая реплика ещё не
             // зарегистрировалась/сдохла без переизбрания) — тот же исход,
             // что неопределённый результат submit, не считается FAILED
             // (нельзя утверждать, что оператор отклонил бы сообщение).
+            // Нет реального side effect — claim через идемпотентный store не
+            // нужен, безопасно ретраится сколько угодно раз.
+            queueMsgId = deterministicQueueMsgId;
             outcome = DeliveryService.handleGrpcFailure("GATEWAY_INSTANCE_NOT_FOUND");
         } else {
-            SubmitRequest request = DeliveryService.buildSubmitRequest(command, extension, context, queueMsgId, segments);
-            try {
-                SubmitResponse response = submitClient.submit(endpoint.endpoint(), request);
-                outcome = DeliveryService.interpretSubmitResult(response);
-            } catch (io.grpc.StatusRuntimeException e) {
-                outcome = DeliveryService.handleGrpcFailure(e.getStatus().getCode().name());
+            SubmitIdempotencyStore.ClaimResult claim = idempotencyStore.claim(stageExecutionId, deterministicQueueMsgId);
+            if (claim instanceof SubmitIdempotencyStore.ClaimResult.AlreadyDone already) {
+                // Реальный submit уже состоялся при более ранней попытке
+                // (эта — редеставка после сбоя публикации stage.completed) —
+                // повторный вызов submitClient.submit(...) исключён, исход
+                // переиспользуется как есть.
+                queueMsgId = already.queueMsgId();
+                outcome = already.outcome();
+            } else if (claim instanceof SubmitIdempotencyStore.ClaimResult.AmbiguousInFlight ambiguous) {
+                // Claim уже занят, но исход не записан — крэш между реальным
+                // submit и записью результата. Нельзя утверждать, дошёл ли
+                // submit до оператора: hld.md §21 явно запрещает
+                // автоматический повторный submit при UNKNOWN, поэтому здесь
+                // НЕ вызываем submitClient.submit(...) снова.
+                queueMsgId = ambiguous.queueMsgId();
+                outcome = DeliveryService.handleGrpcFailure("AMBIGUOUS_PRIOR_ATTEMPT_NOT_RESUBMITTED");
+                idempotencyStore.recordOutcome(stageExecutionId, outcome);
+            } else {
+                SubmitIdempotencyStore.ClaimResult.Won won = (SubmitIdempotencyStore.ClaimResult.Won) claim;
+                queueMsgId = won.queueMsgId();
+                List<Segment> segments = SegmentMessage.segment(context.body(), context.encoding());
+                SubmitRequest request = DeliveryService.buildSubmitRequest(command, extension, context, queueMsgId, segments);
+                try {
+                    SubmitResponse response = submitClient.submit(endpoint.endpoint(), request);
+                    outcome = DeliveryService.interpretSubmitResult(response);
+                } catch (io.grpc.StatusRuntimeException e) {
+                    outcome = DeliveryService.handleGrpcFailure(e.getStatus().getCode().name());
+                }
+                idempotencyStore.recordOutcome(stageExecutionId, outcome);
             }
         }
 
