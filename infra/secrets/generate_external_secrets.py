@@ -21,7 +21,12 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "k8s"))
-from generate_manifests import NAMESPACE, SECRET_K8S_NAME  # noqa: E402
+from generate_manifests import (  # noqa: E402
+    NAMESPACE,
+    SECRET_K8S_NAME,
+    credential_ref_to_env_var,
+    load_partner_fixture,
+)
 
 VAULT_ADDR = "http://vault.vault-system.svc:8200"
 VAULT_KV_MOUNT = "mpp"
@@ -93,6 +98,48 @@ def build_external_secret(k8s_secret_name: str) -> dict:
     }
 
 
+def vault_kv_path_and_property(credential_ref: str) -> tuple[str, str]:
+    """`vault://partners/click_uz/main/api_key` -> (`partners/click_uz/main`, `api_key`)
+    — группирует по application (один Vault KV v2 entry на app), не по
+    отдельной записи на credential, тот же принцип, что у пяти статических
+    секретов (несколько полей под одним KV entry)."""
+    assert credential_ref.startswith("vault://"), f"ожидали vault:// credential_ref, получили {credential_ref!r}"
+    path = credential_ref[len("vault://"):]
+    kv_path, _, property_name = path.rpartition("/")
+    return kv_path, property_name
+
+
+def build_partner_credentials_external_secret() -> dict:
+    """HIGH находка кодревью (PART 2, partner-rest-receiver #4) —
+    `PARTNER_CRED_*` не имело ни одной Vault-записи нигде в infra/. В отличие
+    от build_external_secret (один Vault-путь, N полей), здесь у каждого
+    credential_ref — СВОЙ отдельный Vault KV entry (`vault_kv_path_and_property`),
+    поэтому форма ExternalSecret.spec.data — по одной записи на приложение,
+    не общий remoteRef.key. Источник партнёров — тот же статический
+    partner.valid.json, что реально монтируется в под через ConfigMap
+    (k8s/generate_manifests.py PARTNER_CONFIG_SERVICES) — тот же явно
+    раскрытый класс упрощения (в проде — динамически из config.changes),
+    не новый источник рассинхронизации."""
+    partner = load_partner_fixture()
+    data = []
+    for app in partner["applications"]:
+        credential_ref = app["auth"]["credential_ref"]
+        env_var = credential_ref_to_env_var(credential_ref)
+        kv_path, property_name = vault_kv_path_and_property(credential_ref)
+        data.append({"secretKey": env_var, "remoteRef": {"key": kv_path, "property": property_name}})
+    return {
+        "apiVersion": "external-secrets.io/v1beta1",
+        "kind": "ExternalSecret",
+        "metadata": {"name": "partner-credentials", "namespace": NAMESPACE},
+        "spec": {
+            "refreshInterval": "1h",
+            "secretStoreRef": {"name": "vault-backend", "kind": "ClusterSecretStore"},
+            "target": {"name": "partner-credentials", "creationPolicy": "Owner"},
+            "data": data,
+        },
+    }
+
+
 def main():
     out_dir = Path(__file__).parent / "rendered"
     out_dir.mkdir(exist_ok=True)
@@ -101,6 +148,9 @@ def main():
 
     docs = [build_cluster_secret_store()]
     for k8s_secret_name in SECRET_K8S_NAME.values():
+        if k8s_secret_name == "partner-credentials":
+            docs.append(build_partner_credentials_external_secret())
+            continue
         docs.append(build_external_secret(k8s_secret_name))
 
     path = out_dir / "external-secrets.yaml"

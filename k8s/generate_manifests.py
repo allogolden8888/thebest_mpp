@@ -18,6 +18,7 @@ generate_manifests.py` рендерит в `rendered/`, затем
 Java-session 8 vCPU/16GB, Go 2 vCPU/4GB" (см. Explore-отчёт, capacity_model.md:92).
 """
 
+import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +29,34 @@ NAMESPACE = "mpp"
 IMAGE_REGISTRY = "registry.mpp.internal"
 HEALTH_PORT = 9090  # /metrics (Prometheus), /healthz, /readyz — новая платформенная конвенция,
                      # ни в одном из HLD/LLD документов порт/путь не был зафиксирован явно.
+
+# HIGH находка кодревью (PART 2, partner-rest-receiver #4) — см. полный
+# комментарий у SECRET_DEPENDENCIES ниже. Оба сервиса, читающие статический
+# partner-конфиг (partner-rest-receiver для auth, partner-notification-service
+# для callback-роутинга — тот же файл, два разных потребителя), получают его
+# из одного и того же ConfigMap вместо несуществующего relative dev-пути.
+PARTNER_CONFIG_SERVICES = ["partner-rest-receiver", "partner-notification-service"]
+PARTNER_CONFIG_MOUNT_DIR = "/etc/mpp/partner-config"
+PARTNER_CONFIG_FIXTURE = "partner.valid.json"
+PARTNER_CONFIG_CONFIGMAP_NAME = "partner-config-fixture"
+
+
+def credential_ref_to_env_var(credential_ref: str) -> str:
+    """Python-порт `services/partner-rest-receiver/src/auth.rs::credential_ref_to_env_var`
+    — ДОЛЖЕН оставаться байт-в-байт синхронным с ним, иначе сгенерированный
+    здесь Secret не совпадёт по именам ключей с тем, что `EnvAuthVerifier`
+    реально читает через `std::env::var`. Тот же тестовый вектор, что в
+    `auth.rs` (`credential_ref_maps_to_deterministic_env_var_name`), повторён
+    в `k8s/generate_manifests_test.py` (или аналоге), чтобы дрейф между
+    Rust- и Python-версией ловился автоматически, не только при живом деплое.
+    """
+    sanitized = "".join(c.upper() if c.isascii() and c.isalnum() else "_" for c in credential_ref)
+    return f"PARTNER_CRED_{sanitized}"
+
+
+def load_partner_fixture() -> dict:
+    fixture_path = Path(__file__).parent.parent / "config_schemas" / "examples" / PARTNER_CONFIG_FIXTURE
+    return json.loads(fixture_path.read_text())
 
 # Плейсхолдер, как IMAGE_REGISTRY выше — реальный зарегистрированный домен нигде
 # не зафиксирован ни в одном документе. mpp.example не выпустит настоящий
@@ -195,8 +224,27 @@ SECRET_DEPENDENCIES: dict[str, list[str]] = {
     "analytics-writer": ["clickhouse"],
     "partner-notification-service": ["redis-runtime"],
 }
+
+# HIGH находка кодревью (PART 2, partner-rest-receiver #4): EnvAuthVerifier
+# (services/partner-rest-receiver/src/auth.rs) ищет `PARTNER_CRED_*`
+# переменные окружения, детерминированно построенные из `credential_ref`
+# каждого application'а — но ни здесь, ни в infra/secrets/ для них не было
+# ни одной записи, и ни для одного из двух consumer'ов статического
+# partner-конфига (partner-rest-receiver, partner-notification-service)
+# не был wiring даже для самого файла конфига (`PARTNER_CONFIG_PATH` нигде
+# не выставлялся -> откат на relative dev-путь, которого в образе нет ->
+# паника при старте). Реальный fix (полноценный per-partner Vault-клиент,
+# либо config.changes-based динамическая загрузка) — за пределами этого
+# среза (см. auth.rs/README про статический файл вместо Vault-клиента),
+# но то, что ЕСТЬ (EnvAuthVerifier поверх env vars) можно и нужно реально
+# завести на единственного тестового партнёра, который этот срез
+# моделирует (partner.valid.json) — не оставлять полностью мёртвым.
+# (PARTNER_CONFIG_SERVICES/PARTNER_CONFIG_MOUNT_DIR/PARTNER_CONFIG_FIXTURE — см. константы вверху файла.)
+
 for _svc in SERVICES:
     _svc.secrets = SECRET_DEPENDENCIES.get(_svc.name, [])
+    if _svc.name == "partner-rest-receiver":
+        _svc.secrets = [*_svc.secrets, "partner-credentials"]
 
 
 def replicas_for(svc: Service) -> int:
@@ -240,6 +288,13 @@ SECRET_K8S_NAME = {
     "redis-configuration": "redis-configuration-credentials",
     "redis-billing": "redis-billing-credentials",
     "clickhouse": "clickhouse-credentials",
+    # Форма отличается от пяти секретов выше (один Vault-путь = одна запись
+    # в этом Secret) — у partner-credentials каждый ключ (один на
+    # credential_ref) читает СВОЙ собственный Vault-путь, не общую запись.
+    # infra/secrets/generate_external_secrets.py обрабатывает этот ключ
+    # отдельным билдером (build_partner_credentials_external_secret), не
+    # общим циклом по SECRET_KEYS/VAULT_PATH — см. комментарий там.
+    "partner-credentials": "partner-credentials",
 }
 
 
@@ -257,10 +312,21 @@ def _container(svc: Service) -> dict:
         "resources": _resources(svc, guaranteed),
         **_probes(),
     }
+    volume_mounts = []
     if svc.rocksdb_pvc_gi:
-        container["volumeMounts"] = [{"name": "rocksdb-state", "mountPath": "/var/lib/rocksdb"}]
+        volume_mounts.append({"name": "rocksdb-state", "mountPath": "/var/lib/rocksdb"})
+    if svc.name in PARTNER_CONFIG_SERVICES:
+        volume_mounts.append({"name": "partner-config", "mountPath": PARTNER_CONFIG_MOUNT_DIR, "readOnly": True})
+    if volume_mounts:
+        container["volumeMounts"] = volume_mounts
     if svc.secrets:
         container["envFrom"] = [{"secretRef": {"name": SECRET_K8S_NAME[key]}} for key in svc.secrets]
+    if svc.name in PARTNER_CONFIG_SERVICES:
+        # Оба Go/Rust consumer'а (main.rs/main.go) читают именно
+        # PARTNER_CONFIG_PATH, откатываясь на relative dev-путь, если её
+        # нет — тот путь в реальном образе не существует (см. комментарий у
+        # PARTNER_CONFIG_SERVICES выше).
+        container["env"] = [{"name": "PARTNER_CONFIG_PATH", "value": f"{PARTNER_CONFIG_MOUNT_DIR}/{PARTNER_CONFIG_FIXTURE}"}]
     return container
 
 
@@ -276,6 +342,8 @@ def _pod_template(svc: Service) -> dict:
             "whenUnsatisfiable": "ScheduleAnyway",
             "labelSelector": {"matchLabels": {"app": svc.name}},
         }]
+    if svc.name in PARTNER_CONFIG_SERVICES:
+        spec["volumes"] = [{"name": "partner-config", "configMap": {"name": PARTNER_CONFIG_CONFIGMAP_NAME}}]
     return {
         "metadata": {"labels": {"app": svc.name, "mpp.io/workload-class": svc.workload_class}},
         "spec": spec,
@@ -412,6 +480,23 @@ def build_keda_scaledobject(svc: Service, replicas: int) -> dict:
     }
 
 
+def build_partner_config_configmap() -> dict:
+    """Часть исправления HIGH находки кодревью (PART 2, partner-rest-receiver
+    #4) — без этого ConfigMap `PARTNER_CONFIG_PATH` не выставлялась вообще,
+    оба consumer'а (partner-rest-receiver/main.rs, partner-notification-service/main.go)
+    откатывались на relative dev-путь и падали при старте до того, как вопрос
+    авторизации вообще возникал. Тот же файл, что оба сервиса уже грузят по
+    умолчанию в dev/тестах (`config_schemas/examples/partner.valid.json`) —
+    не новые данные, просто реально смонтирован в контейнер вместо
+    несуществующего пути."""
+    fixture_path = Path(__file__).parent.parent / "config_schemas" / "examples" / PARTNER_CONFIG_FIXTURE
+    return {
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": {"name": PARTNER_CONFIG_CONFIGMAP_NAME, "namespace": NAMESPACE},
+        "data": {PARTNER_CONFIG_FIXTURE: fixture_path.read_text()},
+    }
+
+
 def render_service(svc: Service) -> list[dict]:
     replicas = replicas_for(svc)
     docs = [build_workload(svc, replicas), build_pdb(svc, replicas)]
@@ -442,6 +527,7 @@ def main():
         },
     }
     (out_dir / "00-namespace.yaml").write_text(yaml.dump(namespace_doc, sort_keys=False))
+    (out_dir / "00-partner-config.yaml").write_text(yaml.dump(build_partner_config_configmap(), sort_keys=False))
 
     summary = []
     for svc in SERVICES:
