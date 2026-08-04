@@ -62,6 +62,7 @@ async fn main() {
         rate_limiter,
         producer,
         redis_runtime_url: redis_runtime_url.clone(),
+        concurrency_limit: Arc::new(tokio::sync::Semaphore::new(http::MAX_CONCURRENT_REQUESTS)),
     });
 
     // `sync_rate_limit_counters` — таймер ~1с, не Redis round-trip на каждое

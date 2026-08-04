@@ -14,7 +14,7 @@ use crate::partner_config::PartnerSnapshot;
 use crate::rate_limit::RateLimiter;
 use crate::ip_allowlist;
 use crate::request::{RawRequest, ValidatedRequest, ValidationError, validate_request_schema};
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -23,7 +23,8 @@ use rdkafka::producer::FutureProducer;
 use serde::Serialize;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+use tokio::sync::Semaphore;
 
 pub struct AppState {
     pub partner_snapshot: PartnerSnapshot,
@@ -32,6 +33,13 @@ pub struct AppState {
     pub rate_limiter: RateLimiter,
     pub producer: FutureProducer,
     pub redis_runtime_url: String,
+    /// MEDIUM находка кодревью: без этого деградированный/недоступный Kafka
+    /// (до `REQUEST_TIMEOUT` держит каждый in-flight запрос) не имел ВООБЩЕ
+    /// никакого ограничения на количество одновременно удерживаемых
+    /// запросов — см. `MAX_CONCURRENT_REQUESTS`. `try_acquire_owned`
+    /// (не `.acquire().await`) намеренно — выше лимита сразу 503, не
+    /// неограниченная очередь, которая свела бы защиту на нет.
+    pub concurrency_limit: Arc<Semaphore>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -129,15 +137,28 @@ fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
     headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_string).filter(|s| !s.is_empty())
 }
 
-/// Реальный remote IP: приоритет `X-Forwarded-For` (первый адрес — клиент,
-/// стандартная конвенция за reverse-proxy/ingress), иначе TCP peer address
+/// Реальный remote IP: приоритет `X-Forwarded-For`, иначе TCP peer address
 /// из `ConnectInfo`. Известное ограничение: только IPv4 (см. `ip_allowlist.rs`
 /// — `partner.schema.json` тоже только IPv4 CIDR); IPv6-клиент за прокси без
 /// `X-Forwarded-For` даст `MissingRemoteIp`, не паникует.
+///
+/// MEDIUM находка кодревью: раньше брался ПЕРВЫЙ (левый) адрес — безопасно
+/// только пока ingress-nginx *перезаписывает* заголовок целиком
+/// (`use-forwarded-headers: false`, дефолт Helm-чарта, но нигде явно не
+/// закреплённый в Terraform) — если это когда-нибудь сменится на
+/// дозапись/проксирование через доп. слой (CDN/WAF), левый адрес станет
+/// тем, что прислал сам клиент, то есть подделываемым. Берём ПОСЛЕДНИЙ
+/// (правый) адрес — тот, что дописала наша собственная инфраструктура
+/// (единственный доверенный hop, ingress-nginx) непосредственно перед тем,
+/// как запрос попал сюда — не то, что мог заявить о себе клиент. В текущем
+/// режиме "перезапись" единственная запись в заголовке одна и та же что
+/// слева, что справа — поведение не меняется; но если ingress однажды
+/// начнёт дописывать, а не перезаписывать, эта защита не даёт клиенту
+/// подделать allowlist-проверку через собственный `X-Forwarded-For`.
 fn extract_remote_ip(headers: &HeaderMap, peer: SocketAddr) -> Option<Ipv4Addr> {
     if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = xff.split(',').next() {
-            if let Ok(ip) = first.trim().parse::<Ipv4Addr>() {
+        if let Some(last) = xff.split(',').next_back() {
+            if let Ok(ip) = last.trim().parse::<Ipv4Addr>() {
                 return Some(ip);
             }
         }
@@ -154,6 +175,18 @@ async fn handle_send_message(
     headers: HeaderMap,
     body: String,
 ) -> Response {
+    // Concurrency limit — см. AppState::concurrency_limit. Захватывается
+    // ДО любой другой работы (даже до auth) — цель ограничить сырые
+    // одновременные запросы на реплику, не "валидную работу"; permit держится
+    // до конца функции (Drop освобождает слот).
+    let _permit = match state.concurrency_limit.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(ErrorResponse { error: "TOO_MANY_CONCURRENT_REQUESTS".to_string() }))
+                .into_response();
+        }
+    };
+
     let raw = RawRequest {
         partner_id: header_string(&headers, "x-partner-id"),
         application_id: header_string(&headers, "x-application-id"),
@@ -213,17 +246,58 @@ async fn handle_send_message(
 
     let incoming = build_incoming_message(&validated, message_id.clone(), trace_id.clone(), SystemTime::now());
 
-    match kafka_io::publish_incoming(&state.producer, &incoming).await {
-        Ok(()) => (StatusCode::ACCEPTED, Json(AckResponse { message_id, trace_id })).into_response(),
-        Err(PublishError::Kafka(e)) => {
+    // MEDIUM находка кодревью: Kafka publish (5с producer-queue wait + 5с
+    // delivery timeout, до ~10с суммарно) раньше awaited'ился без верхней
+    // границы на уровне этого сервиса — деградировавший/недоступный Kafka
+    // мог держать запрос неограниченно долго (сами внутренние 5с+5с — это
+    // таймауты librdkafka на КАЖДУЮ отдельную попытку, не гарантия, что
+    // publish_incoming вернётся за 10с суммарно при повторных внутренних
+    // ретраях). `REQUEST_TIMEOUT` — верхняя граница поверх этого.
+    match tokio::time::timeout(REQUEST_TIMEOUT, kafka_io::publish_incoming(&state.producer, &incoming)).await {
+        Ok(Ok(())) => (StatusCode::ACCEPTED, Json(AckResponse { message_id, trace_id })).into_response(),
+        Ok(Err(PublishError::Kafka(e))) => {
             tracing::error!("не удалось опубликовать IncomingMessage {message_id}: {e}");
             (StatusCode::SERVICE_UNAVAILABLE, Json(ErrorResponse { error: "PUBLISH_FAILED".to_string() })).into_response()
+        }
+        Err(_elapsed) => {
+            tracing::error!("публикация IncomingMessage {message_id} превысила REQUEST_TIMEOUT={REQUEST_TIMEOUT:?}");
+            (StatusCode::SERVICE_UNAVAILABLE, Json(ErrorResponse { error: "PUBLISH_TIMEOUT".to_string() })).into_response()
         }
     }
 }
 
+/// MEDIUM находка кодревью: раньше не было ни таймаута на весь путь
+/// Kafka-публикации, ни ограничения на количество одновременно удерживаемых
+/// запросов, ни переопределения дефолтного 2МБ body-лимита axum —
+/// деградировавший/недоступный Kafka мог держать каждый in-flight запрос
+/// до ~10с (5с producer-queue wait + 5с delivery timeout, оба await'ятся
+/// прямо в handler'е) без circuit breaker'а и без верхней границы на
+/// количество таких запросов сразу.
+///
+/// `MAX_BODY_BYTES` — 64КиБ, с большим запасом: `body` ограничено 1600
+/// символами (`request.rs`), `msisdn`/`sender_id` — короткие строки,
+/// реалистичный JSON-конверт на порядок меньше; всё ещё на два порядка
+/// меньше дефолтных 2МБ axum, которые CODE_REVIEW.md отметило как
+/// эксплуатируемые вместе с находкой про `sender_id` (закрыта отдельно,
+/// см. `request.rs`).
+const MAX_BODY_BYTES: usize = 64 * 1024;
+/// `REQUEST_TIMEOUT` — с запасом выше худшего случая Kafka-пути (~10с),
+/// чтобы не резать легитимные, просто медленные запросы, но всё же
+/// ограничивать, насколько долго деградировавший Kafka может держать
+/// соединение открытым — см. использование вокруг `kafka_io::publish_incoming`.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// `MAX_CONCURRENT_REQUESTS` — верхняя граница одновременно удерживаемых
+/// in-flight запросов на реплику (см. `AppState::concurrency_limit`); при
+/// деградированном Kafka (каждый запрос держится до `REQUEST_TIMEOUT`) не
+/// даёт памяти/файловым дескрипторам расти неограниченно — запросы сверх
+/// лимита получают немедленный 503 вместо неограниченной очереди.
+pub const MAX_CONCURRENT_REQUESTS: usize = 1024;
+
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new().route("/v1/messages", post(handle_send_message)).with_state(state)
+    Router::new()
+        .route("/v1/messages", post(handle_send_message))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .with_state(state)
 }
 
 #[cfg(test)]
@@ -390,10 +464,29 @@ mod tests {
 
     #[test]
     fn extract_remote_ip_prefers_x_forwarded_for_over_peer() {
+        // Однозначный (одноэлементный) X-Forwarded-For — режим "перезапись"
+        // ingress-nginx (текущий деплой) — единственная запись доверенная.
         let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "185.65.212.9, 10.0.0.1".parse().unwrap());
+        headers.insert("x-forwarded-for", "185.65.212.9".parse().unwrap());
         let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
         assert_eq!(extract_remote_ip(&headers, peer), Some("185.65.212.9".parse().unwrap()));
+    }
+
+    /// Регрессия на MEDIUM находку кодревью: если бы брался ЛЕВЫЙ адрес,
+    /// клиент мог бы прислать `X-Forwarded-For: <произвольный IP>` и
+    /// обойти allowlist в сценарии, где ingress однажды начнёт дописывать
+    /// в заголовок, а не перезаписывать его. Правый адрес — тот, что
+    /// дописала бы наша инфраструктура (не клиент) — должен побеждать.
+    #[test]
+    fn extract_remote_ip_trusts_rightmost_hop_not_client_claimed_leftmost() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "6.6.6.6, 10.0.0.1".parse().unwrap());
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        assert_eq!(
+            extract_remote_ip(&headers, peer),
+            Some("10.0.0.1".parse().unwrap()),
+            "должен доверять ПОСЛЕДНЕМУ (дописанному нашей инфраструктурой) адресу, не первому (клиентскому)"
+        );
     }
 
     #[test]
