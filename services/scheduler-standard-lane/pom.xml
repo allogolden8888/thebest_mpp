@@ -14,6 +14,7 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <kafka.version>4.3.1</kafka.version>
     <protobuf.version>4.35.1</protobuf.version>
+    <lettuce.version>6.5.1.RELEASE</lettuce.version>
     <junit.version>6.1.2</junit.version>
   </properties>
 
@@ -27,6 +28,11 @@
       <groupId>com.google.protobuf</groupId>
       <artifactId>protobuf-java</artifactId>
       <version>${protobuf.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.lettuce</groupId>
+      <artifactId>lettuce-core</artifactId>
+      <version>${lettuce.version}</version>
     </dependency>
 
     <dependency>
