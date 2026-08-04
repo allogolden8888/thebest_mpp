@@ -200,13 +200,16 @@ func handleRecord(
 	}
 
 	normalizedStatus, recognized := dlr.NormalizeStatus(dlrEvent.GetRawStatus())
+	receivedAt := dlrEvent.GetReceivedAt().AsTime()
 
-	rec, err := correlationStore.Lookup(ctx, dlrEvent.GetOperatorId(), dlrEvent.GetSmscMessageId(), dlrEvent.GetSegmentId())
+	// receivedAt передаётся в Lookup — исправление HIGH находки кодревью
+	// (smsc_message_id reuse может приводить к некорректной корреляции без
+	// этой границы), см. Store.Lookup.
+	rec, err := correlationStore.Lookup(ctx, dlrEvent.GetOperatorId(), dlrEvent.GetSmscMessageId(), dlrEvent.GetSegmentId(), receivedAt)
 	if err != nil {
 		return err
 	}
 
-	receivedAt := dlrEvent.GetReceivedAt().AsTime()
 	decision := dlr.Decide(receivedAt, normalizedStatus, recognized, rec, time.Now(), correlationWindow)
 
 	switch decision.Kind {
