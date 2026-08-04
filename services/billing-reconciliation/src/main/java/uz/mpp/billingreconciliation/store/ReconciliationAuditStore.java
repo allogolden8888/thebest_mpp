@@ -14,29 +14,14 @@ import static org.jooq.impl.DSL.table;
  * persist_audit (service_internal_methods.md §5.3): "вся последовательность
  * recovery" -&gt; запись в PostgreSQL.
  *
- * <p><b>Открытый вопрос — таблица не мигрирована в этой сессии.</b>
- * `migrations/` — общий артефакт (та же категория, что `platform-contracts/`),
- * последняя миграция на момент этого среза — `V017__backoffice_stub.sql`.
- * Добавление `V018__billing_reconciliation_audit.sql` в одностороннем
- * порядке рискует конфликтом нумерации с Главным агентом, если он тоже
- * добавляет миграцию параллельно — этот класс реализован (реальный jOOQ,
- * реальные типы), но **не протестирован против реальной БД**, в отличие от
- * `LedgerStore`/`BalanceRecomputer`/`BillingRedisClient` в этом же сервисе.
- * Предлагаемая схема (для координации с Главным агентом):
- *
- * <pre>
- * CREATE TABLE billing.reconciliation_audit (
- *     id             BIGSERIAL PRIMARY KEY,
- *     account_id     TEXT NOT NULL,
- *     drift_minor_units BIGINT NOT NULL,
- *     severity       TEXT NOT NULL,
- *     action         TEXT NOT NULL, -- "FREEZE" | "UNFREEZE" | "NO_ACTION"
- *     recomputed_balance_minor_units BIGINT NULL,
- *     account_epoch_before BIGINT NOT NULL,
- *     account_epoch_after  BIGINT NOT NULL,
- *     created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
- * );
- * </pre>
+ * <p><b>Обновление (CODE_REVIEW.md Critical #6 fix):</b> таблица
+ * {@code billing.reconciliation_audit} раньше не была мигрирована — этот
+ * класс компилировался (реальный jOOQ, реальные типы), но не был
+ * протестирован против реальной БД, и {@code Main.reconcileOne} не имел
+ * рабочего аудита для recompute-then-unfreeze пути. Теперь мигрирована —
+ * {@code migrations/V021__billing_reconciliation_audit.sql} (схема ровно та,
+ * что была здесь задокументирована как предложение, не выдумана заново) —
+ * см. `MainTest`, реальный PostgreSQL round-trip.
  */
 public final class ReconciliationAuditStore {
 
