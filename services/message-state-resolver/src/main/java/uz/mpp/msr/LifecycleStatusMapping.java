@@ -21,4 +21,28 @@ public final class LifecycleStatusMapping {
             case SYSTEM_UNAVAILABLE -> MessageLifecycleStatus.MESSAGE_LIFECYCLE_STATUS_SYSTEM_UNAVAILABLE;
         };
     }
+
+    /**
+     * Обратное направление — нужно для {@code restore_from_changelog}
+     * (KafkaIo.restoreFromChangelog): реконструирует {@link LifecycleState}
+     * из ранее записанного {@code MessageLifecycleEvent} в
+     * {@code message-state.changelog}. {@code null} для
+     * {@code UNSPECIFIED}/{@code UNRECOGNIZED} — такая запись в changelog не
+     * должна была появиться (writer этого же сервиса никогда не пишет
+     * UNSPECIFIED), но decode-независимая защита лучше NPE/MatchException
+     * при чтении чужого/повреждённого changelog-топика.
+     */
+    public static LifecycleStatus fromProto(MessageLifecycleStatus proto) {
+        return switch (proto) {
+            case MESSAGE_LIFECYCLE_STATUS_SUBMITTED -> LifecycleStatus.SUBMITTED;
+            case MESSAGE_LIFECYCLE_STATUS_DELIVERED -> LifecycleStatus.DELIVERED;
+            case MESSAGE_LIFECYCLE_STATUS_UNDELIVERABLE -> LifecycleStatus.UNDELIVERABLE;
+            case MESSAGE_LIFECYCLE_STATUS_DELIVERY_UNRESOLVED -> LifecycleStatus.DELIVERY_UNRESOLVED;
+            case MESSAGE_LIFECYCLE_STATUS_LATE_DELIVERY_CONFIRMED -> LifecycleStatus.LATE_DELIVERY_CONFIRMED;
+            case MESSAGE_LIFECYCLE_STATUS_REJECTED -> LifecycleStatus.REJECTED;
+            case MESSAGE_LIFECYCLE_STATUS_FAILED -> LifecycleStatus.FAILED;
+            case MESSAGE_LIFECYCLE_STATUS_SYSTEM_UNAVAILABLE -> LifecycleStatus.SYSTEM_UNAVAILABLE;
+            case MESSAGE_LIFECYCLE_STATUS_UNSPECIFIED, UNRECOGNIZED -> null;
+        };
+    }
 }

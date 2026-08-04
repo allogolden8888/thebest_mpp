@@ -17,6 +17,14 @@ public final class Main {
         MessageStateStore store = new MessageStateStore();
 
         String bootstrapServers = System.getenv().getOrDefault("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap.mpp.svc:9092");
+
+        // HIGH находка кодревью (PART 2, message-state-resolver #3): restore
+        // ДО readyz=true и ДО подписки на живой трафик — иначе первые
+        // stage.completed/delivery.status после рестарта пода видят пустой
+        // store и трактуют реально известные message_id как "первый раз
+        // видим", ломая REGRESSION-детекцию и lifecycle_version.
+        KafkaIo.restoreFromChangelog(bootstrapServers, store);
+
         // instance id — см. KafkaIo.buildTransactionalProducer javadoc: не
         // решает fencing под ребалансировкой для >1 реплики в этом срезе.
         String instanceId = System.getenv().getOrDefault("MSR_INSTANCE_ID", UUID.randomUUID().toString());

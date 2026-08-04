@@ -2,7 +2,7 @@
 
 **Основание:** `development_plan.md` Фаза 2.1, десятый сервис "ходового скелета" (Главный агент) — единственный владелец партнёрского lifecycle-статуса: превращает внутренние `stage.completed`/`delivery.status` в `message.lifecycle` (`service_internal_methods.md` §2.4, `hld.md` §10). Третий Java-сервис серии.
 
-**Статус:** `mvn test`, **28/28 тестов проходят**, компилирует настоящие `platform-contracts/{common,events}/*.proto`. Порт `state_machines/message_lifecycle.py` (10/10 тестов) 1:1 — все 10 Python-тестов перенесены построчно под теми же именами.
+**Статус:** `mvn test`, **30/30 тестов проходят**, компилирует настоящие `platform-contracts/{common,events}/*.proto`. Порт `state_machines/message_lifecycle.py` (10/10 тестов) 1:1 — все 10 Python-тестов перенесены построчно под теми же именами.
 
 ```bash
 cd services/message-state-resolver
@@ -13,7 +13,9 @@ mvn test
 
 Спека требует Kafka Streams + RocksDB state store + `exactly_once_v2`. Как и `billing-service`/`delivery-service`, этот срез — plain Java, не полный Kafka Streams DSL (минимум зависимостей, реально компилируемая сборка). **Но в отличие от прошлых упрощений в этой сессии, здесь не упрощена сама гарантия из HLD §10.1** ("одна Kafka-транзакция: запись в `message-state.changelog` + `message.lifecycle` + commit input offset") — `KafkaIo.java` использует настоящий transactional `KafkaProducer` (`initTransactions`/`beginTransaction`/`sendOffsetsToTransaction`/`commitTransaction`) — тот же низкоуровневый API, на котором построен `exactly_once_v2` внутри самого Kafka Streams, только без топологии DSL поверх него. Упрощена только **локальная проекция состояния**: `MessageStateStore` — in-memory `ConcurrentHashMap`, не RocksDB — тот же класс упрощения, что `ExecutionState` в `pipeline-engine`.
 
-**Важное ограничение, не мелочь (как и у pipeline-engine):** без RocksDB + restore-from-changelog состояние теряется при рестарте пода — `message-state.changelog` продолжает быть authoritative на бумаге, но здесь ничего не читает его обратно при старте. Это единственный на сегодня блокер перед реальным многоинстансным/переживающим рестарт деплоем этого сервиса.
+**Обновление после кодревью (2026-07-27, PART 2):** `MessageStateStore` по-прежнему не RocksDB, но `KafkaIo.restoreFromChangelog` (вызывается из `Main.java` до `health.ready.set(true)` и до подписки на живой трафик) теперь читает `message-state.changelog` целиком (`seekToBeginning` до end-offset'ов, зафиксированных на старте — тот же restore-паттерн, что делает сам Kafka Streams перед READY) и материализует его в `MessageStateStore` перед стартом. Закрывает конкретно "восстановление после рестарта пода" — реально-известный message_id больше не трактуется как "первый раз видим" после рестарта, `lifecycle_version` не откатывается на 1. **Не закрыто:** continuous tailing changelog-топика во время работы (если партиции этого инстанса меняются под ребалансировкой без рестарта процесса — локальная проекция не обновляется до следующего рестарта).
+
+Также в этом же проходе исправлена CRITICAL находка кодревью: `store.put(...)` раньше применялся до `commitTransaction()` и не откатывался на `abortTransaction()` — локальная проекция могла разойтись с зафиксированной Kafka-истиной. Теперь запись в `MessageStateStore` идёт через батч-локальный staging (`pendingUpdates`), применяемый одним проходом только после успешного `commitTransaction()`. Заодно исправлена HIGH находка — decode-ошибка одной записи (`InvalidProtocolBufferException`) больше не валит всю batch-транзакцию (что блокировало партицию для ВСЕХ остальных сообщений батча навсегда); теперь такая запись логируется и пропускается, не трогая остальной батч.
 
 **Также не решено полностью:** правильная привязка `transactional.id` к владению партицией под ребалансировкой (то, что Kafka Streams EOS решает автоматически через group-instance fencing) — здесь `transactional.id` строится из стабильного per-instance идентификатора (`MSR_INSTANCE_ID`), корректно для одной реплики, не гарантированно safe при ребалансировке с несколькими репликами.
 
@@ -42,7 +44,7 @@ mvn test
 
 ## Что НЕ реализовано на этом шаге (честно, не спрятано)
 
-* **Нет RocksDB/restore-from-changelog** — состояние не переживает рестарт пода, см. выше.
+* **Нет RocksDB, но restore-from-changelog при старте есть** (см. выше) — покрывает рестарт пода, не continuous tailing во время работы.
 * **`transactional.id` не решает fencing под ребалансировкой для >1 реплики** — см. выше.
 * **REGRESSION логируется, не пишется в `reconciliation_cases`** — `state_machines.md` §1.3 упоминает эту таблицу как место фиксации аномалий позднего/противоречивого DLR, запись туда не реализована в этом срезе (владелец таблицы — Delivery Reconciliation Service судя по названию, не подтверждено).
 * **`docker build` не выполнялся** — недоступен Docker daemon.
