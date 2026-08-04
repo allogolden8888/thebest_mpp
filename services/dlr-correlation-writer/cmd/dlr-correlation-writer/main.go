@@ -90,7 +90,33 @@ func main() {
 
 	buf := writer.NewBatchBuffer(batchSize)
 	latestByPartition := make(map[int32]*kgo.Record)
+	// suspendedPartitions — CODE_REVIEW.md PART 2, dlr-correlation-writer #1:
+	// как только партиция даёт хотя бы одну недекодируемую запись, дальнейшие
+	// записи ЭТОЙ партиции игнорируются (не буферизуются, latestByPartition
+	// для неё больше не продвигается) до перезапуска процесса — иначе более
+	// свежая успешная запись той же партиции молча закоммитила бы offset мимо
+	// непрочитанной. См. kafkaio.Consumer.PollOnce.
+	suspendedPartitions := make(map[int32]bool)
 	lastFlush := time.Now()
+
+	// retentionInterval/retainHours — см. writer.PgWriter.DropOldPartitions.
+	// 48ч по умолчанию — та же консервативная граница, что уже
+	// задокументирована в migrations/V015 и dlr-manager's DLR_CORRELATION_WINDOW,
+	// требует того же уточнения по реальным SLA операторов (development_plan.md
+	// 5.6, не решено здесь).
+	retentionInterval := time.Hour
+	if v := os.Getenv("RETENTION_CHECK_INTERVAL"); v != "" {
+		if parsed, err := time.ParseDuration(v); err == nil {
+			retentionInterval = parsed
+		}
+	}
+	retainHours := 48
+	if v := os.Getenv("DLR_CORRELATION_RETAIN_HOURS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			retainHours = parsed
+		}
+	}
+	lastRetentionRun := time.Now()
 
 	errHandler := func(err error) { log.Printf("dlr-correlation-writer: %v", err) }
 
@@ -162,15 +188,29 @@ func main() {
 
 		pollCtx, cancel := context.WithTimeout(ctx, flushInterval)
 		consumer.PollOnce(pollCtx, func(rec writer.BufferedRecord, raw *kgo.Record) {
+			if suspendedPartitions[rec.Partition] {
+				return
+			}
 			latestByPartition[rec.Partition] = raw
 			if shouldFlush := buf.Add(rec); shouldFlush {
 				flush()
 			}
+		}, func(partition int32) {
+			suspendedPartitions[partition] = true
 		}, errHandler)
 		cancel()
 
 		if time.Since(lastFlush) >= flushInterval {
 			flush()
+		}
+
+		if time.Since(lastRetentionRun) >= retentionInterval {
+			if dropped, err := pgWriter.DropOldPartitions(ctx, retainHours); err != nil {
+				errHandler(err)
+			} else if dropped > 0 {
+				log.Printf("dlr-correlation-writer: retention удалила %d партиций старше %dч", dropped, retainHours)
+			}
+			lastRetentionRun = time.Now()
 		}
 	}
 }

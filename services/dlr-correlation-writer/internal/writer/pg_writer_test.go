@@ -182,3 +182,79 @@ func TestEnsurePartitionRequiredBeforeInsertPastBootstrapWindow(t *testing.T) {
 		t.Fatalf("Flush после EnsurePartition должен пройти: %v", err)
 	}
 }
+
+// TestDropOldPartitionsRemovesRowsPastRetentionWindow — LOW находка
+// кодревью (PART 2, dlr-correlation-writer #2): dlr.drop_old_correlation_partitions
+// была определена в V015, но нигде не вызывалась — эта регрессия
+// подтверждает, что DropOldPartitions реально удаляет партицию и её
+// строки, а не просто компилируется.
+func TestDropOldPartitionsRemovesRowsPastRetentionWindow(t *testing.T) {
+	dsn := os.Getenv("DLR_CORRELATION_WRITER_TEST_DSN")
+	if dsn == "" {
+		dsn = "postgres://localhost:5432/mpp?sslmode=disable"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	w, err := NewPgWriter(ctx, dsn)
+	if err != nil {
+		t.Skipf("не удалось создать пул подключений к Postgres (%v) — пропуск, БД недоступна в этой песочнице", err)
+	}
+	defer w.Close()
+	if err := w.pool.Ping(ctx); err != nil {
+		t.Skipf("Postgres недоступен на %q (%v) — пропуск", dsn, err)
+	}
+
+	// Случайный сдвиг в прошлое (100-500 лет) — заведомо старше любого
+	// разумного p_retain_hours, и не пересекается с партициями, которые
+	// могли остаться от других тестов/прогонов (та же причина случайности,
+	// что и в TestEnsurePartitionRequiredBeforeInsertPastBootstrapWindow).
+	past := time.Now().
+		Add(-time.Duration(100+rand.Int63n(400)) * 365 * 24 * time.Hour).
+		UTC().Truncate(time.Microsecond)
+	if err := w.EnsurePartition(ctx, past); err != nil {
+		t.Fatalf("EnsurePartition (прошлое): %v", err)
+	}
+	operatorID := "test-op-retention-" + uuid.NewString()[:8]
+	rec := CorrelationRecord{
+		OperatorID:       operatorID,
+		SmscMessageID:    "smsc-" + uuid.NewString(),
+		SegmentID:        1,
+		MessageID:        uuid.NewString(),
+		StageExecutionID: uuid.NewString(),
+		SubmittedAt:      past,
+		ExpiresAt:        past.Add(48 * time.Hour),
+	}
+	if err := w.Flush(ctx, []CorrelationRecord{rec}); err != nil {
+		t.Fatalf("Flush в прошлую партицию: %v", err)
+	}
+
+	var beforeCount int
+	if err := w.pool.QueryRow(ctx,
+		"SELECT count(*) FROM dlr.dlr_correlation WHERE operator_id = $1", rec.OperatorID,
+	).Scan(&beforeCount); err != nil {
+		t.Fatalf("select count (до retention): %v", err)
+	}
+	if beforeCount != 1 {
+		t.Fatalf("ожидали 1 строку до retention, получили %d", beforeCount)
+	}
+
+	dropped, err := w.DropOldPartitions(ctx, 48)
+	if err != nil {
+		t.Fatalf("DropOldPartitions: %v", err)
+	}
+	if dropped < 1 {
+		t.Fatalf("ожидали дропнуть минимум 1 партицию (заведомо древнюю), получили %d", dropped)
+	}
+
+	var afterCount int
+	if err := w.pool.QueryRow(ctx,
+		"SELECT count(*) FROM dlr.dlr_correlation WHERE operator_id = $1", rec.OperatorID,
+	).Scan(&afterCount); err != nil {
+		t.Fatalf("select count (после retention): %v", err)
+	}
+	if afterCount != 0 {
+		t.Fatalf("строка должна была исчезнуть вместе с дропнутой партицией, получили count=%d", afterCount)
+	}
+}

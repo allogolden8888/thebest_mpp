@@ -97,14 +97,24 @@ func (c *Consumer) CommitRecords(ctx context.Context, records ...*kgo.Record) er
 // позволяет одному циклу опроса одновременно обслуживать и "по размеру", и
 // "по таймеру" flush без отдельной горутины/мьютекса поверх буфера.
 //
-// **Известное, задокументированное ограничение (не DLQ, не в этом срезе):**
-// запись, которая не декодируется (malformed protobuf/отсутствует
-// обязательное поле), логируется через errHandler и пропускается — если это
-// единственная запись в партиции с момента последнего успешного flush, её
-// offset никогда не продвинется, консьюмер будет пытаться прочитать её
-// заново при каждом рестарте. Тот же класс "poison message", что уже
-// задокументирован (не исправлен) в нескольких сервисах CODE_REVIEW.md.
-func (c *Consumer) PollOnce(ctx context.Context, onRecord func(rec writer.BufferedRecord, raw *kgo.Record), errHandler func(error)) {
+// MEDIUM находка кодревью (PART 2, dlr-correlation-writer #1): запись,
+// которая не декодируется (malformed protobuf/отсутствует обязательное
+// поле), логировалась через errHandler и пропускалась — но
+// `latestByPartition` (main.go) обновлялся только для успешно
+// декодированных записей, так что следующая УСПЕШНАЯ запись той же
+// партиции коммитила offset мимо поломанной, и её correlation-строка
+// терялась молча и навсегда, а не оставалась "застрявшей", как
+// предполагалось. Теперь `onDecodeFailure` сообщает вызывающей стороне
+// НОМЕР ПАРТИЦИИ, где произошла ошибка — main.go приостанавливает приём
+// новых записей этой партиции (см. `suspendedPartitions`) до перезапуска
+// процесса, вместо того чтобы дать более свежей записи молча продвинуть
+// commit мимо непрочитанной.
+func (c *Consumer) PollOnce(
+	ctx context.Context,
+	onRecord func(rec writer.BufferedRecord, raw *kgo.Record),
+	onDecodeFailure func(partition int32),
+	errHandler func(error),
+) {
 	fetches := c.client.PollFetches(ctx)
 	fetches.EachError(func(_ string, _ int32, err error) {
 		if errHandler != nil {
@@ -116,6 +126,9 @@ func (c *Consumer) PollOnce(ctx context.Context, onRecord func(rec writer.Buffer
 		if err != nil {
 			if errHandler != nil {
 				errHandler(err)
+			}
+			if onDecodeFailure != nil {
+				onDecodeFailure(rec.Partition)
 			}
 			return
 		}

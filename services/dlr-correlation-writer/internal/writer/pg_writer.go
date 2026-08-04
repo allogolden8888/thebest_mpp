@@ -61,6 +61,24 @@ func (w *PgWriter) EnsurePartition(ctx context.Context, hourStart time.Time) err
 	return nil
 }
 
+// DropOldPartitions — LOW находка кодревью (PART 2, dlr-correlation-writer
+// #2): `dlr.drop_old_correlation_partitions` (migrations/V015) была
+// определена, но нигде в репозитории не вызывалась — партиции
+// dlr.dlr_correlation росли неограниченно. Тот же принцип, что
+// EnsurePartition: этот сервис — единственный писатель в таблицу, он же
+// берёт на себя самообслуживание, вместо несуществующего внешнего
+// CronJob/pg_cron. Вызывается реже, чем EnsurePartition (раз в час, не на
+// каждый flush — DROP TABLE, не дешёвый idempotent CREATE IF NOT EXISTS),
+// см. cmd/dlr-correlation-writer/main.go.
+func (w *PgWriter) DropOldPartitions(ctx context.Context, retainHours int) (int, error) {
+	var dropped int
+	err := w.pool.QueryRow(ctx, "SELECT dlr.drop_old_correlation_partitions($1)", retainHours).Scan(&dropped)
+	if err != nil {
+		return 0, fmt.Errorf("dlr.drop_old_correlation_partitions: %w", err)
+	}
+	return dropped, nil
+}
+
 const insertSQL = `
 INSERT INTO dlr.dlr_correlation
 	(operator_id, smsc_message_id, segment_id, message_id, stage_execution_id, submitted_at, expires_at)

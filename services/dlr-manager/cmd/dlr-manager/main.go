@@ -143,16 +143,31 @@ func main() {
 		}
 
 		pollCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		consumer.PollOnce(pollCtx, func(fr kafkaio.FetchedRecord) {
+		records := consumer.PollFetches(pollCtx, errHandler)
+		cancel()
+
+		// OffsetTracker — MEDIUM находка кодревью (PART 2, dlr-manager #2):
+		// одна ошибка обработки внутри poll'а больше не теряется молча за
+		// коммитом более поздней успешной записи той же партиции — см.
+		// internal/kafkaio/offset_tracker.go.
+		tracker := kafkaio.NewOffsetTracker()
+		for _, fr := range records {
+			key := kafkaio.PartitionKey{Topic: fr.Raw.Topic, Partition: fr.Raw.Partition}
+			if tracker.IsSuspended(key) {
+				continue
+			}
 			if err := handleRecord(ctx, fr, correlationStore, pendingStore, producer, correlationWindow, retryBackoff); err != nil {
 				errHandler(err)
-				return // не коммитим — at-least-once, переобработается
+				tracker.RecordFailure(key)
+				continue
 			}
-			if err := consumer.CommitRecords(ctx, fr.Raw); err != nil {
+			tracker.RecordSuccess(fr.Raw)
+		}
+		if committable := tracker.CommittableRecords(); len(committable) > 0 {
+			if err := consumer.CommitRecords(ctx, committable...); err != nil {
 				errHandler(err)
 			}
-		}, errHandler)
-		cancel()
+		}
 	}
 }
 

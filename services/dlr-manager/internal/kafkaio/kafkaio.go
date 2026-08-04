@@ -57,16 +57,23 @@ type FetchedRecord struct {
 	FromRetry bool // true — operator.dlr.unresolved (SchedulerBackgroundTask), false — operator.dlr (OperatorDlr)
 }
 
-func (c *Consumer) PollOnce(ctx context.Context, onRecord func(FetchedRecord), errHandler func(error)) {
+// PollFetches — раньше называлась PollOnce и коммитила каждую запись
+// индивидуально сразу в callback'е вызывающего кода; см. OffsetTracker за
+// тем, почему это было небезопасно и как это исправлено — коммит теперь
+// целиком на стороне вызывающего, после того как он применит OffsetTracker
+// ко всем записям этого poll'а.
+func (c *Consumer) PollFetches(ctx context.Context, errHandler func(error)) []FetchedRecord {
 	fetches := c.client.PollFetches(ctx)
 	fetches.EachError(func(_ string, _ int32, err error) {
 		if errHandler != nil {
 			errHandler(fmt.Errorf("fetch error: %w", err))
 		}
 	})
+	var records []FetchedRecord
 	fetches.EachRecord(func(rec *kgo.Record) {
-		onRecord(FetchedRecord{Raw: rec, FromRetry: rec.Topic == TopicOperatorDlrUnresolved})
+		records = append(records, FetchedRecord{Raw: rec, FromRetry: rec.Topic == TopicOperatorDlrUnresolved})
 	})
+	return records
 }
 
 type Producer struct {
