@@ -184,3 +184,4 @@ apply_charge(account, charge_id, amount, expected_epoch):
 | Billing `account_state` | §3 | Billing Redis Lua/Redis Function | `billing_ledger` (V008), CHECK-constraints на compensating-записи |
 
 Все три файла в `state_machines/` запускаются без зависимостей (`python3 state_machines/<file>.py`), печатают список тестов и итог — это исполняемая спецификация, не только описание.
+
