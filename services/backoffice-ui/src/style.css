@@ -1,0 +1,13 @@
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, "Segoe UI", Roboto, sans-serif;
+}
+
+#app {
+  width: 100%;
+  min-height: 100vh;
+}

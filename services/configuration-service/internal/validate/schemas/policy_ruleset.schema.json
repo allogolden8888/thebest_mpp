@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mpp/config_schemas/policy_ruleset.schema.json",
+  "title": "POLICY_RULESET config payload (ConfigEntityType.CONFIG_ENTITY_TYPE_POLICY_RULESET)",
+  "description": "Требования 2 (anti-spam), 3 (time-of-day), 5 (банворды), 7 (sender validation) из исходных 8 требований Policy Engine. Требования 1 (template matching) — отдельная сущность policy_template (собственная таблица, объём на порядки больше). Требования 4/6 (consent-блэклисты) — отдельная сущность subscriber_consent (не Kafka-replay-восстановима, требует PostgreSQL as source of truth). unmatched_template_behavior=CATEGORIZE_AS_UNTEMPLATED согласуется с billing_tariff, где UNTEMPLATED — реальная (недешёвая) цена, а не отказ (data_infrastructure_spec.md §1.6a).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["partner_id", "version", "status", "anti_spam", "time_of_day", "banwords", "sender_validation", "unmatched_template_behavior"],
+  "properties": {
+    "partner_id": {
+      "description": "null = платформенный дефолт",
+      "type": ["string", "null"]
+    },
+    "operator_id": {
+      "description": "null = применяется ко всем операторам этого партнёра",
+      "type": ["string", "null"]
+    },
+    "version": { "type": "integer", "minimum": 1 },
+    "status": { "enum": ["active", "archived"] },
+    "unmatched_template_behavior": { "enum": ["CATEGORIZE_AS_UNTEMPLATED", "REJECT"] },
+    "anti_spam": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_messages", "window_seconds", "scope"],
+      "properties": {
+        "max_messages": { "type": "integer", "exclusiveMinimum": 0 },
+        "window_seconds": { "type": "integer", "exclusiveMinimum": 0 },
+        "scope": { "enum": ["PER_MSISDN", "PER_MSISDN_PER_CATEGORY"] }
+      }
+    },
+    "time_of_day": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["category", "allowed_from", "allowed_to", "timezone"],
+        "properties": {
+          "category": { "type": "string" },
+          "allowed_from": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$" },
+          "allowed_to": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$" },
+          "timezone": { "type": "string" }
+        }
+      }
+    },
+    "banwords": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["words", "normalization"],
+      "properties": {
+        "words": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "normalization": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["nfkc", "homoglyph_fold", "strip_separators"],
+          "properties": {
+            "nfkc": { "type": "boolean" },
+            "homoglyph_fold": {
+              "description": "Схлопывание похожих по начертанию символов между кириллицей и латиницей (data_infrastructure_spec.md §1.9b)",
+              "type": "boolean"
+            },
+            "strip_separators": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "sender_validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowed_sender_ids"],
+      "properties": {
+        "allowed_sender_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "allowed_pattern": {
+          "description": "Опциональный regex, если разрешённые sender_id задаются шаблоном, а не перечислением",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

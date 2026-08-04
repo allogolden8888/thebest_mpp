@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mpp/config_schemas/billing_tariff.schema.json",
+  "title": "BILLING_TARIFF config payload (ConfigEntityType.CONFIG_ENTITY_TYPE_BILLING_TARIFF)",
+  "description": "Форма зафиксирована в data_infrastructure_spec.md §1.6a — переносится сюда как исполняемый контракт, не переопределяется. price_per_segment.BLOCKED обязателен (Billing тарифицирует отклонённые Policy сообщения; отсутствие записи не должно ронять стадию и не должно молча начислять 0).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["currency", "price_per_segment", "default_category"],
+  "properties": {
+    "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+    "price_per_segment": {
+      "type": "object",
+      "required": ["BLOCKED"],
+      "additionalProperties": { "type": "integer", "minimum": 0 },
+      "properties": {
+        "BLOCKED": { "type": "integer", "minimum": 0 },
+        "UNTEMPLATED": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "default_category": { "type": "string" }
+  }
+}

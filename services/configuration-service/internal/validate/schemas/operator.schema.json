@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mpp/config_schemas/operator.schema.json",
+  "title": "OPERATOR config payload (ConfigEntityType.CONFIG_ENTITY_TYPE_OPERATOR)",
+  "description": "Протокольные параметры подключения к оператору связи. Поля smpp_profile/http_profile — те же имена, что уже зафиксированы в hld.md §11.1/§11.3 и service_io_contracts.md, переносятся сюда как есть, не переизобретаются. Хотя бы один профиль обязателен (оператор поддерживает SMPP и/или HTTP на входящем/исходящем канале).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["operator_id", "version", "status"],
+  "anyOf": [
+    { "required": ["smpp_profile"] },
+    { "required": ["http_profile"] }
+  ],
+  "properties": {
+    "operator_id": { "type": "string" },
+    "version": { "type": "integer", "minimum": 1 },
+    "status": { "enum": ["active", "archived"] },
+    "smpp_profile": { "$ref": "#/$defs/smpp_profile" },
+    "http_profile": { "$ref": "#/$defs/http_profile" }
+  },
+  "$defs": {
+    "smpp_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_window", "tps_limit", "bind_count", "reconnect_policy", "enquire_link_interval_sec", "dlr_supported", "dlr_reliable", "query_sm_enabled"],
+      "properties": {
+        "max_window": { "type": "integer", "exclusiveMinimum": 0 },
+        "tps_limit": { "type": "integer", "exclusiveMinimum": 0 },
+        "bind_count": { "type": "integer", "minimum": 1 },
+        "reconnect_policy": { "$ref": "#/$defs/reconnect_policy" },
+        "enquire_link_interval_sec": { "type": "integer", "exclusiveMinimum": 0 },
+        "dlr_supported": { "type": "boolean" },
+        "dlr_reliable": {
+          "description": "false = DLR приходит, но оператор известен ненадёжностью подтверждений — влияет на SLA-окно DELIVERY_UNRESOLVED (hld.md §10/§14)",
+          "type": "boolean"
+        },
+        "query_sm_enabled": { "type": "boolean" },
+        "query_sm_separate_bind": {
+          "description": "Требуется только если query_sm_enabled=true",
+          "type": "boolean"
+        },
+        "query_sm_rate_limit": {
+          "description": "Требуется только если query_sm_enabled=true",
+          "type": "integer",
+          "exclusiveMinimum": 0
+        }
+      },
+      "if": { "properties": { "query_sm_enabled": { "const": true } } },
+      "then": { "required": ["query_sm_separate_bind", "query_sm_rate_limit"] }
+    },
+    "http_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["endpoint_url", "tps_limit", "webhook_auth", "retry_policy", "reconnect_policy"],
+      "properties": {
+        "endpoint_url": { "type": "string", "format": "uri" },
+        "tps_limit": { "type": "integer", "exclusiveMinimum": 0 },
+        "webhook_auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": { "enum": ["HMAC_SIGNATURE", "BEARER_TOKEN", "MTLS"] },
+            "credential_ref": { "type": "string" }
+          }
+        },
+        "retry_policy": { "$ref": "#/$defs/retry_policy" },
+        "reconnect_policy": { "$ref": "#/$defs/reconnect_policy" }
+      }
+    },
+    "reconnect_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["initial_backoff_ms", "max_backoff_ms", "multiplier"],
+      "properties": {
+        "initial_backoff_ms": { "type": "integer", "exclusiveMinimum": 0 },
+        "max_backoff_ms": { "type": "integer", "exclusiveMinimum": 0 },
+        "multiplier": { "type": "number", "exclusiveMinimum": 1 }
+      }
+    },
+    "retry_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_attempts", "backoff_ms"],
+      "properties": {
+        "max_attempts": { "type": "integer", "minimum": 1 },
+        "backoff_ms": { "type": "integer", "exclusiveMinimum": 0 }
+      }
+    }
+  }
+}

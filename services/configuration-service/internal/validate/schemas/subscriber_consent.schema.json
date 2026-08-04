@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mpp/config_schemas/subscriber_consent.schema.json",
+  "title": "SUBSCRIBER_CONSENT config payload (ConfigEntityType.CONFIG_ENTITY_TYPE_SUBSCRIBER_CONSENT)",
+  "description": "Одна строка policy.subscriber_consent (data_infrastructure_spec.md §1.9c / migrations/V014), сериализованная как payload_json. Нет 'version'/'status' полей — эта таблица append/delete по PRIMARY KEY (msisdn, scope_type, scope_value, channel), не version-based как остальные entity_type.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["msisdn", "scope_type", "scope_value", "channel"],
+  "properties": {
+    "msisdn": { "type": "string", "pattern": "^998[0-9]{9}$" },
+    "scope_type": { "enum": ["CATEGORY", "SENDER"] },
+    "scope_value": { "type": "string", "minLength": 1 },
+    "channel": { "enum": ["SMS", "EMAIL", "PUSH"] }
+  }
+}

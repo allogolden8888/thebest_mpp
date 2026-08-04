@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mpp/config_schemas/partner.schema.json",
+  "title": "PARTNER config payload (ConfigEntityType.CONFIG_ENTITY_TYPE_PARTNER)",
+  "description": "credentials/IP allowlist/разрешённые приложения упоминались только текстом (hld.md §4/§15, services_specifictaion.md §2.2) — здесь впервые собраны в конкретную структуру. policy_ruleset/policy_template/billing_tariff НЕ вложены сюда — они собственные entity_type, связанные обратной ссылкой через partner_id (см. policy_ruleset.schema.json, data_infrastructure_spec.md §1.9b), чтобы менять шаблоны/тарифы без republish всего PARTNER.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["partner_id", "version", "status", "applications"],
+  "properties": {
+    "partner_id": { "type": "string" },
+    "version": { "type": "integer", "minimum": 1 },
+    "status": { "enum": ["active", "suspended", "archived"] },
+    "applications": {
+      "description": "Одна пара партнёр/приложение — своя аутентификация и rate limit (service_internal_methods.md: application_id участвует в IP+app проверке и rate limiting per-application).",
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/application" }
+    }
+  },
+  "$defs": {
+    "application": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["application_id", "display_name", "auth", "ip_allowlist", "rate_limit_tps", "allowed_channels"],
+      "properties": {
+        "application_id": { "type": "string" },
+        "display_name": { "type": "string" },
+        "auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "credential_ref"],
+          "properties": {
+            "type": { "enum": ["API_KEY", "MTLS", "SMPP_BIND"] },
+            "credential_ref": {
+              "description": "Ссылка на секрет (Vault/K8s Secret path и т.п.), не сам секрет — конфиг не хранит credential в открытом виде",
+              "type": "string"
+            }
+          }
+        },
+        "ip_allowlist": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "rate_limit_tps": { "type": "integer", "exclusiveMinimum": 0 },
+        "allowed_channels": {
+          "description": "Мультиканальность на уровне доступа: SMS сегодня, EMAIL/PUSH зарезервированы (hld.md §2)",
+          "type": "array",
+          "minItems": 1,
+          "items": { "enum": ["SMS", "EMAIL", "PUSH"] }
+        }
+      }
+    }
+  }
+}

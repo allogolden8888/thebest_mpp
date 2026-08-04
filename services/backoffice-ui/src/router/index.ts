@@ -1,0 +1,30 @@
+// Один маршрут на метод service_internal_methods.md §7.3 — UI сам не имеет
+// собственных методов обработки данных (§7.5), каждая страница — тонкая
+// обёртка вокруг одного HTTP-вызова Backoffice API.
+import { createRouter, createWebHistory } from "vue-router";
+import { useAuthStore } from "../stores/auth";
+
+const router = createRouter({
+  history: createWebHistory(),
+  routes: [
+    { path: "/", redirect: "/config" },
+    { path: "/login", name: "login", component: () => import("../views/LoginView.vue"), meta: { public: true } },
+    { path: "/config", name: "config", component: () => import("../views/ConfigView.vue") },
+    { path: "/execution-control", name: "execution-control", component: () => import("../views/ExecutionControlView.vue") },
+    { path: "/scheduler", name: "scheduler", component: () => import("../views/SchedulerForceCommandView.vue") },
+    { path: "/dlq", name: "dlq", component: () => import("../views/DlqBrowseView.vue") },
+    { path: "/reconciliation", name: "reconciliation", component: () => import("../views/ReconciliationView.vue") },
+    { path: "/reports", name: "reports", component: () => import("../views/ReportsView.vue") },
+  ],
+});
+
+router.beforeEach((to) => {
+  if (to.meta.public) return true;
+  const auth = useAuthStore();
+  if (!auth.isAuthenticated) {
+    return { name: "login", query: { redirect: to.fullPath } };
+  }
+  return true;
+});
+
+export default router;

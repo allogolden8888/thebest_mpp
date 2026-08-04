@@ -1,0 +1,160 @@
+// Package kafkaio — publish_config_change (service_internal_methods.md
+// §3.3): чистая сборка ConfigChangeEvent + публикация в config.changes
+// (compacted), platform-contracts/events/config_and_control.proto.
+package kafkaio
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"github.com/twmb/franz-go/pkg/kgo"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	commonv1 "mpp/platformcontracts/common/v1"
+	eventsv1 "mpp/platformcontracts/events/v1"
+
+	"mpp/config-event-publisher/internal/outbox"
+)
+
+const Topic = "config.changes"
+
+// entityTypeToProto — те же значения, что config.config_versions.entity_type
+// CHECK (migrations/V002), сверено с ConfigEntityType (proto).
+func entityTypeToProto(s string) commonv1.ConfigEntityType {
+	switch s {
+	case "pipeline":
+		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PIPELINE
+	case "policy_ruleset":
+		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_POLICY_RULESET
+	case "policy_template":
+		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_POLICY_TEMPLATE
+	case "billing_tariff":
+		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_BILLING_TARIFF
+	case "routing_table":
+		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_ROUTING_TABLE
+	case "number_range":
+		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_NUMBER_RANGE
+	case "partner":
+		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER
+	case "operator":
+		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_OPERATOR
+	case "subscriber_consent":
+		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_SUBSCRIBER_CONSENT
+	default:
+		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_UNSPECIFIED
+	}
+}
+
+// ResolveStatus — CODE_REVIEW.md Critical, compliance-sensitive finding:
+// старый код резолвил status через SQL `COALESCE(cv.status, 'active')`
+// (internal/outbox/outbox.go), но config_version_id — и потому cv.status —
+// всегда NULL для policy_template/subscriber_consent (V003 комментарий,
+// это entity_type, у которых собственные исходные таблицы, не
+// config_versions) — так что status для ОБОИХ навсегда резолвился в
+// "active", и subscriber_consent revocation (status=archived) не мог
+// опубликоваться как archived НИКОГДА.
+//
+// Разрешено по-разному для двух entity_type без config_versions строки:
+//
+//   - policy_template: config_schemas/policy_template.schema.json требует
+//     поле "status" прямо в payload_json — читаем оттуда. Это настоящий
+//     фикс: policy_template archival теперь реально доходит до
+//     потребителей config.changes.
+//   - subscriber_consent: config_schemas/subscriber_consent.schema.json
+//     НЕ содержит поля status ("append/delete по PRIMARY KEY, не
+//     version-based" — этот payload физически не может закодировать
+//     revocation), и ничто в репозитории сегодня не создаёт для этого
+//     entity_type outbox-строку, сигнализирующую archived —
+//     configuration-service.ArchiveVersion (internal/store/store.go) не
+//     пишет в config_outbox вообще ни для одного entity_type, только
+//     CreateImmutableVersionAndOutbox — вне scope этого сервиса,
+//     подтверждено чтением кода, не только предположением ревьюера.
+//     Технически неразрешимо в config-event-publisher в одиночку без
+//     придумывания нового контракта, которым этот сервис не владеет — см.
+//     README "Что НЕ реализовано". "active" — единственное безопасное
+//     предположение, не изобретающее архитектуру, но unresolved=true
+//     теперь явно сообщает вызывающей стороне, что это предположение
+//     (было тихо, теперь громко логируется — см. cmd/.../main.go).
+func ResolveStatus(e outbox.Entry) (status string, unresolved bool, err error) {
+	if e.Status != "" {
+		return e.Status, false, nil
+	}
+	switch e.EntityType {
+	case "policy_template":
+		var p struct {
+			Status string `json:"status"`
+		}
+		if unmarshalErr := json.Unmarshal(e.Payload, &p); unmarshalErr != nil {
+			return "", false, fmt.Errorf("policy_template outbox id=%d: payload_json не парсится: %w", e.ID, unmarshalErr)
+		}
+		if p.Status != "active" && p.Status != "archived" {
+			return "", false, fmt.Errorf("policy_template outbox id=%d: payload_json.status=%q — ожидали active/archived", e.ID, p.Status)
+		}
+		return p.Status, false, nil
+	default:
+		// subscriber_consent (и любой будущий entity_type без
+		// config_versions-строки и без status в payload_json).
+		return "active", true, nil
+	}
+}
+
+// BuildConfigChangeEvent — чистая функция, без сети.
+func BuildConfigChangeEvent(e outbox.Entry) (*eventsv1.ConfigChangeEvent, error) {
+	entityType := entityTypeToProto(e.EntityType)
+	if entityType == commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_UNSPECIFIED {
+		return nil, fmt.Errorf("неизвестный entity_type %q для outbox id=%d", e.EntityType, e.ID)
+	}
+
+	status, _, err := ResolveStatus(e)
+	if err != nil {
+		return nil, err
+	}
+
+	return &eventsv1.ConfigChangeEvent{
+		EntityType:  entityType,
+		EntityId:    e.EntityID,
+		Version:     e.Version,
+		PayloadJson: e.Payload,
+		Status:      status,
+		CreatedAt:   timestamppb.New(e.CreatedAt),
+	}, nil
+}
+
+type Publisher struct {
+	client *kgo.Client
+}
+
+func NewPublisher(brokers []string) (*Publisher, error) {
+	client, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
+	if err != nil {
+		return nil, fmt.Errorf("kgo.NewClient: %w", err)
+	}
+	return &Publisher{client: client}, nil
+}
+
+func (p *Publisher) Close() { p.client.Close() }
+
+// Ping — /readyz dependency check (CODE_REVIEW.md: "/readyz never reflects
+// real downstream health after startup").
+func (p *Publisher) Ping(ctx context.Context) error { return p.client.Ping(ctx) }
+
+// Publish — ключ = entity_id, compacted-топик по (entity_type, entity_id)
+// был бы точнее, но mpp.events.v1.ConfigChangeEvent не даёт составного
+// ключа на уровне Kafka message key без доп. соглашения — используется
+// entity_id (в проде разные entity_type должны использовать разные
+// value/namespace entity_id, иначе возможна коллизия compaction между,
+// например, partner "acme" и operator "acme" — см. README "Открытый вопрос").
+func (p *Publisher) Publish(ctx context.Context, e outbox.Entry) error {
+	event, err := BuildConfigChangeEvent(e)
+	if err != nil {
+		return err
+	}
+	payload, err := proto.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("proto.Marshal(ConfigChangeEvent): %w", err)
+	}
+	record := &kgo.Record{Topic: Topic, Key: []byte(e.EntityID), Value: payload}
+	return p.client.ProduceSync(ctx, record).FirstErr()
+}

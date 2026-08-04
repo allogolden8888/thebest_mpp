@@ -1,0 +1,55 @@
+# Operator SMPP Session Manager
+
+**Основание:** `development_plan.md` — Субагент 1, Operator/partner-facing протоколы. `services_specifictaion.md` §2.3: SMPP binds с операторами, reconnect, `enquire_link`, SMPP window, TPS/throttling, `submit_sm`, DLR, опциональный `query_sm`, приоритет `submit_sm` над `query_sm`. Тот же стек и то же архитектурное решение, что `partner-smpp-gateway` — внутренний `smpp-codec` на Netty, не JSMPP/cloudhopper (`codec/` — портирован из `services/partner-smpp-gateway/src/main/java/uz/mpp/partnersmpp/codec/`, идентичный протокол, разные пакеты).
+
+**Статус:** реально компилируется и тестируется — `mvn test` (Java 25). **Полный клиентский цикл протестирован через реальный TCP round-trip** против `FakeSmscServer` (тестовый "фейковый оператор" — настоящий Netty-сервер на localhost, не мок): bind, submit_sm, приём DLR push от оператора. Redis-путь — против реального локального Redis (brew).
+
+```bash
+export JAVA_HOME=/opt/homebrew/Cellar/openjdk@25/25.0.4/libexec/openjdk.jdk/Contents/Home
+brew services start redis   # если ещё не запущен
+cd services/operator-smpp-session-manager
+mvn test
+```
+
+## Отличие от Partner SMPP Gateway: клиент, не сервер
+
+Partner SMPP Gateway — SMPP-сервер (принимает binds от партнёров). Этот сервис — SMPP-**клиент** (ESME), сам подключается к оператору и делает bind. Поэтому `client/OperatorSmppClient` — Netty client bootstrap, не server; корреляция ответов (`bind_transceiver_resp`/`submit_sm_resp`) идёт по `sequence_number` через `Map<Integer, CompletableFuture<Pdu>>` в `OperatorSmppClientHandler` (простой "smpp-window") — в отличие от Partner-сервера, где ответы синхронны в рамках одного PDU-обработчика.
+
+## Что реализовано по service_internal_methods.md §1.3
+
+| Метод | Где | Как проверено |
+|---|---|---|
+| `bind_operator` | `client/OperatorSmppClient::bind` | `OperatorSmppClientTest.bindAndSubmitSmRoundTrip` — реальный TCP bind против `FakeSmscServer` |
+| `register_route` | `registry/OperatorRouteRegistry` (Runtime Redis, `operator_route:{operator_id}:{route_id}`, общий с Operator HTTP Gateway) | `OperatorRouteRegistryTest` — реальный Redis: HSET-поля, unregister |
+| `enforce_window_and_tps` | `core/TokenBucket` (тот же паттерн, что Standard Lane/Partner Gateway) | `OperatorSubmitServerTest.submitRejectedWhenTpsThrottled` — реальный сквозной путь через gRPC-хендлер |
+| `handle_submit_command` / `send_submit_sm` / `handle_submit_sm_resp` / `reply_submit_result` | `grpcserver/OperatorSubmitServer` (`OperatorSubmitService.Submit`) | `OperatorSubmitServerTest` — реальный TCP submit_sm через `OperatorSmppClient` + `FakeSmscServer`, ACCEPTED/REJECTED/timeout→AMBIGUOUS |
+| `publish_submit_accepted` | `kafkaio/OperatorEventPublisher::publishSubmitAccepted` | `OperatorEventPublisherTest` (`MockProducer`) + `OperatorSubmitServerTest` (реально публикуется только при ACCEPTED, не при throttled) |
+| `handle_raw_dlr` / `publish_operator_dlr` | `client/OperatorSmppClientHandler` (получение `deliver_sm` от оператора) + `Main.java` (сборка `OperatorDlr`) + `kafkaio/OperatorEventPublisher::publishDlr` | `OperatorSmppClientTest.receivesDlrPushedByOperator` — реальный push DLR от `FakeSmscServer`, доставлен в `dlrSink`; `OperatorEventPublisherTest` — публикация |
+| `enforce_query_sm_priority` | `core/PriorityGate` | `PriorityGateTest` — PERMIT/DEFER по количеству одновременных submit |
+| `handle_query_sm_command` | `grpcserver/OperatorQuerySmServer` | Частично — см. "Что НЕ реализовано" (сам PDU `query_sm` не в объёме codec) |
+| `enquire_link_tick` | `client/OperatorSmppClient::sendEnquireLink`, вызывается по таймеру в `Main.java` | `OperatorSmppClientTest` косвенно (сервер отвечает на `enquire_link`) |
+| `reconnect` | `Main.java::connectAndBindWithRetry` (используется и при старте, и как `SmppConnectionSupervisor.Connector`) + `client/SmppConnectionSupervisor` — реагирует на обрыв ПОСЛЕ старта, не только на старте | `SmppConnectionSupervisorTest.reconnectsAndRebindsAfterServerSideDisconnectAndFlipsReadiness` — реальный обрыв TCP-соединения `FakeSmscServer` без остановки сервера, проверка readiness down/up и реального submit_sm после reconnect (см. "Проверено кодревью" ниже) |
+
+## Что НЕ реализовано на этом шаге (честно, не спрятано)
+
+* **`docker build` не выполнялся** — недоступный Docker daemon.
+* **Ни разу не запущено против реального оператора** — только `FakeSmscServer` (тестовый TCP-сервер в этом репо, не настоящий SMSC).
+* **`query_sm` PDU не реализован** в `codec/CommandId` (см. `services/partner-smpp-gateway/README.md` — то же ограничение унаследовано: только bind/submit/deliver/enquire_link/unbind/generic_nack). `OperatorQuerySmServer` реально проверяет приоритет (`enforce_query_sm_priority`), но не отправляет фактический query_sm оператору.
+* **`reconnect_policy` — фиксированный линейный backoff** (`min(30s, attempt*1s)`), не из партнёрской/операторской конфигурации (`config.changes`) — реальный источник параметров реконнекта не подключён. Счётчик попыток (`attempt`) локален для каждого вызова `connectAndBindWithRetry` — при каждом новом reconnect (после нового обрыва) backoff снова начинается с 1с, а не продолжает расти от предыдущего обрыва.
+* **DLR `raw_status`** берётся как весь текст `short_message` deliver_sm без парсинга полей `id:`/`sub:`/`dlvrd:`/`stat:` — нормализация в `normalized_status` явно вне scope этого сервиса (принадлежит DLR Manager, `platform_contracts.md` §4, владеет Главный агент).
+* **`/metrics`** — плейсхолдер (валидный 200), без реальных счётчиков.
+* **Настоящее SMPP "window" (ограничение числа одновременных un-acked PDU) не реализовано** — `submit()` синхронно блокирует gRPC-поток до `SUBMIT_TIMEOUT_MS` (5с) на каждый segment; ограничен только TPS (`TokenBucket`), не число одновременных outstanding-запросов (CODE_REVIEW.md HIGH #3, не тронуто в этом заходе — см. "Проверено кодревью" ниже).
+* **Malformed/adversarial PDU от оператора по-прежнему рвёт TCP-канал** (`OperatorSmppClientHandler.exceptionCaught` → `ctx.close()`, CODE_REVIEW.md Medium #4) — не исправлено отдельно, но после фикса CRITICAL #1 это уже не фатально: `SmppConnectionSupervisor` подхватывает именно такой обрыв через `channel.closeFuture()` и переподключается, т.е. один плохой PDU больше не "чернит" маршрут навсегда, только на время reconnect.
+
+## Проверено кодревью (CODE_REVIEW.md)
+
+Раздел `operator-smpp-session-manager`, пункты 1 и 2 (CRITICAL и HIGH) закрыты в этом заходе; пункты 3 и 4 сознательно не тронуты (см. ниже).
+
+1. **CRITICAL — reconnect после обрыва после старта не работал** (`Main.java:98-118` запускал connect+bind ровно один раз, `health.setReady(true)` выставлялся один раз и никогда не переоценивался). Исправлено: новый `client/SmppConnectionSupervisor` вешает слушателя на `channel.closeFuture()` текущего TCP-канала (`OperatorSmppClient::onDisconnect`, новый метод); при обрыве — сразу `health.setReady(false)`, затем та же `Main::connectAndBindWithRetry` (переиспользована, не продублирована) в отдельном потоке (`smpp-reconnect`, не блокирует Netty event-loop); после успеха — `health.setReady(true)` и слушатель перевешивается на новый канал. Заодно закрыт побочный баг в `OperatorSmppClient::connect` — каждый неудачный retry ранее создавал новую `NioEventLoopGroup`, теряя ссылку на предыдущую без `shutdownGracefully()` (утечка потоков ОС при затяжном отказе SMSC); теперь предыдущая группа гасится перед созданием новой.
+   Тест: `SmppConnectionSupervisorTest.reconnectsAndRebindsAfterServerSideDisconnectAndFlipsReadiness` — реальный `FakeSmscServer`, реальный обрыв TCP-соединения (`FakeSmscServer::disconnectClient`, сервер продолжает слушать — симулирует сетевой блип/рестарт SMSC, а не наш graceful close), проверка что readiness проходит через `false` затем `true`, что клиент реально переподключается и повторно биндится в пределах 5с, и что восстановленное соединение реально рабочее (полный `submit_sm` round-trip после reconnect).
+2. **HIGH — `pendingResponses` утекал на каждый timeout** (`client/OperatorSmppClientHandler.java:21` — запись снималась только по совпадающему ответу или по полному `exceptionCaught`; submit/bind, протаймаутившийся без разрыва канала — конгестия или тихая потеря ответа оператором, ровно тот failure mode, который сервис обязан переживать — оставлял `CompletableFuture` в карте навсегда). Исправлено: `OperatorSmppClientHandler::expectResponse` теперь сам применяет `CompletableFuture.orTimeout(timeoutMs, ...)` и вешает `whenComplete`-хук, снимающий запись из карты при ЛЮБОМ исходе (успех/exceptionCaught/таймаут) через conditional `remove(key, value)` — безопасно относительно переиспользования `sequence_number` при wrap-around генератора. `OperatorSmppClient::await` разворачивает получившийся `ExecutionException(TimeoutException)` обратно в голый `TimeoutException`, чтобы контракт наружу (`OperatorSubmitServer` ловит `TimeoutException` напрямую) не поменялся.
+   Тесты: `OperatorSmppClientTest.pendingResponseEntryIsClearedAfterTimeoutWithoutAnyChannelError` — низкоуровневый клиент, короткий (300мс) timeout, `FakeSmscServer.setDropSubmitResponses(true)` (новый тестовый режим — не отвечать на `submit_sm`, имитируя тихую потерю ответа SMSC), проверка `client.pendingResponseCount() == 0` после таймаута. `OperatorSubmitServerTest.submitTimesOutToAmbiguousAndDoesNotLeakPendingResponseEntry` — тот же сценарий на реальном production-пути (`handle_submit_command` → `OperatorSmppClient` → `FakeSmscServer`), плюс закрывает ранее ложное утверждение в этом README ("timeout→AMBIGUOUS" числился протестированным, но теста не было) — добавлен тестовый конструктор `OperatorSubmitServer(..., long submitTimeoutMs)`, чтобы не ждать реальные 5с `SUBMIT_TIMEOUT_MS`.
+3. **HIGH — нет настоящего SMPP window** — не тронуто в этом заходе (по приоритету из ревью: "fix only if time allows after #1 and #2 are solid"). См. "Что НЕ реализовано" выше.
+4. **Medium — malformed PDU рвёт сессию** — не тронуто отдельно, но по факту заметно смягчено фиксом #1: теперь такой обрыв подхватывается `SmppConnectionSupervisor` и самовосстанавливается, а не чернит маршрут навсегда. См. "Что НЕ реализовано" выше.
+
+Не проверено против реального Kafka-брокера (Kafka в этом окружении не поднят) — `OperatorEventPublisher` в новых тестах не участвует (используется существующий `MockProducer`), фикс #1/#2 Kafka не касается.
