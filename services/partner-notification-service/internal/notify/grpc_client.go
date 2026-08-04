@@ -28,21 +28,74 @@ const (
 	OutcomePermanentFailure
 )
 
+// connEntry — LOW/MEDIUM находка кодревью: `conns` раньше рос неограниченно
+// на весь жизненный цикл процесса, ключ — endpoint (адрес пода/инстанса
+// Partner SMPP Gateway из registry). Т.к. инстансы адресуются по
+// pod/instance endpoint через registry, который меняется на каждый
+// рестарт/rescale гейтвея, долгоживущий процесс копил бы устаревшие,
+// простаивающие `grpc.ClientConn` вместе с их keepalive-горутинами
+// бесконечно. idleEvictInterval-тикер закрывает и убирает записи, не
+// использованные дольше idleTTL — см. NewSmppClient/evictIdle.
+type connEntry struct {
+	conn     *grpc.ClientConn
+	lastUsed time.Time
+}
+
+const (
+	defaultIdleTTL           = 10 * time.Minute
+	defaultIdleEvictInterval = time.Minute
+)
+
 type SmppClient struct {
-	mu      sync.Mutex
-	conns   map[string]*grpc.ClientConn
-	timeout time.Duration
+	mu        sync.Mutex
+	conns     map[string]*connEntry
+	timeout   time.Duration
+	idleTTL   time.Duration
+	stopEvict chan struct{}
 }
 
 func NewSmppClient(timeout time.Duration) *SmppClient {
-	return &SmppClient{conns: make(map[string]*grpc.ClientConn), timeout: timeout}
+	c := &SmppClient{
+		conns:     make(map[string]*connEntry),
+		timeout:   timeout,
+		idleTTL:   defaultIdleTTL,
+		stopEvict: make(chan struct{}),
+	}
+	go c.evictIdleLoop(defaultIdleEvictInterval)
+	return c
+}
+
+func (c *SmppClient) evictIdleLoop(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			c.evictIdle()
+		case <-c.stopEvict:
+			return
+		}
+	}
+}
+
+func (c *SmppClient) evictIdle() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cutoff := time.Now().Add(-c.idleTTL)
+	for endpoint, entry := range c.conns {
+		if entry.lastUsed.Before(cutoff) {
+			_ = entry.conn.Close()
+			delete(c.conns, endpoint)
+		}
+	}
 }
 
 func (c *SmppClient) connFor(endpoint string) (*grpc.ClientConn, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if conn, ok := c.conns[endpoint]; ok {
-		return conn, nil
+	if entry, ok := c.conns[endpoint]; ok {
+		entry.lastUsed = time.Now()
+		return entry.conn, nil
 	}
 	// insecure.NewCredentials() здесь НАМЕРЕННО, не пропущенный mTLS
 	// (кодревью PART 2 отметило это как HIGH — расследовано, признано
@@ -64,15 +117,16 @@ func (c *SmppClient) connFor(endpoint string) (*grpc.ClientConn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("grpc.NewClient(%s): %w", endpoint, err)
 	}
-	c.conns[endpoint] = conn
+	c.conns[endpoint] = &connEntry{conn: conn, lastUsed: time.Now()}
 	return conn, nil
 }
 
 func (c *SmppClient) Close() {
+	close(c.stopEvict)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, conn := range c.conns {
-		_ = conn.Close()
+	for _, entry := range c.conns {
+		_ = entry.conn.Close()
 	}
 }
 

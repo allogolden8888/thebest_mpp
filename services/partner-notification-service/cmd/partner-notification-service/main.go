@@ -121,7 +121,11 @@ func main() {
 		RestClient:      restClient,
 		Producer:        producer,
 		NotificationTTL: 24 * time.Hour,
-		RetryBackoff:    30 * time.Second,
+		// RetryBackoffBase/Max — см. schedule.NextRetryDelay: full jitter
+		// exponential backoff, попытка 1 -> [0,30s), попытка 2 -> [0,60s),
+		// ... капается на 5 минут, а не растёт неограниченно к 24ч TTL.
+		RetryBackoffBase: 30 * time.Second,
+		RetryBackoffMax:  5 * time.Minute,
 	}
 
 	healthState.SetReady(true)

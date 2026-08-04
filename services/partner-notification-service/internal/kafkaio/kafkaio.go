@@ -90,15 +90,16 @@ func (p *Producer) PublishRetryTask(ctx context.Context, task *eventsv1.Schedule
 }
 
 type Deps struct {
-	Snapshot        config.Snapshot
-	MsgCtxStore     *msgctx.Store
-	RegistryStore   *registry.Store
-	PendingStore    *pending.Store
-	SmppClient      *notify.SmppClient
-	RestClient      *notify.RestClient
-	Producer        *Producer
-	NotificationTTL time.Duration
-	RetryBackoff    time.Duration
+	Snapshot         config.Snapshot
+	MsgCtxStore      *msgctx.Store
+	RegistryStore    *registry.Store
+	PendingStore     *pending.Store
+	SmppClient       *notify.SmppClient
+	RestClient       *notify.RestClient
+	Producer         *Producer
+	NotificationTTL  time.Duration
+	RetryBackoffBase time.Duration
+	RetryBackoffMax  time.Duration
 }
 
 // HandleRecord — вся оркестрация для одной Kafka-записи. Возвращает error
@@ -189,7 +190,8 @@ func HandleRecord(ctx context.Context, deps Deps, record *kgo.Record) error {
 			return err
 		}
 	}
-	task := schedule.BuildRetryTask(eventID, attempt, time.Now(), time.Now().Add(deps.RetryBackoff))
+	delay := schedule.NextRetryDelay(attempt, deps.RetryBackoffBase, deps.RetryBackoffMax)
+	task := schedule.BuildRetryTask(eventID, attempt, time.Now(), time.Now().Add(delay))
 	return deps.Producer.PublishRetryTask(ctx, task)
 }
 

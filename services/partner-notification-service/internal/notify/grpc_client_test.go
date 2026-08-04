@@ -111,3 +111,35 @@ func TestDeliverSmConnectionReuseAcrossCalls(t *testing.T) {
 		t.Fatalf("ожидали 1 закэшированное соединение после 3 вызовов на один endpoint, получили %d", connCount)
 	}
 }
+
+// TestIdleConnectionsAreEvicted — прямая регрессия на LOW/MEDIUM находку
+// кодревью: `conns` раньше рос неограниченно на весь жизненный цикл
+// процесса. Здесь искусственно "состариваем" запись (lastUsed в прошлом,
+// за пределами idleTTL) и напрямую вызываем evictIdle (а не ждём реальный
+// тикер — тест не должен зависеть от wall-clock таймингов), проверяя, что
+// запись реально закрывается и убирается из map.
+func TestIdleConnectionsAreEvicted(t *testing.T) {
+	_, addr := startFakeGateway(t, grpcv1.DeliverSmStatus_DELIVER_SM_STATUS_DELIVERED)
+
+	client := NewSmppClient(2 * time.Second)
+	defer client.Close()
+	client.idleTTL = time.Millisecond
+
+	endpoint := registry.GatewayEndpoint{Endpoint: addr}
+	if _, err := client.DeliverSm(context.Background(), endpoint, "m1", "p1", "a1", "DELIVERED", nil); err != nil {
+		t.Fatalf("DeliverSm: %v", err)
+	}
+
+	client.mu.Lock()
+	client.conns[addr].lastUsed = time.Now().Add(-time.Hour)
+	client.mu.Unlock()
+
+	client.evictIdle()
+
+	client.mu.Lock()
+	connCount := len(client.conns)
+	client.mu.Unlock()
+	if connCount != 0 {
+		t.Fatalf("ожидали, что простаивающее соединение будет убрано evictIdle, получили %d записей", connCount)
+	}
+}
