@@ -16,25 +16,26 @@ class TariffResolverTest {
 
     @Test
     void transactionCategoryPricedCorrectly() {
-        // config_schemas/examples/billing_tariff.valid.json: TRANSACTION=120.
+        // config_schemas/examples/billing_tariff.valid.json: реальный тариф
+        // партнёра (2026-08), не placeholder — TRANSACTION=94.
         TariffResolver.Tariff tariff = realTariff().resolve("TRANSACTION", 2);
-        assertEquals(240, tariff.amountMinorUnits());
+        assertEquals(188, tariff.amountMinorUnits());
         assertEquals("UZS", tariff.currencyCode());
     }
 
     @Test
     void blockedCategoryHasNonZeroTariff() {
-        // Отклонённое Policy сообщение всё равно тарифицируется — BLOCKED=100 в примере.
+        // Отклонённое Policy сообщение всё равно тарифицируется — BLOCKED=94 в реальном тарифе.
         TariffResolver.Tariff tariff = realTariff().resolve("BLOCKED", 1);
-        assertEquals(100, tariff.amountMinorUnits());
+        assertEquals(94, tariff.amountMinorUnits());
     }
 
     @Test
     void untemplatedCategoryIsMoreExpensiveThanKnownTemplates() {
         TariffResolver.Tariff untemplated = realTariff().resolve("UNTEMPLATED", 1);
         TariffResolver.Tariff service = realTariff().resolve("SERVICE", 1);
-        assertEquals(3000, untemplated.amountMinorUnits());
-        assertEquals(100, service.amountMinorUnits());
+        assertEquals(3500, untemplated.amountMinorUnits());
+        assertEquals(94, service.amountMinorUnits());
     }
 
     @Test

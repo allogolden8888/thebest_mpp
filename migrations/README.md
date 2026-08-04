@@ -27,6 +27,7 @@ V018__dlq_record_replay_in_progress.sql
 V019__message_read_model_lifecycle_version.sql
 V020__config_outbox_claim_and_retry.sql
 V021__billing_reconciliation_audit.sql
+V022__policy_template_demo_seed.sql
 ```
 
 Применить локально:
@@ -46,6 +47,12 @@ for f in V*.sql; do psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"; done
 ## V018 — добавлена после CODE_REVIEW.md (config-event-publisher)
 
 `config.config_outbox` получила `claimed_at`/`attempts`/`last_error` — `poll_outbox` (config-event-publisher) раньше не координировал несколько реплик (не было `SELECT ... FOR UPDATE SKIP LOCKED`) и мог опрашивать одну и ту же не-публикуемую (poison) строку вечно, вытесняя реальные pending-строки из `ORDER BY created_at ASC LIMIT N`. См. `services/config-event-publisher/README.md` за подробности и `internal/outbox/outbox.go`.
+
+## V022 — development_plan.md 5.4, реальные шаблоны
+
+`policy.policy_template` получила 6323 уникальных реальных SMS-паттернов для одного demo-партнёра (`demo_partner`) — раньше был ровно один пример-строка (V013). Источник — файл с примерами реальных шаблонов, предоставленный пользователем сессии (не выдуман, не сгенерирован). Категория (`SERVICE`/`TRANSACTION`/`ADVERTISING`) на исходных данных не размечена — распределена случайно с детерминированным seed, по прямому согласованию: данные для тестов/демо, не production-классификация трафика. Те же 6323 строк продублированы в `config.config_outbox` (`entity_type='policy_template'`, `config_version_id=NULL`) — тем же путём, каким `configuration-service.CreateImmutableVersionAndOutbox` реально пишет туда для этого `entity_type` (см. `internal/store/store.go` `skipsConfigVersionsTable`), так что `config-event-publisher`'s `poll_outbox` видит их как обычные неопубликованные записи. Тарифы (`config_schemas/examples/billing_tariff.valid.json`) обновлены реальными ставками того же партнёра (`SERVICE`/`TRANSACTION`=94, `ADVERTISING`=350, `UNTEMPLATED`=3500, `BLOCKED`=94 сум/сегмент, UZS) — `billing-service`'s `TariffResolverTest` синхронизирован под новые числа.
+
+**Не покрыто этой миграцией (честно, не молчаливый пробел):** ежемесячная плата за alphaname/short number (4 млн сум/мес) и пакет сервисных SMS (40000 частей за 2 млн сум) — это не per-segment тариф, а два новых вида биллинга (periodic recurring charge и prepaid balance package), которых `BillingAccountState`/`TariffResolver` сейчас не поддерживают вообще. Требует отдельного проектирования (новые поля аккаунта, периодический billing job, package-balance tracking), не точечного изменения тарифной таблицы — не начато в этом срезе.
 
 ## Найдено только на этапе реального DDL (не было видно на уровне концептуальной спеки)
 

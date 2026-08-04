@@ -1,11 +1,11 @@
 {
   "currency": "UZS",
   "price_per_segment": {
-    "SERVICE": 100,
-    "TRANSACTION": 120,
-    "ADVERTISING": 300,
-    "UNTEMPLATED": 3000,
-    "BLOCKED": 100
+    "SERVICE": 94,
+    "TRANSACTION": 94,
+    "ADVERTISING": 350,
+    "UNTEMPLATED": 3500,
+    "BLOCKED": 94
   },
   "default_category": "UNTEMPLATED"
 }
