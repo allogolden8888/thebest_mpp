@@ -16,6 +16,10 @@ import java.util.Map;
  * pipeline). Ни один из двух реальных owner-сервисов этого registry ещё не
  * реализован в этом репозитории (владелец — Субагент 1) — запись здесь
  * никогда не появится живьём, live не проверено.
+ *
+ * MEDIUM находка кодревью: то же соединение-на-вызов, что было в
+ * {@code MessageContextStore} — исправлено тем же способом, один общий
+ * {@code StatefulRedisConnection} на весь жизненный цикл сервиса.
  */
 public final class GatewayRegistry {
 
@@ -23,24 +27,25 @@ public final class GatewayRegistry {
     }
 
     private final RedisClient client;
+    private final StatefulRedisConnection<String, String> connection;
 
     public GatewayRegistry(String redisUrl) {
         this.client = RedisClient.create(redisUrl);
+        this.connection = client.connect();
     }
 
     public GatewayEndpoint resolve(String operatorId, String routeId) {
-        try (StatefulRedisConnection<String, String> connection = client.connect()) {
-            RedisCommands<String, String> commands = connection.sync();
-            Map<String, String> fields = commands.hgetall("operator_route:" + operatorId + ":" + routeId);
-            if (fields.isEmpty() || !fields.containsKey("endpoint")) {
-                return null;
-            }
-            return new GatewayEndpoint(
-                fields.get("protocol"), fields.get("owning_instance_id"), fields.get("endpoint"), fields.get("route_epoch"));
+        RedisCommands<String, String> commands = connection.sync();
+        Map<String, String> fields = commands.hgetall("operator_route:" + operatorId + ":" + routeId);
+        if (fields.isEmpty() || !fields.containsKey("endpoint")) {
+            return null;
         }
+        return new GatewayEndpoint(
+            fields.get("protocol"), fields.get("owning_instance_id"), fields.get("endpoint"), fields.get("route_epoch"));
     }
 
     public void close() {
+        connection.close();
         client.shutdown();
     }
 }
