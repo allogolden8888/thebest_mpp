@@ -22,6 +22,14 @@ go test ./...
 
 `message.lifecycle` не несёт ни `partner_id`, ни `application_id` вообще — единственный источник `partner_id` для уже попавшего в pipeline сообщения — `msgctx:{message_id}` в Runtime Redis (`data_infrastructure_spec.md` §284), но там нет `application_id`. `resolve_delivery_channel` поэтому в этом срезе работает на уровне партнёра (`Snapshot.FirstApplication`), беря первое сконфигурированное приложение — корректно для тестового партнёра (одинаковый `auth.type`/канал у всех его `application`), **не генерализовано** для партнёра с разнородными каналами по разным приложениям. Правильный фикс — добавить `application_id` в `msgctx` (Pipeline Engine) либо в `MessageLifecycleEvent` (Message State Resolver) — оба уже закоммичены, не тронуты здесь, задокументировано как известное ограничение.
 
+## Проверено кодревью (2026-07-27, PART 2): SSRF на REST callback — исправлено; gRPC insecure credentials — намеренно, не находка
+
+Кодревью нашло два HIGH в этом сервисе.
+
+**SSRF на `notification_callback_url` — реальная находка, исправлено.** `RestClient` раньше отправлял POST на URL из конфигурации партнёра без единой проверки (schema требует только `format: uri`). `internal/notify/ssrf_guard.go`: production-конструктор (`NewRestClient`) теперь (1) отвергает любой scheme кроме `https` до попытки соединения, и (2) использует `net.Dialer.Control`-хук, который проверяет РЕЗОЛВЛЕННЫЙ IP непосредственно перед каждым TCP dial'ом (включая редиректы) и отвергает loopback/RFC1918/link-local (покрывает cloud metadata endpoint 169.254.169.254)/multicast/unspecified — устойчиво к DNS rebinding между валидацией URL и реальным подключением, не только строковая проверка hostname. Обе ошибки — `OutcomePermanentFailure`, не `OutcomeRetryable` (повтор запрещённого адреса никогда не поможет). Тесты используют отдельный `newRestClientWithoutSSRFGuard` для существующих `httptest.Server`-сценариев (обычный `httptest.NewServer` — сам по себе loopback+HTTP, production guard корректно бы его отверг) плюс новые тесты на сам guard, включая `httptest.NewTLSServer` (валидный https-scheme, но loopback IP — доказывает, что dial-level проверка ловит то, что одна только проверка scheme пропустила бы).
+
+**gRPC `insecure.NewCredentials()` в `grpc_client.go` — расследовано, это НЕ находка.** Кодревью процитировало `hld.md`/`service_io_contracts.md` про обязательный mTLS для instance-addressed RPC к Partner SMPP Gateway — верно как требование, но mTLS здесь реально обеспечен, просто не в коде приложения: весь namespace `mpp` помечен `istio-injection: enabled` (`k8s/generate_manifests.py`), и `infra/istio/peer-authentication-strict.yaml` включает `PeerAuthentication` в режиме `STRICT` + `DestinationRule` с `ISTIO_MUTUAL` для `*.mpp.svc.cluster.local` — Istio mesh отклоняет любое plaintext-соединение между подами namespace на уровне Envoy sidecar, независимо от того, что делает код приложения. Это стандартный service-mesh-mTLS паттерн (app → localhost sidecar plaintext → sidecar↔sidecar mTLS → sidecar → destination app plaintext), не пропущенное требование. Добавление TLS-конфигурации в самом gRPC-клиенте поверх этого было бы избыточным double-mTLS без единого документированного источника certs/CA на уровне приложения — что означало бы придумывать инфраструктуру заново вместо использования уже работающей. Пояснение с точными путями файлов оставлено прямо в коде (`grpc_client.go`), чтобы не всплывало как ложная находка повторно.
+
 ## Что реализовано по service_internal_methods.md §7.1
 
 | Метод | Где | Примечание |
@@ -37,9 +45,9 @@ go test ./...
 
 ## Тесты — что доказано
 
-21 тест:
+24 теста:
 * `internal/config` (7) — загрузка реального `partner.valid.json` (включая новое поле), `resolve_delivery_channel` для всех веток (SMPP_BIND без URL, API_KEY с URL, API_KEY без URL — ошибка).
-* `internal/notify` (9, **реально против живых серверов**) — gRPC: `DELIVERED`/`STALE_EPOCH`/`NO_ACTIVE_SESSION` реакции, переиспользование соединения между вызовами на один endpoint (регрессия на "не открывать новый канал на каждый вызов"); HTTP: 2xx/5xx/429/4xx/сетевая недоступность — каждый со своим `Outcome`, включая тонкое различие **429 retryable, но остальные 4xx — permanent failure** (партнёрский endpoint отверг запрос по причине, которую повтор не исправит).
+* `internal/notify` (13, **реально против живых серверов**) — gRPC: `DELIVERED`/`STALE_EPOCH`/`NO_ACTIVE_SESSION` реакции, переиспользование соединения между вызовами на один endpoint (регрессия на "не открывать новый канал на каждый вызов"); HTTP: 2xx/5xx/429/4xx/сетевая недоступность — каждый со своим `Outcome`, включая тонкое различие **429 retryable, но остальные 4xx — permanent failure** (партнёрский endpoint отверг запрос по причине, которую повтор не исправит); SSRF guard (4, см. выше) — запрещённый scheme и loopback-адрес за валидным https против настоящего `httptest.NewTLSServer`, оба класса дают `OutcomePermanentFailure`.
 * `internal/schedule` (4) — TTL-граница (исключительная, `now == deadline` → `Expire`), `attempt` — passthrough, не инкремент (регрессия на находку про `DispatchBuilder`).
 
 ## Что НЕ реализовано на этом шаге (честно, не спрятано)

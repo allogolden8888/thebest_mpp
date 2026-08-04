@@ -3,6 +3,8 @@ package notify
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -42,7 +44,7 @@ func TestSendCallbackAgainstRealHttpServer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewRestClient(2 * time.Second)
+	client := newRestClientWithoutSSRFGuard(2 * time.Second)
 	outcome, err := client.SendCallback(context.Background(), server.URL, lifecycleEvent())
 	if err != nil {
 		t.Fatalf("SendCallback: %v", err)
@@ -64,7 +66,7 @@ func TestSendCallback5xxIsRetryable(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewRestClient(2 * time.Second)
+	client := newRestClientWithoutSSRFGuard(2 * time.Second)
 	outcome, err := client.SendCallback(context.Background(), server.URL, lifecycleEvent())
 	if err == nil {
 		t.Fatal("ожидали ошибку на 500")
@@ -80,7 +82,7 @@ func TestSendCallback429IsRetryable(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewRestClient(2 * time.Second)
+	client := newRestClientWithoutSSRFGuard(2 * time.Second)
 	outcome, _ := client.SendCallback(context.Background(), server.URL, lifecycleEvent())
 	if outcome != OutcomeRetryable {
 		t.Fatalf("outcome = %v, want OutcomeRetryable (429 — специальный случай, не как остальные 4xx)", outcome)
@@ -93,7 +95,7 @@ func TestSendCallback4xxIsPermanentFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewRestClient(2 * time.Second)
+	client := newRestClientWithoutSSRFGuard(2 * time.Second)
 	outcome, err := client.SendCallback(context.Background(), server.URL, lifecycleEvent())
 	if err == nil {
 		t.Fatal("ожидали ошибку на 400")
@@ -104,12 +106,89 @@ func TestSendCallback4xxIsPermanentFailure(t *testing.T) {
 }
 
 func TestSendCallbackUnreachableServerIsRetryable(t *testing.T) {
-	client := NewRestClient(500 * time.Millisecond)
+	client := newRestClientWithoutSSRFGuard(500 * time.Millisecond)
 	outcome, err := client.SendCallback(context.Background(), "http://127.0.0.1:1", lifecycleEvent())
 	if err == nil {
 		t.Fatal("ожидали ошибку сети")
 	}
 	if outcome != OutcomeRetryable {
 		t.Fatalf("outcome = %v, want OutcomeRetryable (сетевая ошибка)", outcome)
+	}
+}
+
+// Прямая проверка исправления HIGH находки кодревью (SSRF): production
+// конструктор (NewRestClient, guard включён) должен отвергать оба класса
+// адресов, через которые кодревью продемонстрировало риск — plain http и
+// loopback/private IP (тот же класс, что 169.254.169.254 metadata-эндпоинт
+// или internal-сервис в кластере) — permanent, не retryable, поскольку
+// повтор того же forbidden URL никогда не поможет.
+
+func TestSendCallbackRejectsNonHttpsSchemeAsPermanentFailure(t *testing.T) {
+	client := NewRestClient(2 * time.Second)
+	outcome, err := client.SendCallback(context.Background(), "http://example.com/webhook", lifecycleEvent())
+	if err == nil {
+		t.Fatal("ожидали ошибку — http scheme должен быть отвергнут SSRF guard'ом")
+	}
+	if outcome != OutcomePermanentFailure {
+		t.Fatalf("outcome = %v, want OutcomePermanentFailure (запрещённый scheme — повтор не поможет)", outcome)
+	}
+	var ssrfErr *SSRFRejectedError
+	if !errors.As(err, &ssrfErr) {
+		t.Fatalf("ошибка должна быть *SSRFRejectedError (через wrapping), получили: %v", err)
+	}
+}
+
+func TestSendCallbackRejectsLoopbackAddressEvenWithHttpsScheme(t *testing.T) {
+	// httptest.NewTLSServer даёт настоящий https://127.0.0.1:PORT — валидный
+	// scheme, но loopback IP. Dial-level Control-хук должен отвергнуть его
+	// ДО TLS handshake (поэтому self-signed сертификат тестового сервера
+	// здесь вообще не проблема — до него дело не доходит).
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := NewRestClient(2 * time.Second)
+	outcome, err := client.SendCallback(context.Background(), server.URL, lifecycleEvent())
+	if err == nil {
+		t.Fatal("ожидали ошибку — loopback IP должен быть отвергнут SSRF guard'ом")
+	}
+	if outcome != OutcomePermanentFailure {
+		t.Fatalf("outcome = %v, want OutcomePermanentFailure (запрещённый адрес — повтор не поможет)", outcome)
+	}
+	var ssrfErr *SSRFRejectedError
+	if !errors.As(err, &ssrfErr) {
+		t.Fatalf("ошибка должна быть *SSRFRejectedError (через wrapping net.OpError/url.Error), получили: %v", err)
+	}
+}
+
+func TestIsPubliclyRoutableRejectsKnownUnsafeRanges(t *testing.T) {
+	unsafe := []string{
+		"127.0.0.1",       // loopback
+		"169.254.169.254", // cloud metadata endpoint (AWS/GCP/Azure)
+		"10.0.0.1",        // RFC1918
+		"172.16.0.1",      // RFC1918
+		"192.168.1.1",     // RFC1918
+		"0.0.0.0",         // unspecified
+		"::1",             // IPv6 loopback
+		"fc00::1",         // IPv6 unique-local
+	}
+	for _, addr := range unsafe {
+		ip := net.ParseIP(addr)
+		if ip == nil {
+			t.Fatalf("тестовый адрес %q не парсится как IP", addr)
+		}
+		if isPubliclyRoutable(ip) {
+			t.Errorf("isPubliclyRoutable(%s) = true, want false", addr)
+		}
+	}
+}
+
+func TestIsPubliclyRoutableAllowsRealPublicAddress(t *testing.T) {
+	// 8.8.8.8 — публичный, не привязан к сети сессии, просто известный
+	// нейтральный пример публичного адреса, без реального сетевого запроса.
+	ip := net.ParseIP("8.8.8.8")
+	if !isPubliclyRoutable(ip) {
+		t.Errorf("isPubliclyRoutable(8.8.8.8) = false, want true")
 	}
 }

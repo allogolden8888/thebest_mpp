@@ -44,6 +44,22 @@ func (c *SmppClient) connFor(endpoint string) (*grpc.ClientConn, error) {
 	if conn, ok := c.conns[endpoint]; ok {
 		return conn, nil
 	}
+	// insecure.NewCredentials() здесь НАМЕРЕННО, не пропущенный mTLS
+	// (кодревью PART 2 отметило это как HIGH — расследовано, признано
+	// false positive, см. README "Проверено кодревью: gRPC insecure
+	// credentials — намеренно, не находка"). hld.md §"Instance-addressed
+	// RPC" требует mTLS для этого вызова, и он реально обеспечен — но на
+	// уровне service mesh, не в коде приложения: namespace `mpp` целиком
+	// помечен `istio-injection: enabled` (k8s/generate_manifests.py) и
+	// `PeerAuthentication` в режиме STRICT (infra/istio/peer-authentication-strict.yaml)
+	// отклоняет ЛЮБОЕ plaintext-соединение между подами namespace —
+	// Envoy sidecar каждого пода прозрачно поднимает mTLS между собой,
+	// приложение видит только localhost-плейнтекст до своего sidecar.
+	// Добавление TLS-конфигурации здесь поверх mesh было бы избыточным
+	// double-mTLS без единого документированного источника
+	// certs/CA для application-уровня — начиная качать это самостоятельно
+	// означало бы придумывать инфраструктуру, которой нигде не
+	// специфицировано, вместо использования уже работающей.
 	conn, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, fmt.Errorf("grpc.NewClient(%s): %w", endpoint, err)
