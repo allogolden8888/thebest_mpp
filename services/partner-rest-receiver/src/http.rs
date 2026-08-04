@@ -7,7 +7,8 @@
 
 use crate::admission::{AdmissionDecision, AdmissionGate};
 use crate::auth::AuthVerifier;
-use crate::build_incoming::{build_incoming_message, generate_message_id, generate_trace_id};
+use crate::build_incoming::{DEFAULT_MESSAGE_TTL, build_incoming_message, generate_message_id, generate_trace_id};
+use crate::idempotency::{self, ClaimOutcome, ClaimedIds};
 use crate::kafka_io::{self, PublishError};
 use crate::partner_config::PartnerSnapshot;
 use crate::rate_limit::RateLimiter;
@@ -30,12 +31,14 @@ pub struct AppState {
     pub admission_gate: Box<dyn AdmissionGate>,
     pub rate_limiter: RateLimiter,
     pub producer: FutureProducer,
+    pub redis_runtime_url: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum HandlerError {
     Validation(ValidationError),
     AuthFailed,
+    AuthRateLimited,
     PartnerNotActive,
     IpOrChannelDenied,
     AdmissionRejected { retry_after_seconds: u32 },
@@ -44,7 +47,16 @@ pub enum HandlerError {
 
 /// `authenticate_partner` -> `check_ip_and_application` -> `check_admission`
 /// -> `check_rate_limit`, в этом порядке (`service_internal_methods.md` §1.1,
-/// строки 20-23) — тот же порядок, что реализован здесь.
+/// строки 20-23) — тот же порядок для УСПЕШНОГО запроса. Отклонение от
+/// документа, исправляющее HIGH находку кодревью: `try_consume_auth_attempt`
+/// вставлен ПЕРЕД собственно `authenticate_partner` (API-key сравнением) —
+/// `partner_id`/`application_id` не секретны (обычные заголовки), поэтому без
+/// этой проверки запрос с неверным/подобранным ключом обходил единственный
+/// rate limit в системе (тот, что после успешной аутентификации) и мог
+/// повторяться неограниченно. Использует ОТДЕЛЬНЫЙ bucket от
+/// `check_rate_limit` ниже (см. `RateLimiter::try_consume_auth_attempt`) —
+/// легитимный трафик того же партнёра не наказывается чужими попытками
+/// подбора ключа.
 pub fn authorize_and_admit(
     raw: &RawRequest,
     snapshot: &PartnerSnapshot,
@@ -56,6 +68,11 @@ pub fn authorize_and_admit(
 
     let (partner, application) =
         snapshot.application(&validated.partner_id, &validated.application_id).ok_or(HandlerError::AuthFailed)?;
+
+    if !rate_limiter.try_consume_auth_attempt(&validated.partner_id, &validated.application_id, application.rate_limit_tps) {
+        return Err(HandlerError::AuthRateLimited);
+    }
+
     if !partner.is_active() {
         return Err(HandlerError::PartnerNotActive);
     }
@@ -98,6 +115,7 @@ pub fn error_response_parts(err: &HandlerError) -> (StatusCode, Option<u32>, &'s
     match err {
         HandlerError::Validation(_) => (StatusCode::BAD_REQUEST, None, "VALIDATION_FAILED"),
         HandlerError::AuthFailed => (StatusCode::UNAUTHORIZED, None, "AUTH_FAILED"),
+        HandlerError::AuthRateLimited => (StatusCode::TOO_MANY_REQUESTS, None, "AUTH_RATE_LIMITED"),
         HandlerError::PartnerNotActive => (StatusCode::UNAUTHORIZED, None, "PARTNER_NOT_ACTIVE"),
         HandlerError::IpOrChannelDenied => (StatusCode::FORBIDDEN, None, "IP_OR_CHANNEL_DENIED"),
         HandlerError::AdmissionRejected { retry_after_seconds } => {
@@ -142,6 +160,7 @@ async fn handle_send_message(
         api_key: header_string(&headers, "x-api-key"),
         remote_ip: extract_remote_ip(&headers, peer),
         body_json: body,
+        idempotency_key: header_string(&headers, "x-idempotency-key"),
     };
 
     let validated = match authorize_and_admit(
@@ -164,6 +183,34 @@ async fn handle_send_message(
 
     let message_id = generate_message_id();
     let trace_id = generate_trace_id();
+
+    // Исправление HIGH находки кодревью: partner-инициированный retry с тем
+    // же X-Idempotency-Key переиспользует уже опубликованный message_id/trace_id
+    // вместо повторной публикации (что привело бы к дублю SMS/billing). См. `idempotency.rs`.
+    if let Some(idempotency_key) = &validated.idempotency_key {
+        let claimed = ClaimedIds { message_id: message_id.clone(), trace_id: trace_id.clone() };
+        match idempotency::claim(
+            &state.redis_runtime_url,
+            &validated.partner_id,
+            &validated.application_id,
+            idempotency_key,
+            &claimed,
+            DEFAULT_MESSAGE_TTL.as_secs(),
+        )
+        .await
+        {
+            ClaimOutcome::AlreadyClaimed(existing) => {
+                return (StatusCode::ACCEPTED, Json(AckResponse { message_id: existing.message_id, trace_id: existing.trace_id }))
+                    .into_response();
+            }
+            ClaimOutcome::Won | ClaimOutcome::Unavailable => {
+                // Won — первая попытка с этим ключом, публикуем как обычно.
+                // Unavailable — Redis недоступен, best-effort: не блокируем
+                // ingress, публикуем как если бы idempotency_key не был передан.
+            }
+        }
+    }
+
     let incoming = build_incoming_message(&validated, message_id.clone(), trace_id.clone(), SystemTime::now());
 
     match kafka_io::publish_incoming(&state.producer, &incoming).await {
@@ -223,6 +270,7 @@ mod tests {
             api_key: Some("correct-key".into()),
             remote_ip: Some("185.65.212.55".parse().unwrap()),
             body_json: r#"{"msisdn":"998901331835","sender_id":"Click","body":"OTP 123456"}"#.into(),
+            idempotency_key: None,
         }
     }
 
@@ -273,6 +321,42 @@ mod tests {
     fn admission_reject_propagates_retry_after() {
         let result = authorize_and_admit(&raw(), &snapshot(), &AcceptAnyKey, &AlwaysReject(30), &RateLimiter::default());
         assert_eq!(result.unwrap_err(), HandlerError::AdmissionRejected { retry_after_seconds: 30 });
+    }
+
+    /// Прямое доказательство исправления HIGH находки кодревью: до фикса
+    /// неограниченное число попыток с неверным ключом против ИЗВЕСТНОЙ пары
+    /// (partner_id/application_id — не секретны) все возвращались AuthFailed
+    /// без единого throttling. Теперь после headroom-ёмкости (rate_limit_tps=5
+    /// * 4 = 20) попытки подбора начинают получать AuthRateLimited — конечная,
+    /// не бесконечная попытка перебора.
+    #[test]
+    fn brute_force_against_known_pair_with_wrong_key_is_eventually_throttled() {
+        let limiter = RateLimiter::default();
+        let mut wrong_key_request = raw();
+        wrong_key_request.api_key = Some("guessed-wrong-key".into());
+
+        let mut auth_failed_count = 0;
+        let mut auth_rate_limited_count = 0;
+        for _ in 0..30 {
+            match authorize_and_admit(&wrong_key_request, &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &limiter) {
+                Err(HandlerError::AuthFailed) => auth_failed_count += 1,
+                Err(HandlerError::AuthRateLimited) => auth_rate_limited_count += 1,
+                other => panic!("ожидали AuthFailed или AuthRateLimited, получили {other:?}"),
+            }
+        }
+        assert_eq!(auth_failed_count, 20, "ровно headroom-ёмкость (5 * 4) попыток должна дойти до реальной проверки ключа");
+        assert_eq!(auth_rate_limited_count, 10, "остальные попытки в этом окне должны быть отклонены throttling'ом, не тратить CPU на сравнение ключа");
+    }
+
+    #[test]
+    fn legitimate_traffic_at_configured_tps_never_sees_auth_rate_limited() {
+        let limiter = RateLimiter::default();
+        // rate_limit_tps=5 в snapshot() — ровно 5 легитимных запросов подряд
+        // должны все пройти (последний — успешно, не AuthRateLimited).
+        for i in 0..5 {
+            let result = authorize_and_admit(&raw(), &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &limiter);
+            assert!(result.is_ok(), "легитимный запрос {i} в пределах собственного rate_limit_tps не должен быть отклонён");
+        }
     }
 
     #[test]

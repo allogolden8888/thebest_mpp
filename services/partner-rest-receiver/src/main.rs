@@ -3,6 +3,7 @@ mod auth;
 mod build_incoming;
 mod health;
 mod http;
+mod idempotency;
 mod ip_allowlist;
 mod kafka_io;
 mod partner_config;
@@ -60,6 +61,7 @@ async fn main() {
         admission_gate: Box::new(AlwaysAdmit),
         rate_limiter,
         producer,
+        redis_runtime_url: redis_runtime_url.clone(),
     });
 
     // `sync_rate_limit_counters` — таймер ~1с, не Redis round-trip на каждое

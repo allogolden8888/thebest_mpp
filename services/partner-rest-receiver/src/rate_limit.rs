@@ -51,11 +51,34 @@ impl Bucket {
 /// `application_id`, локальный in-memory token bucket).
 pub struct RateLimiter {
     buckets: Mutex<HashMap<(String, String), Bucket>>,
+    /// Исправление HIGH находки кодревью: `check_rate_limit` в документированном
+    /// порядке (§1.1) идёт ПОСЛЕ `authenticate_partner`, значит запрос с
+    /// неверным/подобранным API-ключом никогда не доходит до `buckets` выше —
+    /// `(partner_id, application_id)` не секретны (обычные заголовки), поэтому
+    /// атакующий, знающий/угадавший валидную пару, мог слать неограниченное
+    /// число попыток подбора ключа в секунду без всякого throttling.
+    /// ОТДЕЛЬНЫЙ bucket (не тот же самый `buckets`) — принципиально: если бы
+    /// это был один общий bucket, атакующий, тратящий токены на угадывание,
+    /// съедал бы бюджет легитимного партнёра по той же паре. Ёмкость —
+    /// `rate_limit_tps * AUTH_ATTEMPT_HEADROOM_FACTOR`, СОЗНАТЕЛЬНО шире, чем
+    /// сам `rate_limit_tps`: если бы ёмкость совпадала один в один, легитимный
+    /// партнёр, идущий ровно по своему лимиту, исчерпывал бы ОБА bucket'а
+    /// одновременно на каждом запросе, и рутинное превышение легитимного
+    /// трафика стало бы неотличимо (по коду ошибки) от блокировки перебора
+    /// ключа — задел в 4x означает: обычный трафик в пределах своего лимита
+    /// никогда не задевает эту проверку вообще (см. `error_response_parts`:
+    /// `AuthRateLimited` — отдельный код от `RateLimited`), а подбор ключа
+    /// всё равно жёстко ограничен (в 4 раза выше легитимного лимита партнёра,
+    /// не безгранично, как было до находки).
+    auth_attempt_buckets: Mutex<HashMap<(String, String), Bucket>>,
 }
+
+/// См. комментарий у `auth_attempt_buckets`.
+const AUTH_ATTEMPT_HEADROOM_FACTOR: u32 = 4;
 
 impl Default for RateLimiter {
     fn default() -> Self {
-        Self { buckets: Mutex::new(HashMap::new()) }
+        Self { buckets: Mutex::new(HashMap::new()), auth_attempt_buckets: Mutex::new(HashMap::new()) }
     }
 }
 
@@ -68,6 +91,21 @@ impl RateLimiter {
         let key = (partner_id.to_string(), application_id.to_string());
         let mut buckets = self.buckets.lock().expect("rate limiter mutex poisoned");
         let bucket = buckets.entry(key).or_insert_with(|| Bucket::new_at(rate_limit_tps, now));
+        bucket.try_consume_at(now)
+    }
+
+    /// `check_rate_limit`, вызванный ДО `authenticate_partner` — throttling
+    /// самой попытки аутентификации (успешной или нет), независимый bucket,
+    /// см. комментарий у поля `auth_attempt_buckets`.
+    pub fn try_consume_auth_attempt(&self, partner_id: &str, application_id: &str, rate_limit_tps: u32) -> bool {
+        self.try_consume_auth_attempt_at(partner_id, application_id, rate_limit_tps, Instant::now())
+    }
+
+    fn try_consume_auth_attempt_at(&self, partner_id: &str, application_id: &str, rate_limit_tps: u32, now: Instant) -> bool {
+        let key = (partner_id.to_string(), application_id.to_string());
+        let capacity = rate_limit_tps.saturating_mul(AUTH_ATTEMPT_HEADROOM_FACTOR);
+        let mut buckets = self.auth_attempt_buckets.lock().expect("rate limiter mutex poisoned");
+        let bucket = buckets.entry(key).or_insert_with(|| Bucket::new_at(capacity, now));
         bucket.try_consume_at(now)
     }
 
@@ -144,6 +182,37 @@ mod tests {
 
         let second_drain = limiter.drain_consumed();
         assert!(second_drain.is_empty(), "после drain счётчики должны обнулиться, пустой поток сообщений не публикует нулевые записи");
+    }
+
+    #[test]
+    fn auth_attempt_bucket_is_independent_from_message_bucket() {
+        let limiter = RateLimiter::default();
+        let now = Instant::now();
+        // Ёмкость auth_attempt bucket = rate_limit_tps * AUTH_ATTEMPT_HEADROOM_FACTOR (4) = 8.
+        for i in 0..8 {
+            assert!(limiter.try_consume_auth_attempt_at("p1", "a1", 2, now), "попытка {i} должна пройти (в пределах headroom-ёмкости)");
+        }
+        assert!(!limiter.try_consume_auth_attempt_at("p1", "a1", 2, now), "auth_attempt bucket должен быть исчерпан после headroom-ёмкости");
+        // Обычный message-bucket (self.buckets, не auth_attempt_buckets) —
+        // отдельный пул токенов, полностью полон несмотря на исчерпанный auth bucket.
+        assert!(limiter.try_consume_at("p1", "a1", 2, now), "message bucket не должен быть затронут исчерпанием auth_attempt bucket");
+    }
+
+    #[test]
+    fn legitimate_traffic_within_configured_tps_never_trips_auth_attempt_bucket() {
+        // Партнёр, идущий РОВНО по своему rate_limit_tps (не выше) — не
+        // должен НИКОГДА получить AuthRateLimited вместо обычного успеха —
+        // headroom (4x) должен полностью покрывать любой легитимный паттерн,
+        // ограниченный собственным rate_limit_tps message-bucket'ом.
+        let limiter = RateLimiter::default();
+        let now = Instant::now();
+        let tps = 5;
+        for i in 0..tps {
+            assert!(limiter.try_consume_auth_attempt_at("p1", "a1", tps, now), "легитимная попытка {i} не должна быть отклонена auth_attempt bucket'ом");
+            assert!(limiter.try_consume_at("p1", "a1", tps, now), "легитимное сообщение {i} должно пройти message bucket");
+        }
+        // message bucket теперь исчерпан (ровно tps сообщений) — ожидаемо RateLimited, не AuthRateLimited.
+        assert!(!limiter.try_consume_at("p1", "a1", tps, now));
     }
 
     #[test]

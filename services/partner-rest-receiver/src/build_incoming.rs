@@ -70,6 +70,7 @@ mod tests {
             msisdn: "998901331835".into(),
             sender_id: "Click".into(),
             body: "Your OTP is 123456".into(),
+            idempotency_key: None,
         }
     }
 

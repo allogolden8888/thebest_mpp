@@ -17,6 +17,8 @@ pub struct RawRequest {
     pub api_key: Option<String>,
     pub remote_ip: Option<Ipv4Addr>,
     pub body_json: String,
+    /// `X-Idempotency-Key` — опциональный, партнёр сам генерирует. См. `idempotency.rs`.
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -35,6 +37,7 @@ pub struct ValidatedRequest {
     pub msisdn: String,
     pub sender_id: String,
     pub body: String,
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,8 +50,11 @@ pub enum ValidationError {
     EmptyMsisdn,
     InvalidMsisdn,
     EmptySenderId,
+    SenderIdTooLong,
+    InvalidSenderId,
     EmptyBody,
     BodyTooLong,
+    IdempotencyKeyTooLong,
 }
 
 /// Произвольный, но задокументированный операционный лимит — нигде в спеках
@@ -56,6 +62,24 @@ pub enum ValidationError {
 /// округлено вверх) как разумная защита от abuse без блокировки легитимных
 /// длинных сообщений.
 pub const MAX_BODY_CHARS: usize = 1600;
+
+/// HIGH находка кодревью: `sender_id` раньше проверялся только на
+/// непустоту (в отличие от `msisdn` — длина+цифры — и `body` — 1600-символьный
+/// cap), а форвардился as-is в полный `IncomingMessage` protobuf и
+/// публиковался в Kafka, ограниченный только дефолтным 2MB body limit axum
+/// (нигде не переопределён). Реальный SMPP `source_addr` — ≤21 октет;
+/// авторизованный партнёр, отправляющий ~2MB `sender_id` на запрос,
+/// превращает каждый запрос в ~2MB Kafka-сообщение вместо пары сотен
+/// байт — resource-amplification вектор в Kafka/Redis message-context кэш
+/// Pipeline Engine. 21 — та же граница, что реальный протокол, не
+/// придуманная здесь заново.
+pub const MAX_SENDER_ID_CHARS: usize = 21;
+
+/// Произвольная, но разумная граница на партнёром задаваемый `X-Idempotency-Key`
+/// — тот же принцип, что `MAX_SENDER_ID_CHARS`: заголовок форвардится в Redis
+/// key (см. `idempotency.rs`), неограниченная длина — тот же класс
+/// resource-amplification, что был у `sender_id`.
+pub const MAX_IDEMPOTENCY_KEY_CHARS: usize = 128;
 
 pub fn validate_request_schema(raw: &RawRequest) -> Result<ValidatedRequest, ValidationError> {
     let partner_id = raw.partner_id.clone().filter(|s| !s.is_empty()).ok_or(ValidationError::MissingPartnerId)?;
@@ -74,11 +98,24 @@ pub fn validate_request_schema(raw: &RawRequest) -> Result<ValidatedRequest, Val
     if parsed.sender_id.is_empty() {
         return Err(ValidationError::EmptySenderId);
     }
+    if parsed.sender_id.chars().count() > MAX_SENDER_ID_CHARS {
+        return Err(ValidationError::SenderIdTooLong);
+    }
+    if !is_valid_sender_id(&parsed.sender_id) {
+        return Err(ValidationError::InvalidSenderId);
+    }
     if parsed.body.is_empty() {
         return Err(ValidationError::EmptyBody);
     }
     if parsed.body.chars().count() > MAX_BODY_CHARS {
         return Err(ValidationError::BodyTooLong);
+    }
+
+    let idempotency_key = raw.idempotency_key.clone().filter(|s| !s.is_empty());
+    if let Some(key) = &idempotency_key {
+        if key.chars().count() > MAX_IDEMPOTENCY_KEY_CHARS {
+            return Err(ValidationError::IdempotencyKeyTooLong);
+        }
     }
 
     Ok(ValidatedRequest {
@@ -89,6 +126,7 @@ pub fn validate_request_schema(raw: &RawRequest) -> Result<ValidatedRequest, Val
         msisdn: parsed.msisdn,
         sender_id: parsed.sender_id,
         body: parsed.body,
+        idempotency_key,
     })
 }
 
@@ -96,6 +134,14 @@ pub fn validate_request_schema(raw: &RawRequest) -> Result<ValidatedRequest, Val
 /// напр. "998901331835") — только цифры, разумная длина 9-15.
 fn is_valid_msisdn(msisdn: &str) -> bool {
     msisdn.len() >= 9 && msisdn.len() <= 15 && msisdn.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Печатаемый ASCII (пробел..тильда, 0x20-0x7E) — тот же практический
+/// диапазон, что реальный SMPP `source_addr` (буквенно-цифровые бизнес-имена
+/// вроде "Click"/"MPP-SMS" или numeric sender). Управляющие символы/произвольный
+/// Unicode здесь не имеют легитимного применения для этого поля и отклоняются.
+fn is_valid_sender_id(sender_id: &str) -> bool {
+    sender_id.chars().all(|c| (' '..='~').contains(&c))
 }
 
 #[cfg(test)]
@@ -109,6 +155,7 @@ mod tests {
             api_key: Some("secret".into()),
             remote_ip: Some("185.65.212.55".parse().unwrap()),
             body_json: r#"{"msisdn":"998901331835","sender_id":"Click","body":"Your OTP is 123456"}"#.into(),
+            idempotency_key: None,
         }
     }
 
@@ -175,6 +222,62 @@ mod tests {
         let mut raw = valid_raw();
         let body = "a".repeat(MAX_BODY_CHARS);
         raw.body_json = format!(r#"{{"msisdn":"998901331835","sender_id":"Click","body":"{body}"}}"#);
+        assert!(validate_request_schema(&raw).is_ok());
+    }
+
+    #[test]
+    fn sender_id_over_max_length_rejected() {
+        let mut raw = valid_raw();
+        let long_sender = "A".repeat(MAX_SENDER_ID_CHARS + 1);
+        raw.body_json = format!(r#"{{"msisdn":"998901331835","sender_id":"{long_sender}","body":"text"}}"#);
+        assert_eq!(validate_request_schema(&raw), Err(ValidationError::SenderIdTooLong));
+    }
+
+    #[test]
+    fn sender_id_at_exactly_max_length_accepted() {
+        let mut raw = valid_raw();
+        let sender = "A".repeat(MAX_SENDER_ID_CHARS);
+        raw.body_json = format!(r#"{{"msisdn":"998901331835","sender_id":"{sender}","body":"text"}}"#);
+        assert!(validate_request_schema(&raw).is_ok());
+    }
+
+    /// Прямое доказательство исправления HIGH находки кодревью
+    /// (resource-amplification): ~2MB sender_id раньше проходил валидацию
+    /// без единой проверки длины — теперь отклоняется как SenderIdTooLong
+    /// задолго до публикации в Kafka.
+    #[test]
+    fn oversized_sender_id_resource_amplification_vector_rejected() {
+        let mut raw = valid_raw();
+        let huge_sender = "A".repeat(2 * 1024 * 1024);
+        raw.body_json = format!(r#"{{"msisdn":"998901331835","sender_id":"{huge_sender}","body":"text"}}"#);
+        assert_eq!(validate_request_schema(&raw), Err(ValidationError::SenderIdTooLong));
+    }
+
+    #[test]
+    fn sender_id_with_control_character_rejected() {
+        let mut raw = valid_raw();
+        raw.body_json = "{\"msisdn\":\"998901331835\",\"sender_id\":\"Click\\u0000\",\"body\":\"text\"}".into();
+        assert_eq!(validate_request_schema(&raw), Err(ValidationError::InvalidSenderId));
+    }
+
+    #[test]
+    fn sender_id_with_non_ascii_rejected() {
+        let mut raw = valid_raw();
+        raw.body_json = r#"{"msisdn":"998901331835","sender_id":"Клик","body":"text"}"#.into();
+        assert_eq!(validate_request_schema(&raw), Err(ValidationError::InvalidSenderId));
+    }
+
+    #[test]
+    fn numeric_sender_id_accepted() {
+        let mut raw = valid_raw();
+        raw.body_json = r#"{"msisdn":"998901331835","sender_id":"998712345678","body":"text"}"#.into();
+        assert!(validate_request_schema(&raw).is_ok());
+    }
+
+    #[test]
+    fn sender_id_with_hyphen_and_space_accepted() {
+        let mut raw = valid_raw();
+        raw.body_json = r#"{"msisdn":"998901331835","sender_id":"MPP-SMS Info","body":"text"}"#.into();
         assert!(validate_request_schema(&raw).is_ok());
     }
 }
