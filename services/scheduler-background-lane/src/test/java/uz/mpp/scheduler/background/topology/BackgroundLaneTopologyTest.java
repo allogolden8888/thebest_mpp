@@ -102,7 +102,7 @@ class BackgroundLaneTopologyTest {
         input.pipeInput("evt-4", task(BackgroundTaskType.BACKGROUND_TASK_TYPE_DLR_CORRELATION_RETRY, "evt-4", now - 1, Topics.OPERATOR_DLR_UNRESOLVED).toByteArray());
         driver.advanceWallClockTime(Duration.ofSeconds(1));
 
-        var store = driver.<uz.mpp.scheduler.background.core.BackgroundTask>getKeyValueStore(BackgroundCommandProcessor.STORE_NAME);
+        var store = driver.<String, uz.mpp.scheduler.background.core.BackgroundTask>getKeyValueStore(BackgroundCommandProcessor.STORE_NAME);
         assertEquals(null, store.get("evt-4"), "задача должна быть удалена из store после диспатча");
     }
 
