@@ -51,3 +51,24 @@ RUN --mount=type=secret,id=extra_ca_cert,required=false \
 сертификат специфичен для этой сети/песочницы, коммитится в репозиторий
 только чтобы `docker build` можно было воспроизводимо гонять локально любому,
 кто окажется за тем же прокси.
+
+## docker-compose.yml — локальная инфраструктура (шаг 1: только база)
+
+`docker-compose.yml` поднимает PostgreSQL/3×Redis/Kafka с именами
+переменных окружения ровно как в `infra/secrets/generate_external_secrets.py`
+(`SECRET_KEYS`) — сервисы (когда добавятся сюда же следующим шагом)
+подключаются без склейки. Порты на хосте сдвинуты (5433, 6380-6382, 9094) —
+на этой машине уже отдельно запущены свои postgres/redis на дефолтных
+портах (brew services), конфликтовать с ними не должны.
+
+```bash
+cd infra/docker
+docker compose up -d
+docker compose ps          # все health checks должны стать healthy
+docker compose logs -f kafka   # если что-то не поднимается за ~30-60с
+```
+
+Пока это только инфраструктура — сами 32 сервиса ещё не подключены к этому
+compose-файлу, добавляются постепенно следующим шагом (development_plan.md
+2.3/2.4, "разворот в staging" — сначала локальный docker-compose, потом уже
+k8s/kind).

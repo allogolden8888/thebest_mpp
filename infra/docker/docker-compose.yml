@@ -1,0 +1,98 @@
+# Локальная инфраструктура для ручной проверки платформы вне k8s —
+# PostgreSQL/Redis/Kafka с именами переменных окружения ровно как в
+# infra/secrets/generate_external_secrets.py (SECRET_KEYS), чтобы сервисы
+# подключались без дополнительной переменной-склейки. Порты на хосте
+# сдвинуты (5433/6380-6382/9094), т.к. на этой машине уже запущены
+# локальные (не-Docker) postgres/redis на дефолтных портах.
+#
+# Пока только инфраструктура — сами 32 сервиса добавляются следующим шагом,
+# после того как эта база поднимется и пройдут миграции.
+#
+# Запуск:
+#   cd infra/docker && docker compose up -d
+#   docker compose ps
+#   docker compose logs -f kafka   # если что-то не поднимается
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: mpp
+      POSTGRES_PASSWORD: mpp_local_dev
+      POSTGRES_DB: mpp
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mpp -d mpp"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis-runtime:
+    image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "mpp_local_dev"]
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "mpp_local_dev", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis-configuration:
+    image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "mpp_local_dev"]
+    ports:
+      - "6381:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "mpp_local_dev", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis-billing:
+    image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "mpp_local_dev"]
+    ports:
+      - "6382:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "mpp_local_dev", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # KRaft-режим (без ZooKeeper) — один брокер, действует и как контроллер.
+  # Официальный образ Apache Kafka, не Bitnami/Confluent — минимум лишней
+  # конфигурации.
+  kafka:
+    image: apache/kafka:3.8.0
+    ports:
+      - "9094:9094"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # auto-create — упрощение только для локальной проверки; в k8s топики
+      # создаются явно из infra/kafka/rendered/kafka-topics.yaml
+      # (infra/kafka/generate_kafka_topics.py), с реальными partition-counts,
+      # не дефолтом.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      CLUSTER_ID: "mpp-local-dev-cluster-1"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+
+volumes:
+  postgres_data:
