@@ -13,7 +13,9 @@ use crate::kafka_io::{self, PublishError};
 use crate::partner_config::PartnerSnapshot;
 use crate::rate_limit::RateLimiter;
 use crate::ip_allowlist;
+use crate::msgctx;
 use crate::request::{RawRequest, ValidatedRequest, ValidationError, validate_request_schema};
+use crate::segmentation::compute_segments;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -245,6 +247,23 @@ async fn handle_send_message(
     }
 
     let incoming = build_incoming_message(&validated, message_id.clone(), trace_id.clone(), SystemTime::now());
+
+    // Реальная находка (только прогоном локального docker-compose, см.
+    // msgctx.rs) — ни один сервис в репозитории не писал msgctx:{message_id}
+    // в Runtime Redis, хотя все downstream-стадии его читают. Пишем ДО
+    // Kafka publish, чтобы к моменту, когда pipeline-engine/policy-service
+    // реально дойдут до чтения, запись уже гарантированно существовала.
+    let segments = compute_segments(&validated.body);
+    let ctx = msgctx::MessageContext {
+        message_id: &message_id,
+        body: &validated.body,
+        sender_id: &validated.sender_id,
+        msisdn: &validated.msisdn,
+        encoding: segments.encoding.as_str(),
+        partner_id: &validated.partner_id,
+        segment_count: segments.segment_count,
+    };
+    msgctx::write(&state.redis_runtime_url, &ctx, DEFAULT_MESSAGE_TTL.as_secs()).await;
 
     // MEDIUM находка кодревью: Kafka publish (5с producer-queue wait + 5с
     // delivery timeout, до ~10с суммарно) раньше awaited'ился без верхней

@@ -2,7 +2,7 @@
 
 **Основание:** `development_plan.md` Фаза 2.1, шестой сервис "ходового скелета" (Главный агент) — единственная точка входа сообщений в систему для REST-партнёров (`hld.md` §2, `services_specifictaion.md` §2.1). Первый сервис в этой серии, публикующий `incoming.messages` (не потребляющий `stage.*`), и первый с настоящим внешним HTTP API поверх бизнес-логики (не только `/healthz`).
 
-**Статус:** реально компилируется и тестируется — `cargo build && cargo test`, **62/62 тестов проходят** (было 59 — 3 добавлены по итогам находки ниже), компилирует настоящие `platform-contracts/{common,events}/*.proto` (тот же паттерн двух package с cross-package ссылками, что у `pipeline-engine`).
+**Статус:** реально компилируется и тестируется — `cargo build && cargo test`, **80/80 тестов проходят** (число тестов росло по мере находок кодревью и локального docker-compose прогона, см. разделы ниже), компилирует настоящие `platform-contracts/{common,events}/*.proto` (тот же паттерн двух package с cross-package ссылками, что у `pipeline-engine`).
 
 **Исправлено (найдено при реализации `dlr-manager`, полный разбор — его README, "Реальная находка (систематическая...)"):** `main.rs` раньше читал единственную `REDIS_RUNTIME_URL`, которую k8s никогда не установит — реальный секрет инжектится дискретными `REDIS_RUNTIME_HOST`/`PORT`/`PASSWORD` (`envFrom: secretRef`). `redis_url::build_redis_runtime_url()` теперь собирает connection string из них, `REDIS_RUNTIME_URL` оставлена как явный override для локальной разработки/тестов. 3 новых теста.
 
@@ -89,6 +89,12 @@ Content-Type: application/json
 * `DefaultBodyLimit::max(64КиБ)` — axum's дефолт 2МБ был именно тем, что делало HIGH #1 (`sender_id` amplification) эксплуатируемым на всю глубину; 64КиБ — щедрый запас над реалистичным размером запроса (`body` ≤1600 символов), но на два порядка меньше дефолта.
 * `tokio::time::timeout(15с, kafka_io::publish_incoming(...))` — верхняя граница поверх librdkafka's собственных внутренних таймаутов (которые применяются per-attempt, не гарантируют суммарный возврат за 10с при внутренних ретраях).
 * `AppState::concurrency_limit` (`tokio::sync::Semaphore`, `try_acquire_owned`, не `.acquire().await`) — 1024 одновременных in-flight запроса на реплику; сверх лимита — немедленный 503, не неограниченная очередь (которая свела бы защиту на нет).
+
+## Реальная находка (найдена только реальным прогоном платформы через локальный docker-compose): никто не писал `msgctx`
+
+`msgctx:{message_id}` в Runtime Redis (`data_infrastructure_spec.md` §284) — единственный источник полного содержимого сообщения (`body`/`sender`/`msisdn`/`encoding`) для downstream-стадий (Policy, Delivery, Billing и т.д.); Kafka между стадиями несёт только `message_id`/`stage_execution_id`, не сам текст. Каждый читатель (`policy-service::RedisMessageContextStore`, `delivery-service::MessageContextStore` и другие) был реализован и задокументирован — но нигде в репозитории не было ни одной ЗАПИСИ в этот ключ. Статичным чтением кода это было не видно (каждый сервис по отдельности выглядел корректным); проявилось только при первом реальном сообщении, прошедшем через `pipeline-engine` → `policy-service` в docker-compose: `не удалось получить MessageContext`.
+
+Исправлено здесь — `msgctx.rs`: пишет `msgctx:{message_id}` (те же имена полей, что ожидает `policy-service::RedisMessageContextStore::fetch` — `msisdn`/`sender`/`body`, плюс `encoding`/`partner_id`/`segment_count`/`channel` для остальных читателей) ДО Kafka publish, TTL = `DEFAULT_MESSAGE_TTL` (24ч, тот же, что уже используется для `message_ttl` в `IncomingMessage`). Best-effort, как `idempotency::claim` — недоступность Redis логируется, не блокирует ingress (сообщение уже прошло валидацию, публикация в Kafka не должна зависеть от этой побочной записи). `write_then_hgetall_round_trips_fields_readers_expect` — реальный round-trip против локального Redis, поля сверены с настоящим читателем, не придуманы заново.
 
 ## Тесты — что доказано
 
