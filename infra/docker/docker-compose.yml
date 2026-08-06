@@ -156,9 +156,14 @@ services:
       - "9095:9090"
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_RUNTIME_HOST: redis-runtime
+      REDIS_RUNTIME_PORT: "6379"
+      REDIS_RUNTIME_PASSWORD: mpp_local_dev
       RUST_LOG: info
     depends_on:
       kafka:
+        condition: service_healthy
+      redis-runtime:
         condition: service_healthy
 
 volumes:
