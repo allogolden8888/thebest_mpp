@@ -94,5 +94,28 @@ services:
       timeout: 10s
       retries: 15
 
+  # Первый сервис "ходового скелета" — входная точка REST-ingest. credential_ref
+  # "vault://partners/click_uz/main/api_key" (config_schemas/examples/partner.valid.json,
+  # уже запечён в образ) резолвится в PARTNER_CRED_VAULT___PARTNERS_CLICK_UZ_MAIN_API_KEY
+  # (auth.rs::credential_ref_to_env_var) — значение ниже это и есть тестовый API-ключ,
+  # которым нужно бить в /v1/messages как X-Api-Key.
+  partner-rest-receiver:
+    image: mpp/partner-rest-receiver:test
+    ports:
+      - "8080:8080"
+      - "9091:9090"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_RUNTIME_HOST: redis-runtime
+      REDIS_RUNTIME_PORT: "6379"
+      REDIS_RUNTIME_PASSWORD: mpp_local_dev
+      PARTNER_CRED_VAULT___PARTNERS_CLICK_UZ_MAIN_API_KEY: local-dev-test-key
+      RUST_LOG: info
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis-runtime:
+        condition: service_healthy
+
 volumes:
   postgres_data:
