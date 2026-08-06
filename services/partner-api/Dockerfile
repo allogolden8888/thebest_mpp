@@ -9,7 +9,11 @@
 FROM golang:1.26-bookworm AS builder
 WORKDIR /build
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=secret,id=extra_ca_cert,required=false \
+    if [ -s /run/secrets/extra_ca_cert ]; then \
+        cp /run/secrets/extra_ca_cert /usr/local/share/ca-certificates/extra-ca.crt && update-ca-certificates; \
+    fi && \
+    go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o /build/bin/partner-api ./cmd/partner-api
 
