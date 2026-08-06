@@ -153,7 +153,7 @@ services:
   policy-service:
     image: mpp/policy-service:test
     ports:
-      - "9094:9090"
+      - "9095:9090"
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       RUST_LOG: info
