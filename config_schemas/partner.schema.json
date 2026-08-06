@@ -15,9 +15,24 @@
       "type": "array",
       "minItems": 1,
       "items": { "$ref": "#/$defs/application" }
+    },
+    "senders": {
+      "description": "development_plan.md 5.4 — реестр alphaname/short number, зарегистрированных за партнёром. Опционально (партнёр может не иметь ни одного — тогда alphaname_monthly_fee из billing_tariff не применяется). Источник ежемесячного recurring-биллинга — см. services/billing-service RecurringCharges: один alphaname_monthly_fee за каждый sender со status=active, НЕ за archived.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/sender" }
     }
   },
   "$defs": {
+    "sender": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sender_id", "type", "status"],
+      "properties": {
+        "sender_id": { "type": "string" },
+        "type": { "enum": ["ALPHANAME", "SHORT_NUMBER"] },
+        "status": { "enum": ["active", "archived"] }
+      }
+    },
     "application": {
       "type": "object",
       "additionalProperties": false,

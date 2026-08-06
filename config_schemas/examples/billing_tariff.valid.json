@@ -7,5 +7,12 @@
     "UNTEMPLATED": 3500,
     "BLOCKED": 94
   },
-  "default_category": "UNTEMPLATED"
+  "default_category": "UNTEMPLATED",
+  "recurring_charges": {
+    "alphaname_monthly_fee": 4000000,
+    "service_sms_package": {
+      "segments": 40000,
+      "price": 2000000
+    }
+  }
 }

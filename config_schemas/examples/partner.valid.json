@@ -2,6 +2,10 @@
   "partner_id": "click_uz",
   "version": 4,
   "status": "active",
+  "senders": [
+    { "sender_id": "CLICK", "type": "ALPHANAME", "status": "active" },
+    { "sender_id": "5252", "type": "SHORT_NUMBER", "status": "active" }
+  ],
   "applications": [
     {
       "application_id": "click_uz_main",

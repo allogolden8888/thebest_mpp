@@ -20,10 +20,14 @@ public final class TariffResolver {
 
     private final Map<String, Long> pricePerSegment;
     private final String currencyCode;
+    private final Long alphanameMonthlyFee;
+    private final RecurringCharges.ServicePackage servicePackage;
 
-    private TariffResolver(Map<String, Long> pricePerSegment, String currencyCode) {
+    private TariffResolver(Map<String, Long> pricePerSegment, String currencyCode, Long alphanameMonthlyFee, RecurringCharges.ServicePackage servicePackage) {
         this.pricePerSegment = pricePerSegment;
         this.currencyCode = currencyCode;
+        this.alphanameMonthlyFee = alphanameMonthlyFee;
+        this.servicePackage = servicePackage;
     }
 
     public static TariffResolver fromConfigSchemaJson(String json) {
@@ -35,10 +39,36 @@ public final class TariffResolver {
             if (!prices.containsKey("BLOCKED")) {
                 throw new IllegalArgumentException("price_per_segment обязан содержать BLOCKED (data_infrastructure_spec.md §1.6a)");
             }
-            return new TariffResolver(prices, root.get("currency").asText());
+
+            // recurring_charges — development_plan.md 5.4, опционально
+            // (billing_tariff.schema.json не требует эту секцию — старые
+            // конфиги без неё остаются валидными).
+            Long alphanameMonthlyFee = null;
+            RecurringCharges.ServicePackage servicePackage = null;
+            JsonNode recurring = root.get("recurring_charges");
+            if (recurring != null) {
+                JsonNode feeNode = recurring.get("alphaname_monthly_fee");
+                if (feeNode != null) {
+                    alphanameMonthlyFee = feeNode.asLong();
+                }
+                JsonNode pkgNode = recurring.get("service_sms_package");
+                if (pkgNode != null) {
+                    servicePackage = new RecurringCharges.ServicePackage(pkgNode.get("segments").asLong(), pkgNode.get("price").asLong());
+                }
+            }
+
+            return new TariffResolver(prices, root.get("currency").asText(), alphanameMonthlyFee, servicePackage);
         } catch (IOException e) {
             throw new IllegalArgumentException("не удалось распарсить billing_tariff.schema.json форму", e);
         }
+    }
+
+    public Long alphanameMonthlyFee() {
+        return alphanameMonthlyFee;
+    }
+
+    public RecurringCharges.ServicePackage servicePackage() {
+        return servicePackage;
     }
 
     public static TariffResolver fromFile(Path path) {
