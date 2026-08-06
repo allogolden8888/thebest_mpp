@@ -27,6 +27,7 @@ cargo test
 
 ## Что НЕ реализовано на этом шаге (честно, не спрятано)
 
+* **ОБНОВЛЕНО 2026-08-06:** `docker build` реально прогнан и провалидирован для этого сервиса (найдены и исправлены реальные баги по пути, где применимо — см. `development_plan.md` "Координация" п.5 и `infra/docker/README.md`). Формулировка ниже — из более раннего состояния сессии, оставлена для истории.
 * **`docker build` не выполнялся, ни разу не запущено против реального Kafka-брокера** — та же оговорка, что у предыдущих трёх сервисов.
 * **`ControlSnapshot` (execution.control, scope=OPERATOR_ROUTE) в `main.rs` — всегда пустой** (fail-open: все маршруты ACTIVE). Реальная проекция из Kafka-топика `execution.control` в локальный snapshot — работа Execution Control Service (Фаза 3.1, владелец Субагент 1) и её потребление здесь — не реализовано в этом срезе, сознательно отложено.
 * **Operator Route Registry (Runtime Redis, hld.md §11.4) не подключён — намеренно, не пробел.** `select_route_and_protocol` здесь выбирает `route_id`/`protocol` из конфигурации, не резолвит owning instance того маршрута — резолвинг instance делает Delivery Service при обращении к Operator SMPP Session Manager/Operator HTTP Gateway, вне скоупа Routing. `redis` не добавлен в зависимости этого сервиса вообще (в отличие от первого черновика, где был скопирован по инерции из Policy Service, а затем удалён — этому сервису он не нужен).

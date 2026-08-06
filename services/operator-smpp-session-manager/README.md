@@ -32,6 +32,7 @@ Partner SMPP Gateway — SMPP-сервер (принимает binds от пар
 
 ## Что НЕ реализовано на этом шаге (честно, не спрятано)
 
+* **ОБНОВЛЕНО 2026-08-06:** `docker build` реально прогнан и провалидирован для этого сервиса (найдены и исправлены реальные баги по пути, где применимо — см. `development_plan.md` "Координация" п.5 и `infra/docker/README.md`). Формулировка ниже — из более раннего состояния сессии, оставлена для истории.
 * **`docker build` не выполнялся** — недоступный Docker daemon.
 * **Ни разу не запущено против реального оператора** — только `FakeSmscServer` (тестовый TCP-сервер в этом репо, не настоящий SMSC).
 * **`query_sm` PDU не реализован** в `codec/CommandId` (см. `services/partner-smpp-gateway/README.md` — то же ограничение унаследовано: только bind/submit/deliver/enquire_link/unbind/generic_nack). `OperatorQuerySmServer` реально проверяет приоритет (`enforce_query_sm_priority`), но не отправляет фактический query_sm оператору.

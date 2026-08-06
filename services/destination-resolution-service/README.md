@@ -47,6 +47,7 @@ cargo test
 
 ## Что НЕ реализовано на этом шаге (честно, не спрятано)
 
+* **ОБНОВЛЕНО 2026-08-06:** `docker build` реально прогнан и провалидирован для этого сервиса (найдены и исправлены реальные баги по пути, где применимо — см. `development_plan.md` "Координация" п.5 и `infra/docker/README.md`). Формулировка ниже — из более раннего состояния сессии, оставлена для истории.
 * **`docker build` не выполнялся** — тот же недоступный Docker daemon, что помешал в начале сессии с PostgreSQL (`migrations/README.md`). `Dockerfile` написан по стандартному multi-stage паттерну, сверен с реальными зависимостями `Cargo.toml`, но не прогнан.
 * **Ни разу не запущено против реального Kafka-брокера** — `src/kafka_io.rs::run_loop` использует настоящие `rdkafka` типы (`StreamConsumer`/`FutureProducer`), компилируется, но end-to-end (реальный `docker`/`kind` кластер с Strimzi) не поднят в этом окружении.
 * Retry/backoff на транзиентные ошибки брокера, DLQ-публикация на `stage.destination-resolution.dlq` (топик уже спланирован в `infra/kafka/`, producer сюда не подключён), обработка consumer group rebalance за пределами дефолтного поведения `StreamConsumer` — см. `src/kafka_io.rs` docstring.

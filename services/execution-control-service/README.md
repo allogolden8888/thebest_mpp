@@ -45,6 +45,7 @@ protoc --proto_path=../../platform-contracts \
 
 ## PostgreSQL — что реально прогнано
 
+* **ОБНОВЛЕНО 2026-08-06:** `docker build` реально прогнан и провалидирован для этого сервиса (найдены и исправлены реальные баги по пути, где применимо — см. `development_plan.md` "Координация" п.5 и `infra/docker/README.md`). Формулировка ниже — из более раннего состояния сессии, оставлена для истории.
 `internal/store/audit_test.go` подключается к `postgres://localhost:5432/mpp` (переопределяется `EXECUTION_CONTROL_TEST_DSN`) и вставляет/читает обратно реальную строку в `control.execution_control_audit` (`migrations/V016__execution_control_audit.sql`). В этой песочнице БД поднята так же, как в `migrations/README.md` (brew, не Docker — Docker daemon недоступен, `development_plan.md` "Координация" п.5):
 
 ```bash

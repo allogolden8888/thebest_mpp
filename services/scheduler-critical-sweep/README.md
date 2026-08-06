@@ -88,6 +88,7 @@ go test -race ./...
 
 ## Что НЕ реализовано на этом шаге (честно, не спрятано)
 
+* **ОБНОВЛЕНО 2026-08-06:** `docker build` реально прогнан и провалидирован для этого сервиса (найдены и исправлены реальные баги по пути, где применимо — см. `development_plan.md` "Координация" п.5 и `infra/docker/README.md`). Формулировка ниже — из более раннего состояния сессии, оставлена для истории.
 * **`docker build` не выполнялся** — недоступный Docker daemon в этой песочнице.
 * **Ни разу не запущено против реального Kafka-брокера** — `internal/kafkaio.Publisher`/`ManualCommandConsumer`/`ControlSnapshotConsumer` используют настоящий `franz-go`, компилируются, но не проверялись против `kind`+Strimzi.
 * **`on_manual_command` не выполняет принудительную обработку** (finding #10, см. выше) — консьюмер `scheduler.critical.commands` только логирует `FORCE_TIMEOUT`/`FORCE_RETRY`.

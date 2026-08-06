@@ -34,6 +34,7 @@ mvn test
 
 ## Что НЕ реализовано на этом шаге (честно, не спрятано)
 
+* **ОБНОВЛЕНО 2026-08-06:** `docker build` реально прогнан и провалидирован для этого сервиса (найдены и исправлены реальные баги по пути, где применимо — см. `development_plan.md` "Координация" п.5 и `infra/docker/README.md`). Формулировка ниже — из более раннего состояния сессии, оставлена для истории.
 * **`docker build` не выполнялся** — недоступный Docker daemon.
 * **`collect_evidence` не подключён к реальным Kafka consumer'ам** `operator.submit.accepted`/`delivery.status` — `Main.java` заводит только consumer для `stage.delivery-reconciliation` (создание case) и таймер sweep (`evaluate_deadline`/`resolve_outcome`/`persist_case`/`publish_stage_completed`), но не обновляет `Evidence` по мере поступления событий из двух других топиков. В текущем виде `sweepDeadlines` резолвит **пустой** `Evidence` (`Evidence.empty()`), что всегда даёт `CONFIRMED_NOT_SUBMITTED` — функционально неполно, задокументировано явно, не скрыто за фасадом "готово".
 * **`resolve_gateway_instance`** — резолв `SmppGatewayEndpoint` через Runtime Redis registry (`operator_route:*`, тот же, что `operator-smpp-session-manager`/`operator-http-gateway`) не реализован; `QuerySmClient` принимает host/port уже резолвленными.
