@@ -81,6 +81,55 @@ fn literal_fragments(tokens: &[Token]) -> Vec<&str> {
         .collect()
 }
 
+/// Минимальная длина литерального фрагмента (в символах, не байтах — иначе
+/// граница непредсказуемо смещается в зависимости от алфавита), ниже
+/// которой фрагмент считается слабым якорем для Aho-Corasick-префильтра.
+const MIN_SELECTIVE_FRAGMENT_LEN: usize = 3;
+
+/// Pre-flight-проверка одного pattern перед регистрацией шаблона в
+/// конфиге — найдено при обсуждении производительности `CompiledRuleset`
+/// при большом числе шаблонов на одного отправителя: все литеральные
+/// фрагменты всех шаблонов лежат в одном общем автомате (`fragment_hits`),
+/// поэтому короткий/частый фрагмент одного шаблона даёт совпадения почти
+/// на любом сообщении и раздувает список кандидатов во второй фазе
+/// (`find_match`) для ВСЕХ шаблонов реестра, не только для этого. Ловит
+/// два практических случая до того, как шаблон попадёт в конфиг:
+///   1. Ни одного литерального фрагмента вообще — при текущей реализации
+///      такой шаблон не может совпасть никогда (`check_template`
+///      безусловно отклоняет пустой `literal_fragments`).
+///   2. Хотя бы один литеральный фрагмент короче `MIN_SELECTIVE_FRAGMENT_LEN`.
+/// Намеренно возвращает предупреждения, а не `Result`/ошибку — у этой
+/// функции нет доступа к остальному реестру шаблонов (не может знать,
+/// станет ли фрагмент реальной проблемой при данном конкретном наборе
+/// шаблонов сендера), поэтому решение "заблокировать/подтвердить/
+/// проигнорировать" остаётся на вызывающей стороне.
+pub fn check_pattern_selectivity(pattern: &str) -> Vec<String> {
+    let tokens = parse_pattern(pattern);
+    let frags = literal_fragments(&tokens);
+
+    if frags.is_empty() {
+        return vec![
+            "шаблон не содержит ни одного литерального фрагмента — при текущей реализации \
+             (Aho-Corasick-префильтр по литералам) такой шаблон не сможет совпасть ни с одним \
+             сообщением, независимо от плейсхолдеров"
+                .to_string(),
+        ];
+    }
+
+    frags
+        .iter()
+        .filter(|f| f.chars().count() < MIN_SELECTIVE_FRAGMENT_LEN)
+        .map(|f| {
+            format!(
+                "литеральный фрагмент {f:?} короче {MIN_SELECTIVE_FRAGMENT_LEN} символов — слабый \
+                 якорь для префильтра: чем короче и чаще встречается фрагмент, тем больше шаблонов \
+                 попадёт в кандидаты на каждое сообщение и тем медленнее фаза подтверждения для ВСЕХ \
+                 шаблонов реестра, не только этого"
+            )
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct Template {
     pub template_id: String,
@@ -94,50 +143,64 @@ pub struct MatchedTemplate {
     pub category: String,
 }
 
+/// Плотный внутренний индекс шаблона (0..N по порядку регистрации, N —
+/// число загруженных шаблонов). Найдено кодревью: строковый `template_id`
+/// (обычно UUID, ~36 байт) в роли ключа `HashMap` и элемента `hits` — это
+/// хэширование и сравнение байт строки плюс клонирование `String` на
+/// каждый лукап и на каждый хит префильтра; при большом числе шаблонов на
+/// одного отправителя это реальные накладные расходы и по CPU, и по
+/// памяти. `TemplateId` — просто позиция в `templates`/`tokens_by_template`
+/// (см. `CompiledRuleset::new`), `Copy`, лукап — прямая индексация массива
+/// без хэширования. Заодно бесплатно даёт insertion order: меньший
+/// `TemplateId` зарегистрирован раньше, тай-брейк в `find_match` сравнивает
+/// `TemplateId` напрямую — отдельная таблица индексов не нужна. Публичный
+/// `template_id: String` остаётся только в `Template` (вход) и
+/// `MatchedTemplate` (выход) — во внутренней бухгалтерии его больше нет.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct TemplateId(u32);
+
+impl TemplateId {
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 pub struct CompiledRuleset {
-    templates: HashMap<String, Template>,
-    /// Порядок регистрации — та же семантика, что `dict` в Python 3.7+
-    /// (insertion order). С `development_plan.md` 4.3 больше не главный
-    /// критерий при неоднозначности (это теперь `specificity()`) — остаётся
-    /// только финальным tie-break'ом, если специфичность двух шаблонов
-    /// совпала в точности (см. `find_match`).
-    template_order: Vec<String>,
-    tokens_by_template: HashMap<String, Vec<Token>>,
+    templates: Vec<Template>,                // индекс — TemplateId
+    tokens_by_template: Vec<Vec<Token>>,      // индекс — TemplateId, параллельно templates
     automaton: Option<AhoCorasick>,
-    pattern_owner: Vec<(String, usize)>, // PatternID (индекс) -> (template_id, frag_idx)
+    pattern_owner: Vec<(TemplateId, usize)>,  // PatternID (индекс автомата) -> (template, frag_idx)
 }
 
 impl CompiledRuleset {
     pub fn new(templates: Vec<Template>) -> Self {
-        let mut tokens_by_template = HashMap::new();
-        let mut template_order = Vec::new();
+        let mut tokens_by_template: Vec<Vec<Token>> = Vec::with_capacity(templates.len());
         let mut patterns: Vec<String> = Vec::new();
-        let mut pattern_owner: Vec<(String, usize)> = Vec::new();
+        let mut pattern_owner: Vec<(TemplateId, usize)> = Vec::new();
 
-        for t in &templates {
+        for (order, t) in templates.iter().enumerate() {
+            let template_id = TemplateId(order as u32);
             let tokens = parse_pattern(&t.pattern);
             let frags: Vec<String> = literal_fragments(&tokens).into_iter().map(String::from).collect();
             for (idx, frag) in frags.iter().enumerate() {
                 patterns.push(frag.clone());
-                pattern_owner.push((t.template_id.clone(), idx));
+                pattern_owner.push((template_id, idx));
             }
-            tokens_by_template.insert(t.template_id.clone(), tokens);
-            template_order.push(t.template_id.clone());
+            tokens_by_template.push(tokens);
         }
 
         let automaton = if patterns.is_empty() { None } else { Some(AhoCorasick::new(&patterns).expect("valid patterns")) };
-        let templates_map = templates.into_iter().map(|t| (t.template_id.clone(), t)).collect();
 
-        Self { templates: templates_map, template_order, tokens_by_template, automaton, pattern_owner }
+        Self { templates, tokens_by_template, automaton, pattern_owner }
     }
 
-    /// template_id -> {frag_idx -> [(start, end_exclusive), ...]}
-    fn fragment_hits(&self, text: &str) -> HashMap<String, HashMap<usize, Vec<(usize, usize)>>> {
-        let mut hits: HashMap<String, HashMap<usize, Vec<(usize, usize)>>> = HashMap::new();
+    /// template (TemplateId) -> {frag_idx -> [(start, end_exclusive), ...]}
+    fn fragment_hits(&self, text: &str) -> HashMap<TemplateId, HashMap<usize, Vec<(usize, usize)>>> {
+        let mut hits: HashMap<TemplateId, HashMap<usize, Vec<(usize, usize)>>> = HashMap::new();
         let Some(automaton) = &self.automaton else { return hits };
         for m in automaton.find_overlapping_iter(text) {
-            let (template_id, frag_idx) = &self.pattern_owner[m.pattern().as_usize()];
-            hits.entry(template_id.clone()).or_default().entry(*frag_idx).or_default().push((m.start(), m.end()));
+            let (template_id, frag_idx) = self.pattern_owner[m.pattern().as_usize()];
+            hits.entry(template_id).or_default().entry(frag_idx).or_default().push((m.start(), m.end()));
         }
         hits
     }
@@ -146,11 +209,11 @@ impl CompiledRuleset {
     /// по позиции. `None`, если такой последовательности не существует.
     fn candidate_positions(
         &self,
-        template_id: &str,
-        hits: &HashMap<String, HashMap<usize, Vec<(usize, usize)>>>,
+        template_id: TemplateId,
+        hits: &HashMap<TemplateId, HashMap<usize, Vec<(usize, usize)>>>,
         frag_count: usize,
     ) -> Option<Vec<(usize, usize)>> {
-        let per_frag = hits.get(template_id);
+        let per_frag = hits.get(&template_id);
         let mut chosen = Vec::with_capacity(frag_count);
         let mut cursor = 0usize;
         for idx in 0..frag_count {
@@ -184,8 +247,8 @@ impl CompiledRuleset {
     /// отдельно от `find_match` (development_plan.md 4.3), чтобы можно было
     /// проверить ВСЕ шаблоны и выбрать лучший, не останавливаться на первом
     /// подошедшем по порядку регистрации.
-    fn check_template(&self, template_id: &str, hits: &HashMap<String, HashMap<usize, Vec<(usize, usize)>>>, text: &str) -> bool {
-        let tokens = &self.tokens_by_template[template_id];
+    fn check_template(&self, template_id: TemplateId, hits: &HashMap<TemplateId, HashMap<usize, Vec<(usize, usize)>>>, text: &str) -> bool {
+        let tokens = &self.tokens_by_template[template_id.index()];
         let frags = literal_fragments(tokens);
         if frags.is_empty() {
             return false;
@@ -256,26 +319,45 @@ impl CompiledRuleset {
         (placeholder_score, literal_len)
     }
 
+    /// Найдено кодревью: раньше цикл шёл по `template_order` — ВСЕМ
+    /// зарегистрированным шаблонам, независимо от того, нашёл ли для них
+    /// Aho-Corasick хоть один литеральный фрагмент в `text`. При миллионе
+    /// шаблонов на одного отправителя это O(число_шаблонов) на каждое
+    /// входящее сообщение — асимптотика Aho-Corasick (`O(длина_текста +
+    /// совпадения)`, не зависит от числа загруженных шаблонов) фактически
+    /// терялась на этом шаге. Теперь перебор идёт по `hits.keys()` — это и
+    /// есть настоящий список кандидатов после префильтра, обычно
+    /// единицы-десятки записей независимо от общего числа шаблонов.
+    /// Tie-break по insertion order сравнивает `TemplateId` напрямую (сам
+    /// индекс и есть порядок регистрации, см. `CompiledRuleset::new`) — без
+    /// отдельного лукапа. Сравнение явное, не через порядок обхода: обход
+    /// `HashMap::keys()`, в отличие от прежнего обхода `Vec` по возрастанию
+    /// индекса, не детерминирован, и раньше подразумеваемая гарантия "при
+    /// равенстве специфичности победит первый встреченный" держалась только
+    /// на порядке обхода `Vec` — здесь она выражена явным сравнением, а не
+    /// порядком итерации.
     pub fn find_match(&self, text: &str) -> Option<MatchedTemplate> {
         let hits = self.fragment_hits(text);
 
-        let mut best: Option<(usize, (usize, usize), &String)> = None; // (insertion_idx, specificity, template_id)
-        for (idx, template_id) in self.template_order.iter().enumerate() {
+        let mut best: Option<(TemplateId, (usize, usize))> = None; // (template_id, specificity) — TemplateId сам по себе insertion order
+        for &template_id in hits.keys() {
             if !self.check_template(template_id, &hits, text) {
                 continue;
             }
-            let score = Self::specificity(&self.tokens_by_template[template_id]);
+            let score = Self::specificity(&self.tokens_by_template[template_id.index()]);
             let is_better = match &best {
                 None => true,
-                Some((_, best_score, _)) => score > *best_score, // строго больше — при равенстве побеждает более ранний по insertion order (найден первым)
+                Some((best_id, best_score)) => {
+                    score > *best_score || (score == *best_score && template_id < *best_id)
+                }
             };
             if is_better {
-                best = Some((idx, score, template_id));
+                best = Some((template_id, score));
             }
         }
 
-        best.map(|(_, _, template_id)| {
-            let t = &self.templates[template_id];
+        best.map(|(template_id, _)| {
+            let t = &self.templates[template_id.index()];
             MatchedTemplate { template_id: t.template_id.clone(), category: t.category.clone() }
         })
     }
@@ -418,5 +500,67 @@ mod tests {
         let tpl = Template { template_id: "tpl-emoji".into(), pattern: "🎉 %w tabriklaymiz".into(), category: "SERVICE".into() };
         let ruleset = CompiledRuleset::new(vec![tpl]);
         assert!(ruleset.find_match("🎉 sizni tabriklaymiz").is_some());
+    }
+
+    // Регрессия на находку кодревью: `find_match` раньше шёл циклом по ВСЕМ
+    // зарегистрированным шаблонам (`template_order`), а не только по
+    // кандидатам префильтра (`hits`) — при большом числе шаблонов на одного
+    // отправителя это O(число_шаблонов) на каждое сообщение вместо
+    // O(длина_текста), который и обещает Aho-Corasick. Ни один из
+    // "посторонних" шаблонов ниже не имеет ни одного общего литерального
+    // фрагмента с проверяемым текстом — если бы перебор снова начал идти по
+    // всем шаблонам подряд, а не по `hits.keys()`, этот тест остался бы
+    // корректным (результат не поменялся бы), но перестал бы быть дешёвым —
+    // сам факт, что 20 000 шаблонов ни разу не проверяются `check_template`,
+    // здесь не проверяется явно (это деталь реализации, не наблюдаемое
+    // поведение), но реальный correctness-инвариант — "посторонние шаблоны
+    // не влияют на результат и не мешают найти совпадение" — тестируется.
+    #[test]
+    fn unrelated_templates_at_scale_do_not_prevent_or_corrupt_the_real_match() {
+        let mut templates: Vec<Template> = (0..20_000)
+            .map(|i| Template {
+                template_id: format!("unrelated-{i}"),
+                pattern: format!("совершенно другой текст номер {i} без общих слов"),
+                category: "OTHER".into(),
+            })
+            .collect();
+        templates.push(Template {
+            template_id: "tpl-real".into(),
+            pattern: "%w shartnoma bo'yicha %d{1,6} so'm to'lovni bugun amalga oshiring".into(),
+            category: "TRANSACTION".into(),
+        });
+
+        let ruleset = CompiledRuleset::new(templates);
+        let result = ruleset.find_match("Hello1238!@* shartnoma bo'yicha 1 2 3 4 5 6 so'm to'lovni bugun amalga oshiring");
+        assert_eq!(result.unwrap().template_id, "tpl-real", "20 000 не связанных шаблонов не должны мешать найти реальное совпадение");
+    }
+
+    #[test]
+    fn selectivity_warns_on_pattern_with_no_literal_content() {
+        let warnings = check_pattern_selectivity("%w");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("не содержит ни одного литерального фрагмента"));
+    }
+
+    #[test]
+    fn selectivity_warns_on_short_literal_fragment() {
+        // Литеральный фрагмент "ab" — ровно 2 символа, короче порога в 3.
+        let warnings = check_pattern_selectivity("%d{1,1}ab");
+        assert_eq!(warnings.len(), 1, "\"ab\" короче MIN_SELECTIVE_FRAGMENT_LEN");
+    }
+
+    #[test]
+    fn selectivity_counts_characters_not_bytes_for_multibyte_literals() {
+        // "ок" — кириллица, 2 символа, но 4 байта в UTF-8. Порог должен
+        // сработать по числу символов (2 < 3), а не байтов (4 не < 3) —
+        // иначе граница непредсказуемо смещалась бы в зависимости от алфавита.
+        let warnings = check_pattern_selectivity("%d{1,1}ок");
+        assert_eq!(warnings.len(), 1, "2 символа короче порога независимо от того, что это 4 байта");
+    }
+
+    #[test]
+    fn selectivity_no_warnings_for_real_template_pattern() {
+        let warnings = check_pattern_selectivity("%w shartnoma bo'yicha %d{1,6} so'm to'lovni bugun amalga oshiring");
+        assert!(warnings.is_empty(), "все литеральные фрагменты этого шаблона длиннее порога: {warnings:?}");
     }
 }

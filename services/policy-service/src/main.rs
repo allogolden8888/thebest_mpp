@@ -4,6 +4,7 @@ mod kafka_io;
 mod policy_engine;
 mod proto;
 mod redis_url;
+mod template_check;
 mod template_matching;
 
 use health::HealthState;
@@ -18,7 +19,7 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     let health_state = Arc::new(HealthState::default());
-    let health_router = health::router(health_state.clone());
+    let health_router = health::router(health_state.clone()).merge(template_check::router());
     let health_listener = tokio::net::TcpListener::bind("0.0.0.0:9090")
         .await
         .expect("не удалось забиндить health-порт 9090");
