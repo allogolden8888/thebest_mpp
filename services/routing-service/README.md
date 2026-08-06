@@ -2,7 +2,7 @@
 
 **Основание:** `development_plan.md` Фаза 2.1, четвёртый сервис "ходового скелета" (Главный агент) — сразу после Billing в графе пайплайна. Четвёртый сервис подряд, реально скомпилированный и протестированный (после Destination Resolution, Policy, Billing), Rust.
 
-**Статус:** `cargo build && cargo test`, **10/10 тестов проходят** на первом прогоне, компилирует настоящие `platform-contracts/*.proto`.
+**Статус:** `cargo build && cargo test`, **11/11 тестов проходят** (было 10 — +1 по итогам development_plan.md 5.5 ниже), компилирует настоящие `platform-contracts/*.proto`.
 
 ```bash
 export PKG_CONFIG_PATH="/opt/homebrew/opt/librdkafka/lib/pkgconfig:$PKG_CONFIG_PATH"
@@ -24,6 +24,14 @@ cargo test
 * **`paused_primary_fails_over_to_reserve`** — PAUSED primary → failover на `beeline_http_reserve`, **включая смену протокола** (SMPP → HTTP) — failover в этой архитектуре не ограничен одним протоколом, ровно то, что обсуждалось в чате про "primary/reserve могут быть разных протоколов".
 * **`degraded_primary_still_preferred_over_reserve`** — DEGRADED (не PAUSED) не исключает маршрут из здоровых, sконфигурированный primary остаётся предпочтительным — деградация не равна недоступности.
 * **`all_routes_paused_returns_no_healthy_route_error`** / **`unknown_operator_returns_error_not_panic`** — оба класса ошибок явные типы (`RoutingError`), не паника; `kafka_io`-тесты проверяют, что первое ретраябельно (`NO_HEALTHY_ROUTE` — маршруты могут восстановиться), а второе — нет (`UNKNOWN_OPERATOR` — конфигурационная проблема, повтор не поможет).
+
+## development_plan.md 5.5 — реальные connection-профили операторов, не один тестовый
+
+`Main.rs` до этого шага грузил **ровно один** `routing_table`-файл (`ROUTE_TABLE_PATH`, дефолт `beeline_uz`) — явно помеченная Фаза 2.2 заглушка "один тестовый оператор". Теперь мержит `ROUTE_TABLE_PATH` (основной, обязателен) + `ROUTE_TABLE_EXTRA_PATHS` (запятая-разделённый список, дефолт — `routing_table.ucell_uz.valid.json`/`routing_table.uzmobile_uz.valid.json`) в один `RouteTableSnapshot` — `from_tables` уже строил `HashMap<operator_id, RouteTable>`, ограничение было только в том, что `main.rs` грузил один файл, не в структуре снапшота. По умолчанию сервис теперь резолвит route для всех трёх реально задокументированных операторов Узбекистана (`migrations/README.md` "список заведомо неполный") — `snapshot_merged_from_multiple_files_resolves_each_operator_independently` в `routing.rs` доказывает, что три `operator_id` из трёх разных файлов не коллизируют в одном снапшоте.
+
+**Реальный найденный баг, не гипотетический.** `migrations/V011__number_range.sql` сеяла `routing.number_range.operator_id` БЕЗ суффикса (`beeline`/`ucell`/`uzmobile`), тогда как `routing_table.valid.json` (и остальные `config_schemas/examples/{operator,number_range}.valid.json`) использовали `_uz` (`beeline_uz`). `RouteTableSnapshot::for_operator` — точное совпадение по `HashMap`-ключу, не fuzzy — то есть **реальное сообщение с `resolved_operator_id='beeline'` от destination-resolution-service не находило бы маршрут здесь вообще**, для всех трёх операторов, при первом реальном прогоне пайплайна целиком. Исправлено `migrations/V023__number_range_operator_id_uz_suffix.sql` + синхронизированный `services/destination-resolution-service/data/number_range_snapshot.json` — нормализовано на `_uz` (5 мест уже так называли, 2 — нет). Полный разбор — `migrations/README.md` "V023".
+
+**Сознательно НЕ реализовано на этом шаге:** `operator-smpp-session-manager`/`operator-http-gateway` сами остаются **один процесс = один оператор** (`OPERATOR_ID` env var, дефолт `beeline_uz`) — реальный SMPP bind к ucell_uz/uzmobile_uz одновременно потребовал бы N подов с разным `OPERATOR_ID`/секретами, то есть правки `k8s/generate_manifests.py` (вне зоны правок в этой сессии, файл прямо запрещён к изменению). Этот шаг закрывает **модель данных** (routing-table + operator connection-profile для всех трёх операторов, реально провалидированы схемой, реально резолвятся) — не физическое N-инстансное развёртывание коннекторов, это следующий, отдельный шаг.
 
 ## Что НЕ реализовано на этом шаге (честно, не спрятано)
 

@@ -27,7 +27,7 @@ cargo test
 
 `src/resolver.rs`:
 * **9 задокументированных префиксов** (`migrations/V011__number_range.sql`) резолвятся в правильного оператора — `998901331835` (реально прогнан на PostgreSQL в этой сессии, `migrations/README.md`) и ещё 8, сконструированных внутри тех же верифицированных диапазонов.
-* **MNP override побеждает диапазон** — номер из диапазона beeline с override на ucell в снапшоте резолвится в ucell, контрольная проверка соседнего номера без override — в beeline.
+* **MNP override побеждает диапазон** — номер из диапазона beeline_uz с override на ucell_uz в снапшоте резолвится в ucell_uz, контрольная проверка соседнего номера без override — в beeline_uz.
 * **Непокрытый префикс возвращает `NotFound`**, не тихо резолвится в произвольного оператора (Perfectum/UMS — реальные операторы Узбекистана, не входящие в подтверждённый неполный список).
 * Нечисловой destination_address не паникует.
 
@@ -42,6 +42,8 @@ cargo test
 ## Данные
 
 `data/number_range_snapshot.json` — та же форма, что уже провалидирована в `config_schemas/number_range.schema.json`, наполнена реальными 9 диапазонами из `migrations/V011`. `portability_overrides["998901339999"]` — **синтетический пример для теста**, не реальные данные MNP (источник/периодичность MNP-синка по-прежнему открытый вопрос, см. `development_plan.md` 5.2).
+
+**`operator_id` нормализован на `_uz`-суффикс** (`beeline_uz`/`ucell_uz`/`uzmobile_uz`, было `beeline`/`ucell`/`uzmobile`) — найдено при работе над `development_plan.md` 5.5: `routing-service`'s `routing_table.valid.json` и оба connector-сервиса (`operator-smpp-session-manager`/`operator-http-gateway`) уже использовали `_uz`, `RouteTableSnapshot::for_operator` резолвит по точному совпадению — без этого исправления реальное сообщение отсюда не находило бы маршрут в Routing вообще. Разбор — `migrations/README.md` "V023", `migrations/V023__number_range_operator_id_uz_suffix.sql`.
 
 В проде снапшот строится из `config.changes` (`entity_type=number_range`/`number_portability_override`), не из локального файла — `SNAPSHOT_PATH` здесь заглушка на то же самое содержимое.
 

@@ -126,4 +126,23 @@ mod tests {
         let result = resolve_final_route(&snapshot, &control, "unknown_operator");
         assert_eq!(result, Err(RoutingError::UnknownOperator));
     }
+
+    /// development_plan.md 5.5 — `Main.rs` теперь мержит `ROUTE_TABLE_PATH` +
+    /// `ROUTE_TABLE_EXTRA_PATHS` в один снапшот (раньше — заглушка на ровно
+    /// одного оператора, Фаза 2.2). Этот тест воспроизводит тот же мердж
+    /// напрямую на трёх реальных routing_table-примерах и доказывает, что все
+    /// три резолвятся независимо из одного снапшота — не только "компилируется",
+    /// а реально проверено, что operator_id из разных файлов не коллизируют.
+    #[test]
+    fn snapshot_merged_from_multiple_files_resolves_each_operator_independently() {
+        let beeline: RouteTable = serde_json::from_str(include_str!("../../../config_schemas/examples/routing_table.valid.json")).unwrap();
+        let ucell: RouteTable = serde_json::from_str(include_str!("../../../config_schemas/examples/routing_table.ucell_uz.valid.json")).unwrap();
+        let uzmobile: RouteTable = serde_json::from_str(include_str!("../../../config_schemas/examples/routing_table.uzmobile_uz.valid.json")).unwrap();
+        let snapshot = RouteTableSnapshot::from_tables(vec![beeline, ucell, uzmobile]);
+        let control = ControlSnapshot::new();
+
+        assert_eq!(resolve_final_route(&snapshot, &control, "beeline_uz").unwrap().route_id, "beeline_smpp_primary");
+        assert_eq!(resolve_final_route(&snapshot, &control, "ucell_uz").unwrap().route_id, "ucell_smpp_primary");
+        assert_eq!(resolve_final_route(&snapshot, &control, "uzmobile_uz").unwrap().route_id, "uzmobile_smpp_primary");
+    }
 }

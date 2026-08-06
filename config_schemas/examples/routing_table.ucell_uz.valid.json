@@ -1,0 +1,10 @@
+{
+  "operator_id": "ucell_uz",
+  "version": 1,
+  "status": "active",
+  "active_route_id": "ucell_smpp_primary",
+  "routes": [
+    { "route_id": "ucell_smpp_primary", "protocol": "SMPP", "failover_priority": 1, "tps_limit": 400 },
+    { "route_id": "ucell_http_reserve", "protocol": "HTTP", "failover_priority": 2, "tps_limit": 150 }
+  ]
+}

@@ -1,16 +1,16 @@
 {
   "number_ranges": [
-    { "range_start": 998900000000, "range_end": 998909999999, "operator_id": "beeline" },
-    { "range_start": 998910000000, "range_end": 998919999999, "operator_id": "beeline" },
-    { "range_start": 998920000000, "range_end": 998929999999, "operator_id": "beeline" },
-    { "range_start": 998200000000, "range_end": 998209999999, "operator_id": "beeline" },
-    { "range_start": 998500000000, "range_end": 998509999999, "operator_id": "ucell" },
-    { "range_start": 998930000000, "range_end": 998939999999, "operator_id": "ucell" },
-    { "range_start": 998940000000, "range_end": 998949999999, "operator_id": "ucell" },
-    { "range_start": 998980000000, "range_end": 998989999999, "operator_id": "uzmobile" },
-    { "range_start": 998990000000, "range_end": 998999999999, "operator_id": "uzmobile" }
+    { "range_start": 998900000000, "range_end": 998909999999, "operator_id": "beeline_uz" },
+    { "range_start": 998910000000, "range_end": 998919999999, "operator_id": "beeline_uz" },
+    { "range_start": 998920000000, "range_end": 998929999999, "operator_id": "beeline_uz" },
+    { "range_start": 998200000000, "range_end": 998209999999, "operator_id": "beeline_uz" },
+    { "range_start": 998500000000, "range_end": 998509999999, "operator_id": "ucell_uz" },
+    { "range_start": 998930000000, "range_end": 998939999999, "operator_id": "ucell_uz" },
+    { "range_start": 998940000000, "range_end": 998949999999, "operator_id": "ucell_uz" },
+    { "range_start": 998980000000, "range_end": 998989999999, "operator_id": "uzmobile_uz" },
+    { "range_start": 998990000000, "range_end": 998999999999, "operator_id": "uzmobile_uz" }
   ],
   "portability_overrides": {
-    "998901339999": "ucell"
+    "998901339999": "ucell_uz"
   }
 }

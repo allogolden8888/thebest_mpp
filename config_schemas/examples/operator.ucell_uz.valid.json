@@ -1,0 +1,22 @@
+{
+  "operator_id": "ucell_uz",
+  "version": 1,
+  "status": "active",
+  "smpp_profile": {
+    "max_window": 40,
+    "tps_limit": 400,
+    "bind_count": 3,
+    "reconnect_policy": { "initial_backoff_ms": 500, "max_backoff_ms": 30000, "multiplier": 2.0 },
+    "enquire_link_interval_sec": 30,
+    "dlr_supported": true,
+    "dlr_reliable": true,
+    "query_sm_enabled": false
+  },
+  "http_profile": {
+    "endpoint_url": "https://api.ucell.uz/sms/v1/send",
+    "tps_limit": 150,
+    "webhook_auth": { "type": "HMAC_SIGNATURE", "credential_ref": "vault://operators/ucell_uz/webhook_hmac" },
+    "retry_policy": { "max_attempts": 3, "backoff_ms": 1000 },
+    "reconnect_policy": { "initial_backoff_ms": 500, "max_backoff_ms": 30000, "multiplier": 2.0 }
+  }
+}
