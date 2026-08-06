@@ -117,5 +117,23 @@ services:
       redis-runtime:
         condition: service_healthy
 
+  # Второй хоп ходового скелета — консьюмер incoming.messages, оркестрирует
+  # весь stage.* pipeline через ExecutionState в Redis (CAS).
+  pipeline-engine:
+    image: mpp/pipeline-engine:test
+    ports:
+      - "9092:9090"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_RUNTIME_HOST: redis-runtime
+      REDIS_RUNTIME_PORT: "6379"
+      REDIS_RUNTIME_PASSWORD: mpp_local_dev
+      RUST_LOG: info
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis-runtime:
+        condition: service_healthy
+
 volumes:
   postgres_data:
