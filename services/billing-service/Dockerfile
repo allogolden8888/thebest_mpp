@@ -24,6 +24,7 @@ RUN mvn -q -Dprotobuf.protocExecutable=/usr/bin/protoc package -DskipTests
 FROM eclipse-temurin:25-jre
 WORKDIR /app
 COPY --from=builder /build/target/billing-service-0.1.0.jar /app/billing-service.jar
+COPY --from=builder /config_schemas /config_schemas
 ENV BILLING_TARIFF_PATH=/config_schemas/examples/billing_tariff.valid.json
 EXPOSE 9090
 ENTRYPOINT ["java", "-jar", "/app/billing-service.jar"]

@@ -19,8 +19,6 @@ COPY services/policy-service .
 COPY platform-contracts /platform-contracts
 COPY config_schemas /config_schemas
 ENV PLATFORM_CONTRACTS_DIR=/platform-contracts
-ENV POLICY_RULESET_PATH=/config_schemas/examples/policy_ruleset.valid.json
-ENV POLICY_TEMPLATE_PATH=/config_schemas/examples/policy_template.valid.json
 RUN --mount=type=secret,id=extra_ca_cert,required=false \
     if [ -s /run/secrets/extra_ca_cert ]; then \
         cp /run/secrets/extra_ca_cert /usr/local/share/ca-certificates/extra-ca.crt && update-ca-certificates; \
@@ -33,5 +31,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /build/target/release/policy-service /app/
+COPY --from=builder /config_schemas /config_schemas
+ENV POLICY_RULESET_PATH=/config_schemas/examples/policy_ruleset.valid.json
+ENV POLICY_TEMPLATE_PATH=/config_schemas/examples/policy_template.valid.json
 EXPOSE 9090
 ENTRYPOINT ["/app/policy-service"]

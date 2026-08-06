@@ -29,6 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /build/target/release/pipeline-engine /app/
+COPY --from=builder /config_schemas /config_schemas
 ENV PIPELINE_DEFINITION_PATH=/config_schemas/examples/pipeline.valid.json
 EXPOSE 9090
 ENTRYPOINT ["/app/pipeline-engine"]

@@ -29,6 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /build/target/release/partner-rest-receiver /app/
+COPY --from=builder /config_schemas /config_schemas
 ENV PARTNER_CONFIG_PATH=/config_schemas/examples/partner.valid.json
 EXPOSE 9090 8080
 ENTRYPOINT ["/app/partner-rest-receiver"]

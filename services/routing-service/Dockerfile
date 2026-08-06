@@ -29,6 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /build/target/release/routing-service /app/
+COPY --from=builder /config_schemas /config_schemas
 ENV ROUTE_TABLE_PATH=/config_schemas/examples/routing_table.valid.json
 EXPOSE 9090
 ENTRYPOINT ["/app/routing-service"]
