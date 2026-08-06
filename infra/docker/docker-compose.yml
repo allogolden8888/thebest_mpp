@@ -183,5 +183,17 @@ services:
       redis-billing:
         condition: service_healthy
 
+  # Шестой хоп — резолвит финальный route (protocol/route_epoch/failover)
+  # через запечённый ROUTE_TABLE_PATH.
+  routing-service:
+    image: mpp/routing-service:test
+    ports:
+      - "9097:9090"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+
 volumes:
   postgres_data:
