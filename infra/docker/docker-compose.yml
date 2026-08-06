@@ -148,5 +148,18 @@ services:
       kafka:
         condition: service_healthy
 
+  # Четвёртый хоп — банворды/шаблоны/consent/time-of-day/spam-throttle
+  # (POLICY_RULESET_PATH/POLICY_TEMPLATE_PATH уже запечены в образ).
+  policy-service:
+    image: mpp/policy-service:test
+    ports:
+      - "9094:9090"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      RUST_LOG: info
+    depends_on:
+      kafka:
+        condition: service_healthy
+
 volumes:
   postgres_data:
