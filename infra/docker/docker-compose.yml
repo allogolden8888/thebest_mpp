@@ -166,5 +166,22 @@ services:
       redis-runtime:
         condition: service_healthy
 
+  # Пятый хоп — тарификация (BILLING_TARIFF_PATH уже запечён в образ),
+  # атомарный charge через apply_atomic_charge.lua на redis-billing.
+  billing-service:
+    image: mpp/billing-service:test
+    ports:
+      - "9096:9090"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_BILLING_HOST: redis-billing
+      REDIS_BILLING_PORT: "6379"
+      REDIS_BILLING_PASSWORD: mpp_local_dev
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis-billing:
+        condition: service_healthy
+
 volumes:
   postgres_data:
