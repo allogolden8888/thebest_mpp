@@ -135,5 +135,18 @@ services:
       redis-runtime:
         condition: service_healthy
 
+  # Третий хоп — резолвит msisdn в operator_id через запечённый в образ
+  # number_range_snapshot.json (13 префиксов, включая development_plan.md 5.1).
+  destination-resolution-service:
+    image: mpp/destination-resolution-service:test
+    ports:
+      - "9093:9090"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      RUST_LOG: info
+    depends_on:
+      kafka:
+        condition: service_healthy
+
 volumes:
   postgres_data:
