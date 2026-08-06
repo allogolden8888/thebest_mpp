@@ -13,18 +13,21 @@ BOOTSTRAP="localhost:9092"
 
 create_topic() {
   local name="$1" partitions="$2" cleanup="$3" retention="$4"
-  local extra_config="cleanup.policy=${cleanup}"
+  # kafka-topics.sh хочет отдельный --config на каждую пару key=val, не
+  # запятую внутри одного аргумента (реальная находка — comma-form падал с
+  # "all configs to be added must be in the format key=val").
+  local configs=(--config "cleanup.policy=${cleanup}")
   if [ -n "$retention" ]; then
-    extra_config="${extra_config},retention.ms=${retention}"
+    configs+=(--config "retention.ms=${retention}")
   fi
-  echo "=== ${name} (partitions=${partitions}, ${extra_config}) ==="
+  echo "=== ${name} (partitions=${partitions}, cleanup.policy=${cleanup}, retention.ms=${retention:-<default>}) ==="
   docker exec "$KAFKA_CONTAINER" /opt/kafka/bin/kafka-topics.sh \
     --bootstrap-server "$BOOTSTRAP" \
     --create --if-not-exists \
     --topic "$name" \
     --partitions "$partitions" \
     --replication-factor 1 \
-    --config "$extra_config"
+    "${configs[@]}"
 }
 
 create_topic incoming.messages 26 delete 21600000
