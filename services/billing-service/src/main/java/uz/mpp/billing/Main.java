@@ -4,6 +4,10 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
 
 import java.nio.file.Path;
+import java.time.Clock;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class Main {
@@ -35,6 +39,41 @@ public final class Main {
 
         String accountId = System.getenv().getOrDefault("BILLING_ACCOUNT_ID", "test-partner");
 
+        // development_plan.md 5.4 — recurring billing (alphaname/short number
+        // monthly fee + service SMS package), см. RecurringBillingJob javadoc.
+        // Опционально: без PARTNER_CONFIG_PATH или без recurring_charges в
+        // тарифе job просто ничего не планирует на каждом тике (RecurringCharges.plan
+        // возвращает пустой список), не падает.
+        String partnerConfigPath = System.getenv().getOrDefault("PARTNER_CONFIG_PATH",
+            "../../config_schemas/examples/partner.valid.json");
+        PartnerSendersResolver.PartnerSenders partnerSenders = PartnerSendersResolver.fromFile(Path.of(partnerConfigPath));
+        RecurringBillingJob recurringBillingJob = new RecurringBillingJob(
+            accountStore, accountId, partnerSenders.partnerId(), partnerSenders.senders(),
+            tariffResolver.alphanameMonthlyFee(), tariffResolver.servicePackage(), Clock.systemUTC());
+        // Идемпотентно (charge_id-дедуп) — ежедневный тик, не точный
+        // "1-го числа каждого месяца" cron; проще и надёжнее восстанавливается
+        // после простоя/рестарта пода (следующий тик подхватит пропущенные
+        // charge за текущий период).
+        ScheduledExecutorService recurringScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "billing-recurring-charges");
+            t.setDaemon(true);
+            return t;
+        });
+        // ScheduledExecutorService.scheduleAtFixedRate молча ПРЕКРАЩАЕТ все
+        // будущие запуски, если Runnable хоть раз бросит необработанное
+        // исключение — RecurringBillingJob.run() уже ловит RuntimeException
+        // на каждый charge отдельно, но эта внешняя catch(Throwable) — второй
+        // рубеж (Error, программная ошибка и т.п.), чтобы recurring billing
+        // не остановился навсегда молча из-за одного бага.
+        recurringScheduler.scheduleAtFixedRate(() -> {
+            try {
+                recurringBillingJob.run();
+            } catch (Throwable t) {
+                java.util.logging.Logger.getLogger(Main.class.getName())
+                    .log(java.util.logging.Level.SEVERE, t, () -> "recurring billing tick failed целиком, будет повторено через 24ч");
+            }
+        }, 0, 1, TimeUnit.DAYS);
+
         AtomicBoolean running = new AtomicBoolean(true);
         // KafkaConsumer не потокобезопасен — close() из другого потока, пока
         // основной поток внутри poll(), некорректен. wakeup() — единственный
@@ -45,6 +84,7 @@ public final class Main {
             running.set(false);
             consumer.wakeup();
             health.stop();
+            recurringScheduler.shutdownNow();
             accountStore.close();
         }, "billing-service-shutdown"));
 

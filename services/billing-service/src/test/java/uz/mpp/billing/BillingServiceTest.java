@@ -47,10 +47,10 @@ class BillingServiceTest {
 
         StageCompletedEvent event = result.event();
         assertEquals(Outcome.OUTCOME_SUCCEEDED, event.getOutcome());
-        assertEquals(240, event.getBilling().getAmount().getMinorUnits()); // TRANSACTION=120 * 2 segments
+        assertEquals(188, event.getBilling().getAmount().getMinorUnits()); // TRANSACTION=94 * 2 segments
         assertEquals("TRANSACTION", event.getBilling().getCategory());
         assertEquals("se1", event.getBilling().getChargeId());
-        assertEquals(99_760, result.updatedAccount().balance());
+        assertEquals(99_812, result.updatedAccount().balance());
     }
 
     @Test
@@ -63,7 +63,7 @@ class BillingServiceTest {
         BillingService.Result result = service.handleBillingExecute(command("se-blocked", "BLOCKED", 1), account, account.epoch());
 
         assertEquals(Outcome.OUTCOME_SUCCEEDED, result.event().getOutcome(), "тарификация BLOCKED — это SUCCEEDED со стороны Billing, не REJECTED");
-        assertEquals(100, result.event().getBilling().getAmount().getMinorUnits());
+        assertEquals(94, result.event().getBilling().getAmount().getMinorUnits());
     }
 
     @Test

@@ -1,8 +1,11 @@
 package uz.mpp.scheduler.standard;
 
 import com.sun.net.httpserver.HttpServer;
+import io.lettuce.core.RedisClient;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.StreamsConfig;
+import uz.mpp.scheduler.standard.core.RedisUrl;
+import uz.mpp.scheduler.standard.topology.HoldCommandProcessor;
 import uz.mpp.scheduler.standard.topology.StandardLaneTopology;
 
 import java.io.IOException;
@@ -27,7 +30,17 @@ public final class Main {
         props.put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, StreamsConfig.EXACTLY_ONCE_V2);
         props.put(StreamsConfig.STATE_DIR_CONFIG, env("STATE_DIR", "/tmp/scheduler-standard-lane-state"));
 
-        KafkaStreams streams = new KafkaStreams(StandardLaneTopology.build(), props);
+        // CODE_REVIEW.md HIGH #5 real fix: per-stage token bucket now lives
+        // in Redis (redis-runtime, already provisioned for this service in
+        // k8s/generate_manifests.py, previously unused), shared across
+        // every partition of every replica — see HoldCommandProcessor
+        // javadoc.
+        RedisClient redisClient = RedisClient.create(RedisUrl.buildRuntimeUrl());
+
+        KafkaStreams streams = new KafkaStreams(
+            StandardLaneTopology.build(new uz.mpp.scheduler.standard.core.ControlSnapshot(),
+                HoldCommandProcessor.redisRateLimiterFactory(redisClient)),
+            props);
         streams.setStateListener((newState, oldState) -> {
             if (newState == KafkaStreams.State.RUNNING) {
                 ready.set(true);
@@ -38,6 +51,7 @@ public final class Main {
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             streams.close();
+            redisClient.shutdown();
             healthServer.stop(0);
         }));
 

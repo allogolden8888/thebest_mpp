@@ -1,0 +1,24 @@
+{
+  "operator_id": "uzmobile_uz",
+  "version": 1,
+  "status": "active",
+  "smpp_profile": {
+    "max_window": 30,
+    "tps_limit": 300,
+    "bind_count": 2,
+    "reconnect_policy": { "initial_backoff_ms": 500, "max_backoff_ms": 30000, "multiplier": 2.0 },
+    "enquire_link_interval_sec": 30,
+    "dlr_supported": true,
+    "dlr_reliable": false,
+    "query_sm_enabled": true,
+    "query_sm_separate_bind": true,
+    "query_sm_rate_limit": 10
+  },
+  "http_profile": {
+    "endpoint_url": "https://api.uzmobile.uz/sms/v1/send",
+    "tps_limit": 100,
+    "webhook_auth": { "type": "BEARER_TOKEN", "credential_ref": "vault://operators/uzmobile_uz/webhook_bearer" },
+    "retry_policy": { "max_attempts": 3, "backoff_ms": 1000 },
+    "reconnect_policy": { "initial_backoff_ms": 500, "max_backoff_ms": 30000, "multiplier": 2.0 }
+  }
+}

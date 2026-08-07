@@ -1,0 +1,10 @@
+{
+  "operator_id": "uzmobile_uz",
+  "version": 1,
+  "status": "active",
+  "active_route_id": "uzmobile_smpp_primary",
+  "routes": [
+    { "route_id": "uzmobile_smpp_primary", "protocol": "SMPP", "failover_priority": 1, "tps_limit": 300 },
+    { "route_id": "uzmobile_http_reserve", "protocol": "HTTP", "failover_priority": 2, "tps_limit": 100 }
+  ]
+}

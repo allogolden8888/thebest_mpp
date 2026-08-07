@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://mpp/config_schemas/billing_tariff.schema.json",
   "title": "BILLING_TARIFF config payload (ConfigEntityType.CONFIG_ENTITY_TYPE_BILLING_TARIFF)",
-  "description": "Форма зафиксирована в data_infrastructure_spec.md §1.6a — переносится сюда как исполняемый контракт, не переопределяется. price_per_segment.BLOCKED обязателен (Billing тарифицирует отклонённые Policy сообщения; отсутствие записи не должно ронять стадию и не должно молча начислять 0).",
+  "description": "Форма зафиксирована в data_infrastructure_spec.md §1.6a — переносится сюда как исполняемый контракт, не переопределяется. price_per_segment.BLOCKED обязателен (Billing тарифицирует отклонённые Policy сообщения; отсутствие записи не должно ронять стадию и не должно молча начислять 0). recurring_charges — development_plan.md 5.4: два вида биллинга, которых нет в per-segment модели (не привязаны к stage_execution_id/сообщению) — см. services/billing-service/README.md 'Recurring charges' за полным разбором.",
   "type": "object",
   "additionalProperties": false,
   "required": ["currency", "price_per_segment", "default_category"],
@@ -17,6 +17,23 @@
         "UNTEMPLATED": { "type": "integer", "minimum": 0 }
       }
     },
-    "default_category": { "type": "string" }
+    "default_category": { "type": "string" },
+    "recurring_charges": {
+      "description": "Опционально — партнёры без alphaname/short-number регистрации или без пакета не платят ни то ни другое. alphaname_monthly_fee — плоская ежемесячная плата за КАЖДЫЙ активный sender партнёра (partner.schema.json senders[].status=active), НЕ per-segment. service_sms_package — ежемесячный пакет сервисных SMS: partner получает segments штук SERVICE-сегментов, включённых в price, автопродление раз в месяц (тот же charge_id-дедуп механизм, что и обычные charge — см. RecurringCharges.java).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "alphaname_monthly_fee": { "type": "integer", "minimum": 0 },
+        "service_sms_package": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["segments", "price"],
+          "properties": {
+            "segments": { "type": "integer", "exclusiveMinimum": 0 },
+            "price": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    }
   }
 }

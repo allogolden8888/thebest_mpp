@@ -1,6 +1,7 @@
 package uz.mpp.scheduler.standard.topology;
 
 import com.google.protobuf.InvalidProtocolBufferException;
+import io.lettuce.core.RedisClient;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.processor.PunctuationType;
 import org.apache.kafka.streams.processor.api.Processor;
@@ -13,6 +14,8 @@ import uz.mpp.platformcontracts.common.v1.StageExecuteCommand;
 import uz.mpp.platformcontracts.events.v1.SchedulerHoldCommand;
 import uz.mpp.scheduler.standard.core.ControlSnapshot;
 import uz.mpp.scheduler.standard.core.HeldItem;
+import uz.mpp.scheduler.standard.core.RateLimiter;
+import uz.mpp.scheduler.standard.core.RedisTokenBucket;
 import uz.mpp.scheduler.standard.core.ReleaseBatchSelector;
 import uz.mpp.scheduler.standard.core.TokenBucket;
 
@@ -22,6 +25,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 /**
  * on_hold_command + release_backlog_batch/apply_fair_scheduling/
@@ -33,52 +37,45 @@ public final class HoldCommandProcessor implements Processor<String, byte[], Str
     public static final String STORE_NAME = "standard-holds-store";
 
     /** Токены/сек и ёмкость per-stage bucket — не задокументированы отдельной
-     *  JSON Schema (см. README "Открытый вопрос"), рабочее предположение. */
-    private static final double BUCKET_CAPACITY_UNDIVIDED = 50;
-    private static final double BUCKET_REFILL_PER_SECOND_UNDIVIDED = 10;
+     *  JSON Schema (см. README "Открытый вопрос"), рабочее предположение.
+     *  Больше не делятся на число партиций — см. {@link #redisRateLimiterFactory}. */
+    public static final double BUCKET_CAPACITY = 50;
+    public static final double BUCKET_REFILL_PER_SECOND = 10;
 
     /**
-     * CODE_REVIEW.md High #5 (bucketsByStage — HoldCommandProcessor.java:41):
-     * bucketsByStage — обычное instance-поле, а Kafka Streams создаёт один
-     * HoldCommandProcessor НА КАЖДУЮ assigned-партицию scheduler.standard.commands
-     * — топик партиционирован по message_id (data_infrastructure_spec.md: "|
-     * scheduler.standard.commands | message_id | 8 | delete | ..."), НЕ по
-     * stage_name. Значит задуманный "один bucket на stage" лимит существует
-     * ОТДЕЛЬНО НА КАЖДУЮ ПАРТИЦИЮ — при 8 партициях на одном инстансе (один
-     * реплика, наихудший случай single-instance) эффективный aggregate rate до
-     * 8x выше документированного.
-     *
-     * <p>Полноценный фикс требует rate limiter, разделяемого МЕЖДУ партициями/
-     * репликами (например Redis CAS — тот же паттерн, что pipeline-engine уже
-     * использует для ExecutionState против реального Redis, см. `cas_transition_
-     * and_track_deadline` в pipeline-engine, или billing-service/partner-rest-
-     * receiver Redis-Lua паттерн для distributed rate limit) — архитектурно
-     * самая сложная находка в этом срезе, не сделан в рамках этого прохода (см.
-     * README "Проверено кодревью").
-     *
-     * <p>Как задокументированная ЧАСТИЧНАЯ митигация (не полный фикс):
-     * capacity и refill делятся на реальное число партиций топика (8, источник
-     * — data_infrastructure_spec.md, не догадка), чтобы в наихудшем случае
-     * (все 8 партиций на одном инстансе, один реплика) aggregate оставался
-     * близко к изначально задуманной per-stage ставке. Это НЕ чинит баг: при
-     * нескольких репликах (партиции размазаны по инстансам) или при частичном
-     * переназначении партиций во время rebalance aggregate rate всё ещё
-     * отклоняется (недо- или пере-лимитирует) — эта константа только сужает
-     * задокументированный выше наихудший single-instance случай, а не убирает
-     * саму проблему "лимит не разделяется между партициями/репликами".
+     * CODE_REVIEW.md HIGH #5 — РЕАЛЬНЫЙ ФИКС, не деление на число партиций.
+     * Kafka Streams создаёт один {@code HoldCommandProcessor} НА КАЖДУЮ
+     * assigned-партицию {@code scheduler.standard.commands} (топик
+     * партиционирован по {@code message_id}, не по {@code stage_name} —
+     * {@code data_infrastructure_spec.md}) — раньше {@code bucketsByStage}
+     * было обычным instance-полем, поэтому задуманный "один bucket на
+     * stage" лимит существовал отдельно на каждую партицию/реплику. Теперь
+     * состояние bucket'а живёт в Redis, ключ — только {@code stage_name}
+     * (не партиция, не инстанс) — {@link RedisTokenBucket}, см. его javadoc
+     * за полным разбором. {@code rateLimiterFactory} — точка расширения:
+     * прод использует {@link #redisRateLimiterFactory}, тесты — in-JVM
+     * {@link TokenBucket} без живого Redis.
      */
-    private static final int STANDARD_COMMANDS_PARTITION_COUNT = 8; // data_infrastructure_spec.md: scheduler.standard.commands
-    private static final double BUCKET_CAPACITY = BUCKET_CAPACITY_UNDIVIDED / STANDARD_COMMANDS_PARTITION_COUNT;
-    private static final double BUCKET_REFILL_PER_SECOND = BUCKET_REFILL_PER_SECOND_UNDIVIDED / STANDARD_COMMANDS_PARTITION_COUNT;
-
     private final ControlSnapshot snapshot;
-    private final Map<String, TokenBucket> bucketsByStage = new HashMap<>();
+    private final Function<String, RateLimiter> rateLimiterFactory;
+    private final Map<String, RateLimiter> rateLimitersByStage = new HashMap<>();
 
     private ProcessorContext<String, byte[]> context;
     private KeyValueStore<String, HeldItem> store;
 
-    public HoldCommandProcessor(ControlSnapshot snapshot) {
+    public HoldCommandProcessor(ControlSnapshot snapshot, Function<String, RateLimiter> rateLimiterFactory) {
         this.snapshot = snapshot;
+        this.rateLimiterFactory = rateLimiterFactory;
+    }
+
+    /** Прод-фабрика — один {@link RedisTokenBucket} на stage, общий на все партиции/реплики. */
+    public static Function<String, RateLimiter> redisRateLimiterFactory(RedisClient client) {
+        return stageName -> new RedisTokenBucket(client, stageName, BUCKET_CAPACITY, BUCKET_REFILL_PER_SECOND);
+    }
+
+    /** Тестовая фабрика — in-JVM bucket, без Redis (см. package doc {@link RateLimiter}). */
+    public static Function<String, RateLimiter> localRateLimiterFactory(long nowEpochMs) {
+        return stageName -> new TokenBucket(BUCKET_CAPACITY, BUCKET_REFILL_PER_SECOND, nowEpochMs);
     }
 
     @Override
@@ -153,10 +150,9 @@ public final class HoldCommandProcessor implements Processor<String, byte[], Str
                 continue;
             }
 
-            TokenBucket bucket = bucketsByStage.computeIfAbsent(stageName,
-                k -> new TokenBucket(BUCKET_CAPACITY, BUCKET_REFILL_PER_SECOND, timestampMs));
+            RateLimiter rateLimiter = rateLimitersByStage.computeIfAbsent(stageName, rateLimiterFactory);
 
-            List<HeldItem> batch = ReleaseBatchSelector.selectBatch(eligible, rampRate, bucket, timestampMs);
+            List<HeldItem> batch = ReleaseBatchSelector.selectBatch(eligible, rampRate, rateLimiter, timestampMs);
             for (HeldItem item : batch) {
                 // CODE_REVIEW.md High #3, defense-in-depth: delete BEFORE forward, не
                 // после — если publishRelease() всё же бросит (например будущий баг
@@ -214,7 +210,7 @@ public final class HoldCommandProcessor implements Processor<String, byte[], Str
         return byStage;
     }
 
-    public static ProcessorSupplier<String, byte[], String, byte[]> supplier(ControlSnapshot snapshot) {
-        return () -> new HoldCommandProcessor(snapshot);
+    public static ProcessorSupplier<String, byte[], String, byte[]> supplier(ControlSnapshot snapshot, Function<String, RateLimiter> rateLimiterFactory) {
+        return () -> new HoldCommandProcessor(snapshot, rateLimiterFactory);
     }
 }
