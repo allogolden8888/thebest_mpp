@@ -195,5 +195,24 @@ services:
       kafka:
         condition: service_healthy
 
+  # Седьмой хоп — реальный операторский submit через OperatorSubmitClient
+  # (gRPC), маршрут резолвится из GatewayRegistry (Runtime Redis). Пока в
+  # registry нет ни одной записи (operator-smpp-session-manager ещё не
+  # поднят) — fail-safe путь, публикует SUBMISSION_OUTCOME_UNKNOWN, не падает.
+  delivery-service:
+    image: mpp/delivery-service:test
+    ports:
+      - "9098:9090"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_RUNTIME_HOST: redis-runtime
+      REDIS_RUNTIME_PORT: "6379"
+      REDIS_RUNTIME_PASSWORD: mpp_local_dev
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis-runtime:
+        condition: service_healthy
+
 volumes:
   postgres_data:
