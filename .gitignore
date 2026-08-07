@@ -11,3 +11,6 @@ __pycache__/
 node_modules/
 .vscode/
 .idea/
+# Реальные хост/креды тестовых окружений (например SMSC-симулятора) —
+# только для docker-compose var-substitution, никогда не коммитятся.
+infra/docker/.env

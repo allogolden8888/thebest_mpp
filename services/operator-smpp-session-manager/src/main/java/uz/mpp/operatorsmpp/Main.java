@@ -36,7 +36,7 @@ public final class Main {
         String kafkaBrokers = env("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap.mpp.svc:9092");
         OperatorEventPublisher eventPublisher = new OperatorEventPublisher(kafkaBrokers);
 
-        String redisUri = "redis://" + env("REDIS_RUNTIME_HOST", "localhost") + ":" + env("REDIS_RUNTIME_PORT", "6379");
+        String redisUri = RedisUrl.buildRuntimeUrl();
         OperatorRouteRegistry routeRegistry = new OperatorRouteRegistry(redisUri, env("HOSTNAME", "operator-smpp-session-manager-0"), Duration.ofSeconds(30));
 
         OperatorSmppClient client = new OperatorSmppClient(dlrPdu -> {

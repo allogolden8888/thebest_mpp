@@ -214,5 +214,32 @@ services:
       redis-runtime:
         condition: service_healthy
 
+  # Восьмой хоп — реальный SMPP bind к тестовому SMSC (host/port/креды из
+  # infra/docker/.env, gitignored — см. .env.example). OPERATOR_ID/ROUTE_ID
+  # должны совпадать с тем, что routing-service резолвит из
+  # routing_table.valid.json (operator_id=beeline_uz, active route_id=
+  # beeline_smpp_primary) — иначе delivery-service не найдёт эту запись в
+  # GatewayRegistry (Runtime Redis) при поиске по (operator_id, route_id).
+  operator-smpp-session-manager:
+    image: mpp/operator-smpp-session-manager:test
+    ports:
+      - "9099:9090"
+      - "9000:9000"
+    environment:
+      OPERATOR_ID: beeline_uz
+      ROUTE_ID: beeline_smpp_primary
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_RUNTIME_HOST: redis-runtime
+      REDIS_RUNTIME_PORT: "6379"
+      OPERATOR_SMSC_HOST: ${OPERATOR_SMSC_HOST:-localhost}
+      OPERATOR_SMSC_PORT: ${OPERATOR_SMSC_PORT:-2775}
+      SMPP_SYSTEM_ID: ${SMPP_SYSTEM_ID:-mpp_esme}
+      SMPP_PASSWORD: ${SMPP_PASSWORD:-demo_password}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis-runtime:
+        condition: service_healthy
+
 volumes:
   postgres_data:
