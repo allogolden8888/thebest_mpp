@@ -22,16 +22,27 @@ CREATE INDEX number_range_lookup_idx ON routing.number_range (range_start, range
 -- Подтверждённые данные из чата (data_infrastructure_spec.md §1.9a) — неполный
 -- список, только префиксы, явно проверенные на реальных номерах.
 -- Формат MSISDN: 998 (код страны) + 2-значный префикс + 7 цифр абонента.
+--
+-- operator_id — РЕАЛЬНАЯ НАХОДКА (найдена только прогоном платформы целиком
+-- через локальный docker-compose, не статичным чтением): раньше здесь были
+-- голые 'beeline'/'ucell'/'uzmobile', расходящиеся с каноническим operator_id
+-- (config_schemas/examples/operator.valid.json, routing_table.valid.json —
+-- 'beeline_uz'/'ucell_uz'). destination-resolution-service со своим
+-- отдельным JSON-снапшотом (services/destination-resolution-service/data/
+-- number_range_snapshot.json, синхронизирован с этим файлом вручную)
+-- компилировался и тестировался нормально сам по себе — расхождение
+-- проявилось только когда реальное сообщение дошло до routing-service, и
+-- тот отклонил его с UNKNOWN_OPERATOR. Исправлено здесь и в JSON-снапшоте.
 INSERT INTO routing.number_range (range_start, range_end, operator_id, version, status) VALUES
-    (998900000000, 998909999999, 'beeline',  1, 'active'), -- префикс 90
-    (998910000000, 998919999999, 'beeline',  1, 'active'), -- префикс 91
-    (998920000000, 998929999999, 'beeline',  1, 'active'), -- префикс 92
-    (998200000000, 998209999999, 'beeline',  1, 'active'), -- префикс 20
-    (998500000000, 998509999999, 'ucell',    1, 'active'), -- префикс 50
-    (998930000000, 998939999999, 'ucell',    1, 'active'), -- префикс 93
-    (998940000000, 998949999999, 'ucell',    1, 'active'), -- префикс 94
-    (998980000000, 998989999999, 'uzmobile', 1, 'active'), -- префикс 98
-    (998990000000, 998999999999, 'uzmobile', 1, 'active'); -- префикс 99
+    (998900000000, 998909999999, 'beeline_uz',  1, 'active'), -- префикс 90
+    (998910000000, 998919999999, 'beeline_uz',  1, 'active'), -- префикс 91
+    (998920000000, 998929999999, 'beeline_uz',  1, 'active'), -- префикс 92
+    (998200000000, 998209999999, 'beeline_uz',  1, 'active'), -- префикс 20
+    (998500000000, 998509999999, 'ucell_uz',    1, 'active'), -- префикс 50
+    (998930000000, 998939999999, 'ucell_uz',    1, 'active'), -- префикс 93
+    (998940000000, 998949999999, 'ucell_uz',    1, 'active'), -- префикс 94
+    (998980000000, 998989999999, 'uzmobile_uz', 1, 'active'), -- префикс 98
+    (998990000000, 998999999999, 'uzmobile_uz', 1, 'active'); -- префикс 99
 
 -- Расширение 5.1 (development_plan.md) — общеизвестные префиксы тех же
 -- ТРЁХ операторов, для которых в платформе реально есть connection-профили
@@ -45,7 +56,7 @@ INSERT INTO routing.number_range (range_start, range_end, operator_id, version, 
 -- полевой проверки, что уже отмечена как открытый пункт в
 -- data_infrastructure_spec.md §1.9a.
 INSERT INTO routing.number_range (range_start, range_end, operator_id, version, status) VALUES
-    (998330000000, 998339999999, 'beeline',  1, 'active'), -- префикс 33
-    (998950000000, 998959999999, 'uzmobile', 1, 'active'), -- префикс 95
-    (998970000000, 998979999999, 'uzmobile', 1, 'active'), -- префикс 97
-    (998880000000, 998889999999, 'uzmobile', 1, 'active'); -- префикс 88
+    (998330000000, 998339999999, 'beeline_uz',  1, 'active'), -- префикс 33
+    (998950000000, 998959999999, 'uzmobile_uz', 1, 'active'), -- префикс 95
+    (998970000000, 998979999999, 'uzmobile_uz', 1, 'active'), -- префикс 97
+    (998880000000, 998889999999, 'uzmobile_uz', 1, 'active'); -- префикс 88

@@ -163,7 +163,7 @@ mod tests {
         let event = handle_command(&snapshot(), &command_with_destination("998901331835"));
         assert_eq!(event.outcome, Outcome::Succeeded as i32);
         match event.stage_result {
-            Some(StageResult::DestinationResolution(r)) => assert_eq!(r.resolved_operator_id, "beeline"),
+            Some(StageResult::DestinationResolution(r)) => assert_eq!(r.resolved_operator_id, "beeline_uz"),
             other => panic!("ожидали DestinationResolution, получили {other:?}"),
         }
     }

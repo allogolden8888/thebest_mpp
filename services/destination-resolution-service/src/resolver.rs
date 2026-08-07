@@ -57,8 +57,21 @@ impl Snapshot {
 mod tests {
     use super::*;
 
-    /// Ровно те же 9 диапазонов, что в migrations/V011__number_range.sql —
+    /// Ровно те же диапазоны, что в migrations/V011__number_range.sql —
     /// не переизобретены, скопированы как источник истины для теста.
+    ///
+    /// Реальная находка (только реальным прогоном платформы через
+    /// docker-compose, не статичным чтением): operator_id здесь раньше был
+    /// голым "beeline"/"ucell"/"uzmobile", а канонический operator_id
+    /// (config_schemas/examples/operator.valid.json, routing_table.valid.json)
+    /// — "beeline_uz"/"ucell_uz"/"uzmobile_uz". Расхождение не ловилось
+    /// никаким тестом (каждый сервис по отдельности выглядел корректным —
+    /// destination-resolution-service компилировался и тестировался против
+    /// своего же (неверного) снапшота) — проявилось только когда реальное
+    /// сообщение дошло до `routing-service` и тот отклонил его с
+    /// `UNKNOWN_OPERATOR`, потому что его `routing_table.valid.json` не
+    /// знает оператора "beeline". Исправлено здесь и в
+    /// `migrations/V011__number_range.sql`.
     fn real_snapshot() -> Snapshot {
         Snapshot::from_json_str(include_str!("../data/number_range_snapshot.json"))
             .expect("data/number_range_snapshot.json должен парситься")
@@ -73,15 +86,15 @@ mod tests {
     fn resolves_all_nine_documented_prefixes() {
         let snapshot = real_snapshot();
         let cases = [
-            ("998901331835", "beeline"),  // префикс 90 — реально прогнан на PostgreSQL
-            ("998911234567", "beeline"),  // префикс 91
-            ("998921234567", "beeline"),  // префикс 92
-            ("998201234567", "beeline"),  // префикс 20
-            ("998501234567", "ucell"),    // префикс 50
-            ("998931234567", "ucell"),    // префикс 93
-            ("998941234567", "ucell"),    // префикс 94
-            ("998981234567", "uzmobile"), // префикс 98
-            ("998991234567", "uzmobile"), // префикс 99
+            ("998901331835", "beeline_uz"),  // префикс 90 — реально прогнан на PostgreSQL
+            ("998911234567", "beeline_uz"),  // префикс 91
+            ("998921234567", "beeline_uz"),  // префикс 92
+            ("998201234567", "beeline_uz"),  // префикс 20
+            ("998501234567", "ucell_uz"),    // префикс 50
+            ("998931234567", "ucell_uz"),    // префикс 93
+            ("998941234567", "ucell_uz"),    // префикс 94
+            ("998981234567", "uzmobile_uz"), // префикс 98
+            ("998991234567", "uzmobile_uz"), // префикс 99
         ];
         for (msisdn, expected_operator) in cases {
             assert_eq!(
@@ -95,17 +108,17 @@ mod tests {
     #[test]
     fn mnp_override_wins_over_range() {
         let snapshot = real_snapshot();
-        // 998901339999 лежит в диапазоне beeline (префикс 90), но снапшот
-        // несёт portability override на ucell — override обязан победить.
+        // 998901339999 лежит в диапазоне beeline_uz (префикс 90), но снапшот
+        // несёт portability override на ucell_uz — override обязан победить.
         let ported_msisdn = "998901339999";
         assert_eq!(
             snapshot.resolve_operator_by_range(ported_msisdn),
-            ResolveResult::Resolved("ucell".to_string())
+            ResolveResult::Resolved("ucell_uz".to_string())
         );
-        // Без override тот же диапазон резолвился бы в beeline — контрольная проверка.
+        // Без override тот же диапазон резолвился бы в beeline_uz — контрольная проверка.
         assert_eq!(
             snapshot.resolve_operator_by_range("998901339998"),
-            ResolveResult::Resolved("beeline".to_string())
+            ResolveResult::Resolved("beeline_uz".to_string())
         );
     }
 
