@@ -101,7 +101,14 @@ services:
       # находка: kafka стабильно показывал 100-200% CPU в docker stats под
       # нагрузкой даже после того, как producer-side backpressure (QueueFull)
       # и redis-runtime CPU были устранены. Подняли явно, не гадая на дефолте.
-      KAFKA_NUM_NETWORK_THREADS: "6"
+      # 2026-08-13 1500 TPS push (12-core/15GB host): при 300 TPS Kafka
+      # держалась на ~5 ядрах из 12 доступных Docker'у — не cgroup-лимит
+      # (контейнер ничем не ограничен), а внутренние thread pool'ы брокера.
+      # Подняли network+IO threads и heap, чтобы КПД реально мог использовать
+      # оставшийся запас ядер на более высокой нагрузке.
+      KAFKA_NUM_NETWORK_THREADS: "12"
+      KAFKA_NUM_IO_THREADS: "16"
+      KAFKA_BACKGROUND_THREADS: "16"
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       CLUSTER_ID: "mpp-local-dev-cluster-1"
@@ -111,7 +118,10 @@ services:
       # это было диагностировано как реальная причина многосекундной
       # задержки НА КАЖДОМ хопе пайплайна равномерно (не конкретно
       # ROUTING->DELIVERY) — см. dynamic-seeking-russell.md investigation.
-      KAFKA_HEAP_OPTS: "-Xmx2G -Xms2G"
+      # Поднято 2G->4G для 1500 TPS push — 15GB Docker VM легко несёт это
+      # вместе с остальными сервисами (пиковый суммарный RSS всех контейнеров
+      # на 300 TPS был <3GB).
+      KAFKA_HEAP_OPTS: "-Xmx4G -Xms4G"
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
       interval: 10s
@@ -157,6 +167,15 @@ services:
       REDIS_RUNTIME_PASSWORD: mpp_local_dev
       PARTNER_CRED_VAULT___PARTNERS_CLICK_UZ_MAIN_API_KEY: local-dev-test-key
       RUST_LOG: info
+    # 2026-08-13 1500 TPS push — partner.valid.json запечён в образ на
+    # build-time (COPY, PARTNER_CONFIG_PATH), rate_limit_tps=300 там
+    # блокировал бы всё сверх этого на уровне самого партнёра ещё до
+    # пайплайна. Volume mount поверх запечённого пути — тот же паттерн,
+    # что уже использует partner-notification-service ниже — подхватывает
+    # правку rate_limit_tps в config_schemas/examples/partner.valid.json
+    # без пересборки образа.
+    volumes:
+      - ../../config_schemas/examples/partner.valid.json:/config_schemas/examples/partner.valid.json:ro
     depends_on:
       kafka:
         condition: service_healthy
@@ -175,6 +194,23 @@ services:
       REDIS_RUNTIME_PORT: "6379"
       REDIS_RUNTIME_PASSWORD: mpp_local_dev
       RUST_LOG: info
+      # 2026-08-13 1500 TPS push, второй раунд — strace под нагрузкой (см.
+      # msgctx.rs fix) показал pipeline-engine в основном в futex/poll (в
+      # ожидании), не в вычислениях; redis-runtime отдельно измерен на ~5%
+      # CPU при ~6000 ops/s (не бутылочное горлышко). Совокупный CPU по всем
+      # контейнерам не превышал ~560% из 1200% доступных — узкое место не
+      # железо, а искусственный потолок конкурентности задачного пула (было
+      # 256 по умолчанию для run_incoming_loop/run_completed_loop, второй
+      # видит в 5 раз больше трафика, см. kafka_io.rs). Подняли 4x.
+      # 2026-08-13 1500 TPS push, четвёртый раунд — калибровка вниз после
+      # находок про lock-контеншен/thread-per-request: 1024 давало отличный
+      # throughput, но часть этого CPU уходила в scheduling/semaphore-overhead
+      # токио, а не в полезную работу (Little's Law на p50~135ms/1500 TPS
+      # требует ~300 в потолке con concurrency, не 1024). Проверяем, держит
+      # ли меньшее число ту же пропускную способность дешевле.
+      PIPELINE_INCOMING_CONCURRENCY: "384"
+      PIPELINE_COMPLETED_CONCURRENCY: "384"
+      PIPELINE_RETRY_TRIGGER_CONCURRENCY: "128"
     depends_on:
       kafka:
         condition: service_healthy
@@ -190,6 +226,8 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       RUST_LOG: info
+      # 2026-08-13 1500 TPS push, второй раунд — см. pipeline-engine выше.
+      DESTINATION_RESOLUTION_CONCURRENCY: "1024"
     depends_on:
       kafka:
         condition: service_healthy
@@ -206,6 +244,8 @@ services:
       REDIS_RUNTIME_PORT: "6379"
       REDIS_RUNTIME_PASSWORD: mpp_local_dev
       RUST_LOG: info
+      # 2026-08-13 1500 TPS push, второй раунд — см. pipeline-engine выше.
+      POLICY_CONCURRENCY: "1024"
     depends_on:
       kafka:
         condition: service_healthy
@@ -223,6 +263,16 @@ services:
       REDIS_BILLING_HOST: redis-billing
       REDIS_BILLING_PORT: "6379"
       REDIS_BILLING_PASSWORD: mpp_local_dev
+      # 2026-08-13 1500 TPS push — калибровка вниз с 512 (исходный, p95=336ms,
+      # ~552 потока). 200 и 350 оба дали p95~1800-1900ms — резкий порог, не
+      # плавная деградация (Little's Law: запас на всплески трафика, не сама
+      # по себе величина concurrency). 450 — по другую сторону порога:
+      # p50=112ms/p95=254ms (не хуже 512), ~490 потоков вместо 552.
+      BILLING_CONCURRENCY: "450"
+    # 2026-08-13 1500 TPS push — Dockerfile's ENTRYPOINT hardcodes
+    # -Xms512m -Xmx1g; overridden here (no rebuild needed) since billing-service
+    # was already the heaviest JVM footprint (~500MB RSS) at 300 TPS.
+    entrypoint: ["java", "-Xms1g", "-Xmx3g", "-XX:StartFlightRecording=filename=/tmp/billing.jfr,duration=150s,dumponexit=true,settings=profile", "-jar", "/app/billing-service.jar"]
     # Реальная находка (нагрузочный прогон): Main.java теперь принудительно
     # System.exit(1) на фатальной ошибке consumer-цикла (иначе HealthServer
     # держит процесс "живым" не-daemon потоком с /healthz=200 у мёртвого
@@ -243,6 +293,8 @@ services:
       - "9097:9090"
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      # 2026-08-13 1500 TPS push, второй раунд — см. pipeline-engine выше.
+      ROUTING_CONCURRENCY: "1024"
     depends_on:
       kafka:
         condition: service_healthy
@@ -260,6 +312,8 @@ services:
       REDIS_RUNTIME_HOST: redis-runtime
       REDIS_RUNTIME_PORT: "6379"
       REDIS_RUNTIME_PASSWORD: mpp_local_dev
+      # 2026-08-13 1500 TPS push — та же калибровка, что у billing-service выше.
+      DELIVERY_CONCURRENCY: "450"
     depends_on:
       kafka:
         condition: service_healthy
@@ -292,6 +346,24 @@ services:
       REDIS_RUNTIME_PASSWORD: mpp_local_dev
       OPERATOR_SMSC_HOST: ${OPERATOR_SMSC_HOST:-localhost}
       OPERATOR_SMSC_PORT: ${OPERATOR_SMSC_PORT:-2775}
+      # 2026-08-13 1500 TPS push, третий раунд — TPS_LIMIT=500 (дефолт) смоделирован
+      # как реалистичный потолок КОНТРАКТА с реальным оператором (намеренное
+      # бизнес-ограничение, не узкое место инфраструктуры) — под нашей нагрузкой
+      # 26.7% DELIVERY-стадии стабильно получали TPS_THROTTLED. Здесь на другом
+      # конце — свой же одноразовый smsc-simulator, не настоящий оператор с
+      # контрактным TPS, так что для этого конкретного стресс-теста поднимаем
+      # оба лимита; в реальном деплое TPS_LIMIT должен отражать реальный
+      # контракт оператора, не сниматься бездумно.
+      TPS_LIMIT: "3000"
+      # 2026-08-13 1500 TPS push, седьмой раунд — тот же паттерн, что у
+      # billing/delivery: Executors.newFixedThreadPool(maxConcurrentSubmits, ...)
+      # в Main.java — 500 реальных ОС-потоков JVM (видно в docker stats как
+      # ~546 PID), не откалиброван при исходной находке (только TPS_LIMIT
+      # был поднят). Пробуем 300 — путь к оператору в этом стенде короче
+      # (один локальный gRPC + один локальный smsc-simulator, не 2 внешних
+      # Redis round-trip'а, как у billing), латентность на submit должна
+      # быть заметно ниже, чем то, что требовало 450 у billing/delivery.
+      MAX_CONCURRENT_SUBMITS: "300"
       SMPP_SYSTEM_ID: ${SMPP_SYSTEM_ID:-mpp_esme}
       SMPP_PASSWORD: ${SMPP_PASSWORD:-demo_password}
     depends_on:

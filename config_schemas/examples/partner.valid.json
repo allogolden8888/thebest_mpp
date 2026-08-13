@@ -12,7 +12,7 @@
       "display_name": "Click main billing notifications",
       "auth": { "type": "API_KEY", "credential_ref": "vault://partners/click_uz/main/api_key" },
       "ip_allowlist": ["185.65.212.0/24"],
-      "rate_limit_tps": 300,
+      "rate_limit_tps": 2000,
       "allowed_channels": ["SMS"],
       "notification_callback_url": "https://partner-webhook.invalid/mpp/notifications"
     },

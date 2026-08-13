@@ -53,6 +53,19 @@ async fn main() {
     let producer = kafka_io::build_producer(&bootstrap_servers);
 
     let redis_runtime_url = redis_url::build_redis_runtime_url();
+    // Один `MultiplexedConnection` на весь процесс — клонируется (дёшево, тот
+    // же TCP-хендл) на каждый запрос вместо нового `Client::open` +
+    // `get_multiplexed_async_connection` на каждый вызов. Реальная находка
+    // нагрузочного прогона (1500 TPS push, `strace -c` под нагрузкой): старый
+    // паттерн тратил ~90% времени сервиса в syscall'ах socket/connect/close —
+    // TCP-хендшейк + Redis AUTH на КАЖДЫЙ HTTP-запрос, не в бизнес-логике.
+    // Как и `producer` ниже (создан один раз, тот же общий паттерн) — до
+    // этого фикса Redis был единственным исключением из него в этом файле.
+    let redis_conn = redis::Client::open(redis_runtime_url.as_str())
+        .expect("невалидный REDIS_RUNTIME_URL")
+        .get_multiplexed_async_connection()
+        .await
+        .expect("не удалось подключиться к Runtime Redis при старте");
 
     let rate_limiter = RateLimiter::default();
 
@@ -62,7 +75,7 @@ async fn main() {
         admission_gate: Box::new(AlwaysAdmit),
         rate_limiter,
         producer,
-        redis_runtime_url: redis_runtime_url.clone(),
+        redis_conn,
         concurrency_limit: Arc::new(tokio::sync::Semaphore::new(http::MAX_CONCURRENT_REQUESTS)),
     });
 
@@ -70,12 +83,11 @@ async fn main() {
     // сообщение (service_internal_methods.md §1.1).
     {
         let state = state.clone();
-        let redis_runtime_url = redis_runtime_url.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
                 interval.tick().await;
-                redis_sync::sync_rate_limit_counters(&redis_runtime_url, &state.rate_limiter).await;
+                redis_sync::sync_rate_limit_counters(state.redis_conn.clone(), &state.rate_limiter).await;
             }
         });
     }

@@ -35,9 +35,38 @@ use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::message::Message as _;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::{Offset, TopicPartitionList};
-use std::sync::{Arc, Mutex};
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::sync::{OnceCell, Semaphore};
+
+/// Реальная находка (нагрузочный прогон 1500 TPS, второй раунд диагностики):
+/// весь `RuntimeState` (anti-spam счётчик, блэклисты) раньше жил за ОДНИМ
+/// `Mutex`, разделяемым между всеми `POLICY_CONCURRENCY` конкурентными
+/// задачами — под 1024-way конкуренцией даже микросекундная критическая
+/// секция превращается в очередь + futex-контеншен на каждый lock/unlock
+/// (тот же класс находки, что и `futex`-доминированный `strace` у
+/// pipeline-engine). Шардирование по `hash(msisdn) % N` — все проверки для
+/// ОДНОГО msisdn (блэклисты, anti-spam) идут в один и тот же шард
+/// консистентно, разные msisdn обычно попадают в разные шарды и не мешают
+/// друг другу. `N` — env var, тот же паттерн, что `*_CONCURRENCY`.
+pub struct ShardedRuntimeState {
+    shards: Vec<Mutex<RuntimeState>>,
+}
+
+impl ShardedRuntimeState {
+    pub fn new(shard_count: usize) -> Self {
+        let shard_count = shard_count.max(1);
+        Self { shards: (0..shard_count).map(|_| Mutex::new(RuntimeState::default())).collect() }
+    }
+
+    fn lock_for(&self, msisdn: &str) -> MutexGuard<'_, RuntimeState> {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        msisdn.hash(&mut hasher);
+        let idx = (hasher.finish() as usize) % self.shards.len();
+        self.shards[idx].lock().expect("runtime shard mutex poisoned")
+    }
+}
 
 fn concurrency_limit(env_var: &str, default: usize) -> usize {
     std::env::var(env_var).ok().and_then(|s| s.parse().ok()).filter(|n| *n > 0).unwrap_or(default)
@@ -213,16 +242,18 @@ fn build_event(command: &StageExecuteCommand, outcome: PolicyOutcome) -> StageCo
 }
 
 /// Обработка одной записи — вынесена из цикла для конкурентной
-/// spawned-задачи. `runtime` — `Mutex`, не `tokio::sync::Mutex`: критическая
-/// секция (anti-spam счётчик, блэклисты) чисто in-memory, без `.await`
-/// внутри, короткий std-lock безопасен и дешевле async-версии. Возвращает
+/// spawned-задачи. `runtime` — шардированный по `msisdn` пул `std::sync::Mutex`,
+/// не `tokio::sync::Mutex`: каждая критическая секция (anti-spam счётчик,
+/// блэклисты) чисто in-memory, без `.await` внутри, короткий std-lock дешевле
+/// async-версии — шардирование снимает контеншен ОДНОГО общего лока под
+/// высокой конкурентностью, не меняет саму природу лока. Возвращает
 /// `true`, если offset безопасно продвинуть.
 async fn process_one_record(
     payload: &[u8],
     producer: &FutureProducer,
     context_store: &dyn MessageContextStore,
     policy: &PolicyLiveState,
-    runtime: &Mutex<RuntimeState>,
+    runtime: &ShardedRuntimeState,
 ) -> bool {
     let command = match StageExecuteCommand::decode(payload) {
         Ok(c) => c,
@@ -242,7 +273,7 @@ async fn process_one_record(
     };
 
     let event = {
-        let mut runtime = runtime.lock().expect("runtime mutex poisoned");
+        let mut runtime = runtime.lock_for(&ctx.msisdn);
         handle_command(&command, &ctx, &policy.ruleset, &policy.templates, &policy.banwords, &mut runtime, now_tashkent())
     };
 
@@ -260,7 +291,6 @@ pub async fn run_loop(
     producer: FutureProducer,
     context_store: Arc<dyn MessageContextStore>,
     live_policy: Arc<ArcSwap<PolicyLiveState>>,
-    runtime: RuntimeState,
 ) {
     consumer.subscribe(&[INPUT_TOPIC]).expect("не удалось подписаться на stage.policy");
 
@@ -269,14 +299,13 @@ pub async fn run_loop(
     // была найдена и исправлена в pipeline-engine/destination-resolution-
     // service/billing-service. RuntimeState — единственное состояние
     // платформы этого среза, которое реально МУТИРУЕТСЯ на каждое
-    // сообщение (anti-spam счётчик, блэклисты) — обёрнуто в Mutex, не
-    // распараллелено само по себе (короткая in-memory критическая секция,
-    // не узкое место), конкурентность даёт выигрыш на Redis fetch + Kafka
-    // produce вокруг неё.
+    // сообщение (anti-spam счётчик, блэклисты) — шардировано по msisdn
+    // (см. `ShardedRuntimeState`), не одним общим локом на всех
+    // `POLICY_CONCURRENCY` конкурентных задач.
     let consumer = Arc::new(consumer);
     let semaphore = Arc::new(Semaphore::new(concurrency_limit("POLICY_CONCURRENCY", 256)));
     let tracker = Arc::new(OffsetTracker::new());
-    let runtime = Arc::new(Mutex::new(runtime));
+    let runtime = Arc::new(ShardedRuntimeState::new(concurrency_limit("POLICY_RUNTIME_STATE_SHARDS", 32)));
     let process_timeout = timeout_secs("POLICY_PROCESS_TIMEOUT_SECS", 30);
 
     loop {

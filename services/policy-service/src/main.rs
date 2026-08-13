@@ -13,7 +13,7 @@ use arc_swap::ArcSwap;
 use config_reload::ConfigOverlay;
 use health::HealthState;
 use kafka_io::{MessageContextStore, RedisMessageContextStore};
-use policy_engine::{PolicyRulesetConfig, RuntimeState};
+use policy_engine::PolicyRulesetConfig;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use template_matching::Template;
@@ -50,8 +50,6 @@ async fn main() {
         pattern: template_raw["pattern"].as_str().unwrap().to_string(),
         category: template_raw["category"].as_str().unwrap().to_string(),
     };
-    let runtime = RuntimeState::default();
-
     // Статические файлы — только bootstrap-нулевая точка; живое состояние
     // дальше ведёт config_reload.rs (config.changes, entity_type=POLICY_RULESET
     // и POLICY_TEMPLATE) — то, что раньше было объявленным, но никогда не
@@ -71,5 +69,5 @@ async fn main() {
     let redis_runtime_url = redis_url::build_redis_runtime_url();
     let context_store: Arc<dyn MessageContextStore> = Arc::new(RedisMessageContextStore::new(&redis_runtime_url));
 
-    kafka_io::run_loop(consumer, producer, context_store, live_policy, runtime).await;
+    kafka_io::run_loop(consumer, producer, context_store, live_policy).await;
 }

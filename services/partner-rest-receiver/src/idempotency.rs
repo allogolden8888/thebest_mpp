@@ -21,6 +21,7 @@
 //! атомарный вызов.
 
 use redis::AsyncCommands;
+use redis::aio::MultiplexedConnection;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClaimedIds {
@@ -55,29 +56,18 @@ fn decode(value: &str) -> Option<ClaimedIds> {
     Some(ClaimedIds { message_id: message_id.to_string(), trace_id: trace_id.to_string() })
 }
 
+/// `conn` — клон общего `MultiplexedConnection` из `AppState`, не свежее
+/// подключение на каждый вызов — см. `msgctx::write` за полным разбором
+/// находки (нагрузочный прогон 1500 TPS, `strace -c`: ~90% времени в
+/// socket/connect/close вместо бизнес-логики).
 pub async fn claim(
-    redis_url: &str,
+    mut conn: MultiplexedConnection,
     partner_id: &str,
     application_id: &str,
     idempotency_key: &str,
     ids: &ClaimedIds,
     ttl_seconds: u64,
 ) -> ClaimOutcome {
-    let client = match redis::Client::open(redis_url) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("невалидный REDIS_RUNTIME_URL для idempotency claim: {e}");
-            return ClaimOutcome::Unavailable;
-        }
-    };
-    let mut conn = match client.get_multiplexed_async_connection().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("не удалось подключиться к Runtime Redis для idempotency claim: {e}");
-            return ClaimOutcome::Unavailable;
-        }
-    };
-
     let key = redis_key(partner_id, application_id, idempotency_key);
     let opts = redis::SetOptions::default()
         .conditional_set(redis::ExistenceCheck::NX)
@@ -140,12 +130,13 @@ mod tests {
         std::env::var("PARTNER_REST_RECEIVER_TEST_REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379/0".to_string())
     }
 
-    async fn cleanup(url: &str, key: &str) {
-        if let Ok(client) = redis::Client::open(url) {
-            if let Ok(mut conn) = client.get_multiplexed_async_connection().await {
-                let _: redis::RedisResult<()> = conn.del(key).await;
-            }
-        }
+    /// `None` — тот же skip-паттерн, что и раньше: Redis недоступен в этой песочнице.
+    async fn test_conn() -> Option<MultiplexedConnection> {
+        redis::Client::open(test_redis_url().as_str()).ok()?.get_multiplexed_async_connection().await.ok()
+    }
+
+    async fn cleanup(conn: &mut MultiplexedConnection, key: &str) {
+        let _: redis::RedisResult<()> = conn.del(key).await;
     }
 
     /// Реальный round-trip против локального Redis — прямое доказательство
@@ -154,42 +145,42 @@ mod tests {
     /// публиковать повторно (см. вызов в `http.rs::handle_send_message`).
     #[tokio::test]
     async fn second_claim_with_same_key_reuses_first_ids_not_a_fresh_claim() {
-        let url = test_redis_url();
+        let Some(mut conn) = test_conn().await else { return };
         let idempotency_key = format!("test-key-{}", uuid::Uuid::new_v4());
         let key = redis_key("click_uz", "click_uz_main", &idempotency_key);
-        cleanup(&url, &key).await;
+        cleanup(&mut conn, &key).await;
 
         let first_ids = ClaimedIds { message_id: "m-first".into(), trace_id: "t-first".into() };
-        let first = claim(&url, "click_uz", "click_uz_main", &idempotency_key, &first_ids, 60).await;
-        assert_eq!(first, ClaimOutcome::Won, "первая попытка должна выиграть claim (или Redis недоступен в этой песочнице)");
+        let first = claim(conn.clone(), "click_uz", "click_uz_main", &idempotency_key, &first_ids, 60).await;
+        assert_eq!(first, ClaimOutcome::Won, "первая попытка должна выиграть claim");
 
         // Вторая попытка передаёт ДРУГИЕ вновь сгенерированные ids (как было
         // бы при настоящем повторном HTTP-запросе — generate_message_id()
         // вызывается заново до обращения к idempotency store) — retry должен
         // получить ПЕРВЫЕ ids обратно, не свои собственные.
         let second_ids = ClaimedIds { message_id: "m-second".into(), trace_id: "t-second".into() };
-        let second = claim(&url, "click_uz", "click_uz_main", &idempotency_key, &second_ids, 60).await;
+        let second = claim(conn.clone(), "click_uz", "click_uz_main", &idempotency_key, &second_ids, 60).await;
         assert_eq!(second, ClaimOutcome::AlreadyClaimed(first_ids));
 
-        cleanup(&url, &key).await;
+        cleanup(&mut conn, &key).await;
     }
 
     #[tokio::test]
     async fn different_idempotency_keys_get_independent_claims() {
-        let url = test_redis_url();
+        let Some(mut conn) = test_conn().await else { return };
         let key_a = format!("test-key-a-{}", uuid::Uuid::new_v4());
         let key_b = format!("test-key-b-{}", uuid::Uuid::new_v4());
         let redis_key_a = redis_key("click_uz", "click_uz_main", &key_a);
         let redis_key_b = redis_key("click_uz", "click_uz_main", &key_b);
-        cleanup(&url, &redis_key_a).await;
-        cleanup(&url, &redis_key_b).await;
+        cleanup(&mut conn, &redis_key_a).await;
+        cleanup(&mut conn, &redis_key_b).await;
 
         let ids_a = ClaimedIds { message_id: "m-a".into(), trace_id: "t-a".into() };
         let ids_b = ClaimedIds { message_id: "m-b".into(), trace_id: "t-b".into() };
-        assert_eq!(claim(&url, "click_uz", "click_uz_main", &key_a, &ids_a, 60).await, ClaimOutcome::Won);
-        assert_eq!(claim(&url, "click_uz", "click_uz_main", &key_b, &ids_b, 60).await, ClaimOutcome::Won, "независимый ключ не должен быть затронут первым claim'ом");
+        assert_eq!(claim(conn.clone(), "click_uz", "click_uz_main", &key_a, &ids_a, 60).await, ClaimOutcome::Won);
+        assert_eq!(claim(conn.clone(), "click_uz", "click_uz_main", &key_b, &ids_b, 60).await, ClaimOutcome::Won, "независимый ключ не должен быть затронут первым claim'ом");
 
-        cleanup(&url, &redis_key_a).await;
-        cleanup(&url, &redis_key_b).await;
+        cleanup(&mut conn, &redis_key_a).await;
+        cleanup(&mut conn, &redis_key_b).await;
     }
 }

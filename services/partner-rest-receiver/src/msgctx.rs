@@ -17,6 +17,7 @@
 //! стадий, которые не хотят таскать полный текст через каждый Kafka-топик.
 
 use redis::AsyncCommands;
+use redis::aio::MultiplexedConnection;
 
 pub struct MessageContext<'a> {
     pub message_id: &'a str,
@@ -36,22 +37,22 @@ fn redis_key(message_id: &str) -> String {
 /// блокирует ingress (уже опубликовали в Kafka к моменту вызова), но
 /// оставляет downstream-стадии без контекста для этого сообщения; логируется
 /// как ошибка, не паникует и не влияет на HTTP-ответ партнёру.
-pub async fn write(redis_url: &str, ctx: &MessageContext<'_>, ttl_seconds: u64) {
-    let client = match redis::Client::open(redis_url) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("невалидный REDIS_RUNTIME_URL для записи msgctx: {e}");
-            return;
-        }
-    };
-    let mut conn = match client.get_multiplexed_async_connection().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("не удалось подключиться к Runtime Redis для записи msgctx {}: {e}", ctx.message_id);
-            return;
-        }
-    };
-
+///
+/// `conn` — клон общего `MultiplexedConnection` из `AppState` (создан один
+/// раз при старте), не свежее подключение на каждый вызов. Реальная находка
+/// нагрузочного прогона (1500 TPS push): раньше здесь было `Client::open` +
+/// `get_multiplexed_async_connection` на КАЖДЫЙ запрос — `strace -c` под
+/// нагрузкой показал ~90% времени в syscall'ах на socket/connect/setsockopt/
+/// close (TCP-хендшейк + Redis AUTH на каждое сообщение), а не в бизнес-логике,
+/// что и объясняло 578-684% CPU этого сервиса при 1500 TPS. `Client`/новое
+/// соединение здесь были осознанно упрощены как "как у redis_sync.rs", но
+/// тот таск тикает раз в секунду, а этот путь — на полной скорости запросов.
+/// Компромисс: `MultiplexedConnection` не переподключается сам при обрыве
+/// (в отличие от `ConnectionManager`) — реcтарт Redis потребует рестарта
+/// этого сервиса; для локального walking skeleton (Redis не рестартует
+/// посреди прогона) это приемлемо, для прод-грейд устойчивости нужен
+/// `ConnectionManager` отдельным шагом.
+pub async fn write(mut conn: MultiplexedConnection, ctx: &MessageContext<'_>, ttl_seconds: u64) {
     let key = redis_key(ctx.message_id);
     let fields: [(&str, String); 7] = [
         ("body", ctx.body.to_string()),
@@ -100,6 +101,12 @@ mod tests {
         let key = redis_key(&message_id);
         cleanup(&url, &key).await;
 
+        let client = redis::Client::open(url.as_str()).expect("valid redis url");
+        let mut conn = match client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return, // Redis недоступен в этой песочнице — тот же паттерн skip, что и остальные live-тесты
+        };
+
         let ctx = MessageContext {
             message_id: &message_id,
             body: "тестовое сообщение",
@@ -109,13 +116,7 @@ mod tests {
             partner_id: "click_uz",
             segment_count: 1,
         };
-        write(&url, &ctx, 60).await;
-
-        let client = redis::Client::open(url.as_str()).expect("valid redis url");
-        let mut conn = match client.get_multiplexed_async_connection().await {
-            Ok(c) => c,
-            Err(_) => return, // Redis недоступен в этой песочнице — тот же паттерн skip, что и остальные live-тесты
-        };
+        write(conn.clone(), &ctx, 60).await;
         let fields: std::collections::HashMap<String, String> =
             redis::AsyncCommands::hgetall(&mut conn, &key).await.expect("hgetall should succeed after write");
 

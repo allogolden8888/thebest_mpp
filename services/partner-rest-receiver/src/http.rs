@@ -22,6 +22,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use rdkafka::producer::FutureProducer;
+use redis::aio::MultiplexedConnection;
 use serde::Serialize;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -34,7 +35,15 @@ pub struct AppState {
     pub admission_gate: Box<dyn AdmissionGate>,
     pub rate_limiter: RateLimiter,
     pub producer: FutureProducer,
-    pub redis_runtime_url: String,
+    /// Один `MultiplexedConnection`, созданный при старте, клонируется на
+    /// каждый запрос (клон дешёвый — общий хендл на одно и то же
+    /// TCP-соединение, не новое подключение). См. `msgctx::write` за разбором
+    /// находки (1500 TPS push, `strace -c`): раньше здесь была голая
+    /// `redis_runtime_url: String`, и `msgctx::write`/`idempotency::claim`
+    /// открывали свежее TCP-соединение + Redis AUTH на КАЖДЫЙ запрос —
+    /// ~90% времени в syscall'ах уходило на socket/connect/close, что и
+    /// объясняло 578-684% CPU этого сервиса при 1500 TPS.
+    pub redis_conn: MultiplexedConnection,
     /// MEDIUM находка кодревью: без этого деградированный/недоступный Kafka
     /// (до `REQUEST_TIMEOUT` держит каждый in-flight запрос) не имел ВООБЩЕ
     /// никакого ограничения на количество одновременно удерживаемых
@@ -225,7 +234,7 @@ async fn handle_send_message(
     if let Some(idempotency_key) = &validated.idempotency_key {
         let claimed = ClaimedIds { message_id: message_id.clone(), trace_id: trace_id.clone() };
         match idempotency::claim(
-            &state.redis_runtime_url,
+            state.redis_conn.clone(),
             &validated.partner_id,
             &validated.application_id,
             idempotency_key,
@@ -263,7 +272,7 @@ async fn handle_send_message(
         partner_id: &validated.partner_id,
         segment_count: segments.segment_count,
     };
-    msgctx::write(&state.redis_runtime_url, &ctx, DEFAULT_MESSAGE_TTL.as_secs()).await;
+    msgctx::write(state.redis_conn.clone(), &ctx, DEFAULT_MESSAGE_TTL.as_secs()).await;
 
     // MEDIUM находка кодревью: Kafka publish (5с producer-queue wait + 5с
     // delivery timeout, до ~10с суммарно) раньше awaited'ился без верхней
