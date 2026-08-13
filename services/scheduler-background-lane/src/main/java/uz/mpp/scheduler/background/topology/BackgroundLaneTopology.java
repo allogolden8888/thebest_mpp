@@ -13,6 +13,7 @@ import uz.mpp.scheduler.background.core.BackgroundTask;
  * <pre>
  * scheduler.background.commands --> [background-processor] --> operator.dlr.unresolved (dlr-sink)
  *                                          |                --> notification.retry (notification-sink)
+ *                                          |                --> pipeline.retry.triggers (stage-retry-sink)
  *                                     background-tasks-store
  *                                     (persistent, changelog scheduler.background.state.changelog)
  * </pre>
@@ -38,6 +39,8 @@ public final class BackgroundLaneTopology {
         topology.addSink(BackgroundCommandProcessor.DLR_SINK, Topics.OPERATOR_DLR_UNRESOLVED,
             Serdes.String().serializer(), Serdes.ByteArray().serializer(), "background-processor");
         topology.addSink(BackgroundCommandProcessor.NOTIFICATION_SINK, Topics.NOTIFICATION_RETRY,
+            Serdes.String().serializer(), Serdes.ByteArray().serializer(), "background-processor");
+        topology.addSink(BackgroundCommandProcessor.STAGE_RETRY_SINK, Topics.PIPELINE_RETRY_TRIGGERS,
             Serdes.String().serializer(), Serdes.ByteArray().serializer(), "background-processor");
 
         return topology;

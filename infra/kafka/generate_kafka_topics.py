@@ -84,6 +84,8 @@ TOPICS = [
     Topic("billing.ledger", TopicCategory.WORKLOAD, ["billing-ledger-writer"], 24 * HOUR),
     Topic("scheduler.standard.commands", TopicCategory.WORKLOAD, ["scheduler-standard-lane"], 24 * HOUR),
     Topic("scheduler.background.commands", TopicCategory.WORKLOAD, ["scheduler-background-lane"], 24 * HOUR),
+    Topic("pipeline.retry.triggers", TopicCategory.WORKLOAD, ["pipeline-engine"], 24 * HOUR,
+          note="dynamic-seeking-russell.md — Scheduler Background Lane перепубликует сюда due STAGE_RETRY задачи, Pipeline Engine потребляет"),
 
     Topic("config.changes", TopicCategory.CONTROL, note="compacted — текущее состояние конфига по ключу entity_id, не поток событий"),
     Topic("execution.control", TopicCategory.CONTROL, note="compacted — текущее состояние scope, не поток"),
@@ -96,6 +98,12 @@ TOPICS = [
     Topic("stage.routing.dlq", TopicCategory.DLQ, ["scheduler-background-lane"], 7 * 24 * HOUR),
     Topic("stage.delivery.dlq", TopicCategory.DLQ, ["scheduler-background-lane"], 7 * 24 * HOUR),
     Topic("operator.dlr.dlq", TopicCategory.DLQ, ["dlr-manager"], 7 * 24 * HOUR),
+    Topic("notification.archived", TopicCategory.DLQ, ["partner-notification-service"], 7 * 24 * HOUR,
+          note="реальная находка нагрузочного теста: раньше единственным пределом ретрая была NotificationTTL "
+               "(24ч) — недостижимый partner-webhook держал сообщения в вечном retry-цикле, засоряя "
+               "notification.retry устойчивой фоновой нагрузкой. MaxAttempts (kafkaio.Deps) архивирует сюда "
+               "вместо повторной публикации в notification.retry после исчерпания попыток/TTL — читателя пока "
+               "нет, топик для ручного разбора"),
 
     Topic("message-state.changelog", TopicCategory.CHANGELOG, changelog_of="stage.completed"),
     Topic("scheduler.standard.state.changelog", TopicCategory.CHANGELOG, changelog_of="scheduler.standard.commands"),

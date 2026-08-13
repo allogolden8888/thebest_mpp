@@ -19,11 +19,14 @@
 //! сделан в этом срезе ради объёма.
 
 use crate::banwords::BanwordChecker;
+use crate::config_reload::PolicyLiveState;
+use crate::offset_tracker::{OffsetTracker, PartitionKey};
 use crate::policy_engine::{self, MessageContext, PolicyOutcome, PolicyRulesetConfig, RuntimeState};
 use crate::proto::stage_completed_event::StageResult;
 use crate::proto::stage_execute_command::StageExtension;
 use crate::proto::{Outcome, PolicyResult, StageCompletedEvent, StageExecuteCommand};
 use crate::template_matching::CompiledRuleset;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use chrono::{FixedOffset, Utc};
 use prost::Message;
@@ -31,7 +34,42 @@ use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::message::Message as _;
 use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::{Offset, TopicPartitionList};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::{OnceCell, Semaphore};
+
+fn concurrency_limit(env_var: &str, default: usize) -> usize {
+    std::env::var(env_var).ok().and_then(|s| s.parse().ok()).filter(|n| *n > 0).unwrap_or(default)
+}
+
+/// Реальная находка (нагрузочный прогон, thread dump + `redis-cli`
+/// подтвердили): без этого потолка одна зависшая задача (например
+/// осиротевший Redis-future после разрыва/переподключения соединения)
+/// НИКОГДА не вызывает `mark_done` — `OffsetTracker` навсегда замирает на
+/// этом offset для этой партиции, ПОЛНОСТЬЮ МОЛЧА (ни одной строки в логах,
+/// несмотря на `tracing::error!` в каждом другом пути отказа), при этом
+/// сервис остаётся живым членом consumer group и `/readyz` продолжает
+/// отвечать 200 — единственный способ узнать снаружи был вручную сравнить
+/// lag по партициям. Таймаут не "чинит" сам зависший Redis-вызов, но
+/// гарантирует, что задача завершится, освободит семафор и ГРОМКО
+/// залогируется вместо бесконечного молчания — офсет всё равно не
+/// коммитится (та же at-least-once семантика), просто следующий
+/// ребаланс/рестарт увидит реальную причину в логах, а не тишину.
+fn timeout_secs(env_var: &str, default: u64) -> Duration {
+    Duration::from_secs(std::env::var(env_var).ok().and_then(|s| s.parse().ok()).filter(|n| *n > 0).unwrap_or(default))
+}
+
+fn commit_watermark(consumer: &StreamConsumer, key: &PartitionKey, next_offset: i64) {
+    let mut tpl = TopicPartitionList::new();
+    if let Err(e) = tpl.add_partition_offset(&key.topic, key.partition, Offset::Offset(next_offset)) {
+        tracing::error!("commit_watermark: add_partition_offset {}:{} -> {next_offset}: {e}", key.topic, key.partition);
+        return;
+    }
+    if let Err(e) = consumer.commit(&tpl, rdkafka::consumer::CommitMode::Async) {
+        tracing::error!("commit_watermark: commit {}:{} -> {next_offset}: {e}", key.topic, key.partition);
+    }
+}
 
 pub const INPUT_TOPIC: &str = "stage.policy";
 pub const OUTPUT_TOPIC: &str = "stage.completed";
@@ -45,18 +83,36 @@ pub trait MessageContextStore: Send + Sync {
 /// не проверена против живого Runtime Redis в этом окружении (см. README).
 pub struct RedisMessageContextStore {
     client: redis::Client,
+    // Реальная находка (нагрузочный прогон, тот же класс, что уже был
+    // исправлен в pipeline-engine/redis_cas.rs и billing-service/
+    // BillingAccountStore): fetch() раньше открывал НОВОЕ соединение на
+    // КАЖДЫЙ вызов через get_multiplexed_async_connection() — под
+    // конкурентной обработкой (см. run_loop) это стало бы TCP-хендшейком
+    // на каждое сообщение вместо мультиплексирования через одно соединение.
+    connection: OnceCell<redis::aio::MultiplexedConnection>,
 }
 
 impl RedisMessageContextStore {
     pub fn new(redis_url: &str) -> Self {
-        Self { client: redis::Client::open(redis_url).expect("невалидный REDIS_RUNTIME URL") }
+        Self {
+            client: redis::Client::open(redis_url).expect("невалидный REDIS_RUNTIME URL"),
+            connection: OnceCell::new(),
+        }
+    }
+
+    async fn connection(&self) -> Option<redis::aio::MultiplexedConnection> {
+        self.connection
+            .get_or_try_init(|| async { self.client.get_multiplexed_async_connection().await })
+            .await
+            .ok()
+            .cloned()
     }
 }
 
 #[async_trait]
 impl MessageContextStore for RedisMessageContextStore {
     async fn fetch(&self, message_id: &str) -> Option<MessageContext> {
-        let mut conn = self.client.get_multiplexed_async_connection().await.ok()?;
+        let mut conn = self.connection().await?;
         let key = format!("msgctx:{message_id}");
         let fields: std::collections::HashMap<String, String> =
             redis::AsyncCommands::hgetall(&mut conn, &key).await.ok()?;
@@ -77,10 +133,24 @@ pub fn build_consumer(bootstrap_servers: &str, group_id: &str) -> StreamConsumer
         .expect("не удалось создать Kafka consumer")
 }
 
+/// Реальная находка (то же расследование, что уже закрыло идентичный баг в
+/// `pipeline-engine/src/kafka_io.rs::build_producer`, см. диагностику там):
+/// без явного `queue.buffering.max.messages`/`queue.buffering.max.kbytes`
+/// librdkafka использует свои дефолты (существенно ниже, чем нужно под
+/// конкурентной нагрузкой этого сервиса — до `POLICY_CONCURRENCY` задач
+/// одновременно зовут `producer.send`), и `FutureProducer::send()`
+/// внутренне ретраит на `QueueFull` каждые ~100мс до `queue_timeout` —
+/// под нагрузкой это давало на pipeline-engine стабильные ~1700мс (≈17
+/// ретраев) НА КАЖДЫЙ produce, отдельно от message.timeout.ms. policy-service
+/// использует ровно тот же паттерн `FutureProducer` + пул конкурентных задач
+/// (см. `run_loop`), поэтому фикс применён здесь превентивно, а не только
+/// по результатам instrumentation ниже.
 pub fn build_producer(bootstrap_servers: &str) -> FutureProducer {
     ClientConfig::new()
         .set("bootstrap.servers", bootstrap_servers)
         .set("message.timeout.ms", "5000")
+        .set("queue.buffering.max.messages", "1000000")
+        .set("queue.buffering.max.kbytes", "2097151")
         .create()
         .expect("не удалось создать Kafka producer")
 }
@@ -142,52 +212,127 @@ fn build_event(command: &StageExecuteCommand, outcome: PolicyOutcome) -> StageCo
     }
 }
 
+/// Обработка одной записи — вынесена из цикла для конкурентной
+/// spawned-задачи. `runtime` — `Mutex`, не `tokio::sync::Mutex`: критическая
+/// секция (anti-spam счётчик, блэклисты) чисто in-memory, без `.await`
+/// внутри, короткий std-lock безопасен и дешевле async-версии. Возвращает
+/// `true`, если offset безопасно продвинуть.
+async fn process_one_record(
+    payload: &[u8],
+    producer: &FutureProducer,
+    context_store: &dyn MessageContextStore,
+    policy: &PolicyLiveState,
+    runtime: &Mutex<RuntimeState>,
+) -> bool {
+    let command = match StageExecuteCommand::decode(payload) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("не удалось декодировать StageExecuteCommand: {e}");
+            return false;
+        }
+    };
+    if !matches!(command.stage_extension, Some(StageExtension::Policy(_))) {
+        tracing::error!("stage.policy команда без PolicyExtension, пропущена");
+        return false;
+    }
+
+    let Some(ctx) = context_store.fetch(&command.message_id).await else {
+        tracing::error!("не удалось получить MessageContext для {}", command.message_id);
+        return false; // не коммитим — at-least-once, переобработается
+    };
+
+    let event = {
+        let mut runtime = runtime.lock().expect("runtime mutex poisoned");
+        handle_command(&command, &ctx, &policy.ruleset, &policy.templates, &policy.banwords, &mut runtime, now_tashkent())
+    };
+
+    let bytes = event.encode_to_vec();
+    let record = FutureRecord::to(OUTPUT_TOPIC).key(&event.message_id).payload(&bytes);
+    if let Err((e, _)) = producer.send(record, Duration::from_secs(5)).await {
+        tracing::error!("не удалось опубликовать StageCompletedEvent: {e}");
+        return false;
+    }
+    true
+}
+
 pub async fn run_loop(
     consumer: StreamConsumer,
     producer: FutureProducer,
-    context_store: Box<dyn MessageContextStore>,
-    ruleset: PolicyRulesetConfig,
-    templates: CompiledRuleset,
-    banwords: BanwordChecker,
-    mut runtime: RuntimeState,
+    context_store: Arc<dyn MessageContextStore>,
+    live_policy: Arc<ArcSwap<PolicyLiveState>>,
+    runtime: RuntimeState,
 ) {
     consumer.subscribe(&[INPUT_TOPIC]).expect("не удалось подписаться на stage.policy");
+
+    // Реальная находка (нагрузочный прогон): та же последовательная
+    // обработка (Redis fetch -> Kafka produce -> следующая запись), что уже
+    // была найдена и исправлена в pipeline-engine/destination-resolution-
+    // service/billing-service. RuntimeState — единственное состояние
+    // платформы этого среза, которое реально МУТИРУЕТСЯ на каждое
+    // сообщение (anti-spam счётчик, блэклисты) — обёрнуто в Mutex, не
+    // распараллелено само по себе (короткая in-memory критическая секция,
+    // не узкое место), конкурентность даёт выигрыш на Redis fetch + Kafka
+    // produce вокруг неё.
+    let consumer = Arc::new(consumer);
+    let semaphore = Arc::new(Semaphore::new(concurrency_limit("POLICY_CONCURRENCY", 256)));
+    let tracker = Arc::new(OffsetTracker::new());
+    let runtime = Arc::new(Mutex::new(runtime));
+    let process_timeout = timeout_secs("POLICY_PROCESS_TIMEOUT_SECS", 30);
 
     loop {
         match consumer.recv().await {
             Ok(msg) => {
+                let key = PartitionKey { topic: msg.topic().to_string(), partition: msg.partition() };
+                let offset = msg.offset();
+                tracker.observe_received(&key, offset);
+
                 let Some(payload) = msg.payload() else {
                     tracing::warn!("получено сообщение без payload, пропущено");
-                    continue;
-                };
-                let command = match StageExecuteCommand::decode(payload) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::error!("не удалось декодировать StageExecuteCommand: {e}");
-                        continue;
+                    if let Some(commit_to) = tracker.mark_done(&key, offset) {
+                        commit_watermark(&consumer, &key, commit_to);
                     }
-                };
-                if !matches!(command.stage_extension, Some(StageExtension::Policy(_))) {
-                    tracing::error!("stage.policy команда без PolicyExtension, пропущена");
                     continue;
-                }
-
-                let Some(ctx) = context_store.fetch(&command.message_id).await else {
-                    tracing::error!("не удалось получить MessageContext для {}", command.message_id);
-                    continue; // не коммитим — at-least-once, переобработается
                 };
+                let payload = payload.to_vec();
 
-                let event = handle_command(&command, &ctx, &ruleset, &templates, &banwords, &mut runtime, now_tashkent());
-                let bytes = event.encode_to_vec();
-                let record = FutureRecord::to(OUTPUT_TOPIC).key(&event.message_id).payload(&bytes);
-                if let Err((e, _)) = producer.send(record, Duration::from_secs(5)).await {
-                    tracing::error!("не удалось опубликовать StageCompletedEvent: {e}");
-                    continue;
-                }
+                let permit = semaphore.clone().acquire_owned().await.expect("semaphore не должен закрываться");
+                let consumer_task = consumer.clone();
+                let producer_task = producer.clone();
+                let context_store_task = context_store.clone();
+                // load_full() — один атомарный снапшот на сообщение: ruleset/
+                // templates/banwords обязаны быть согласованы друг с другом
+                // (banwords производный от ruleset.banwords) — раздельные
+                // ArcSwap на каждое поле рисковали бы увидеть новый ruleset
+                // с ещё не пересобранными banwords в узком окне между двумя
+                // независимыми store().
+                let policy = live_policy.load_full();
+                let runtime_task = runtime.clone();
+                let tracker_task = tracker.clone();
+                let key_task = key.clone();
 
-                if let Err(e) = consumer.commit_message(&msg, rdkafka::consumer::CommitMode::Async) {
-                    tracing::error!("не удалось закоммитить offset: {e}");
-                }
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    let done = match tokio::time::timeout(
+                        process_timeout,
+                        process_one_record(&payload, &producer_task, context_store_task.as_ref(), &policy, &runtime_task),
+                    )
+                    .await
+                    {
+                        Ok(done) => done,
+                        Err(_) => {
+                            tracing::error!(
+                                "process_one_record завис дольше {:?} (partition={} offset={offset}) — офсет НЕ коммитится, переобработается при следующем ребалансе/рестарте",
+                                process_timeout, key_task.partition
+                            );
+                            false
+                        }
+                    };
+                    if done {
+                        if let Some(commit_to) = tracker_task.mark_done(&key_task, offset) {
+                            commit_watermark(&consumer_task, &key_task, commit_to);
+                        }
+                    }
+                });
             }
             Err(e) => tracing::error!("ошибка Kafka consumer: {e}"),
         }

@@ -6,6 +6,7 @@ package kafkaio
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -24,9 +25,10 @@ import (
 )
 
 const (
-	TopicLifecycle           = "message.lifecycle"
-	TopicNotificationRetry   = "notification.retry"
-	TopicSchedulerBackground = "scheduler.background.commands"
+	TopicLifecycle            = "message.lifecycle"
+	TopicNotificationRetry    = "notification.retry"
+	TopicSchedulerBackground  = "scheduler.background.commands"
+	TopicNotificationArchived = "notification.archived"
 )
 
 type Consumer struct {
@@ -55,7 +57,13 @@ func (c *Consumer) CommitRecords(ctx context.Context, records ...*kgo.Record) er
 func (c *Consumer) PollOnce(ctx context.Context, onRecord func(*kgo.Record), errHandler func(error)) {
 	fetches := c.client.PollFetches(ctx)
 	fetches.EachError(func(_ string, _ int32, err error) {
-		if errHandler != nil {
+		// pollCtx в main.go несёт короткий per-cycle deadline — это
+		// сам механизм poll-интервала (нет новых записей за 5с), не
+		// реальный сбой Kafka. Раньше логировался наравне с настоящими
+		// fetch-ошибками — реальная находка (первый живой прогон против
+		// Kafka в этой песочнице): спамил "fetch error: context deadline
+		// exceeded" каждые 5с на пустом топике, маскируя настоящие ошибки.
+		if errHandler != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 			errHandler(fmt.Errorf("fetch error: %w", err))
 		}
 	})
@@ -89,6 +97,31 @@ func (p *Producer) PublishRetryTask(ctx context.Context, task *eventsv1.Schedule
 	return nil
 }
 
+// PublishArchived — терминальная остановка push-попыток (MaxAttempts исчерпан
+// либо TTL истёк): реальная находка нагрузочного тестирования — раньше
+// единственным пределом был 24-часовой NotificationTTL, так что при
+// недостижимом partner-webhook (или любом стабильно отказывающем endpoint)
+// КАЖДОЕ сообщение продолжало ретраиться c экспоненциальным backoff вплоть до
+// суток; при большом объёме сообщений за долгую сессию тестирования
+// накопленный parallel-retry трафик по notification.retry (18 партиций)
+// становился устойчивой фоновой нагрузкой на Kafka broker, конкурирующей с
+// реальным измеряемым трафиком. Вместо бесконечного ретрая до TTL —
+// публикуем событие в notification.archived и прекращаем попытки после
+// небольшого числа попыток (MaxAttempts), TTL остаётся как secondary/safety
+// предел на случай MaxAttempts=0 (отключён).
+func (p *Producer) PublishArchived(ctx context.Context, eventID string, event *eventsv1.MessageLifecycleEvent) error {
+	payload, err := proto.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("marshal MessageLifecycleEvent: %w", err)
+	}
+	record := &kgo.Record{Topic: TopicNotificationArchived, Key: []byte(eventID), Value: payload}
+	result := p.client.ProduceSync(ctx, record)
+	if err := result.FirstErr(); err != nil {
+		return fmt.Errorf("produce to %s: %w", TopicNotificationArchived, err)
+	}
+	return nil
+}
+
 type Deps struct {
 	Snapshot         config.Snapshot
 	MsgCtxStore      *msgctx.Store
@@ -100,6 +133,10 @@ type Deps struct {
 	NotificationTTL  time.Duration
 	RetryBackoffBase time.Duration
 	RetryBackoffMax  time.Duration
+	// MaxAttempts — сколько раз пытаться доставить (включая первую попытку
+	// из message.lifecycle) до архивации, вместо ретрая вплоть до
+	// NotificationTTL. 0 отключает предел (только TTL). См. PublishArchived.
+	MaxAttempts int32
 }
 
 // HandleRecord — вся оркестрация для одной Kafka-записи. Возвращает error
@@ -177,8 +214,16 @@ func HandleRecord(ctx context.Context, deps Deps, record *kgo.Record) error {
 	}
 
 	decision := schedule.EvaluateTTL(lifecycleEvent.GetOccurredAt().AsTime(), deps.NotificationTTL, time.Now())
-	if decision == schedule.DecisionExpire {
-		log.Printf("notification TTL истёк для message_id=%s, push прекращён без побочных эффектов", lifecycleEvent.GetMessageId())
+	maxAttemptsExceeded := deps.MaxAttempts > 0 && attempt >= deps.MaxAttempts
+	if decision == schedule.DecisionExpire || maxAttemptsExceeded {
+		reason := "ttl_expired"
+		if maxAttemptsExceeded {
+			reason = "max_attempts_exceeded"
+		}
+		log.Printf("push прекращён для message_id=%s (attempt=%d, reason=%s), архивируется вместо ретрая", lifecycleEvent.GetMessageId(), attempt, reason)
+		if err := deps.Producer.PublishArchived(ctx, eventID, lifecycleEvent); err != nil {
+			return err
+		}
 		if fromRetry {
 			return deps.PendingStore.Delete(ctx, eventID)
 		}

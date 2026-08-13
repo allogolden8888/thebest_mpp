@@ -34,7 +34,22 @@ fn main() {
     )
     .expect("не удалось скомпилировать platform-contracts/common/*.proto");
 
+    // config.changes (ConfigChangeEvent) — отдельный вызов, отдельный proto
+    // package (mpp.events.v1, не mpp.common.v1) и отдельный выходной файл
+    // OUT_DIR/mpp.events.v1.rs. extern_path говорит prost не генерировать
+    // заново ConfigEntityType (mpp.common.v1, уже скомпилирован выше в
+    // src/proto.rs), а ссылаться на уже существующий crate::proto::* —
+    // без этого сгенерированный код ждал бы несуществующий у нас вложенный
+    // модуль super::super::mpp::common::v1 (плоская, не nested, раскладка
+    // модулей в этом сервисе).
+    let mut events_config = prost_build::Config::new();
+    events_config.extern_path(".mpp.common.v1", "crate::proto");
+    events_config
+        .compile_protos(&[format!("{proto_root}/events/config_and_control.proto")], &includes)
+        .expect("не удалось скомпилировать platform-contracts/events/config_and_control.proto");
+
     println!("cargo:rerun-if-changed={proto_root}/common/enums.proto");
     println!("cargo:rerun-if-changed={proto_root}/common/types.proto");
     println!("cargo:rerun-if-changed={proto_root}/common/stage_contract.proto");
+    println!("cargo:rerun-if-changed={proto_root}/events/config_and_control.proto");
 }

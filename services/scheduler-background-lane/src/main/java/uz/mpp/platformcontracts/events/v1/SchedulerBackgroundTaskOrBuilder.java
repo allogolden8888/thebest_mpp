@@ -81,9 +81,9 @@ public interface SchedulerBackgroundTaskOrBuilder extends
 
   /**
    * <pre>
-   * Разрешённый список: "operator.dlr.unresolved" | "notification.retry" —
-   * не произвольная строка (HLD §14, защита от использования Scheduler
-   * как открытого редиректа внутри Kafka).
+   * Разрешённый список: "operator.dlr.unresolved" | "notification.retry" |
+   * "pipeline.retry.triggers" — не произвольная строка (HLD §14, защита от
+   * использования Scheduler как открытого редиректа внутри Kafka).
    * </pre>
    *
    * <code>string target_topic = 6;</code>
@@ -92,9 +92,9 @@ public interface SchedulerBackgroundTaskOrBuilder extends
   java.lang.String getTargetTopic();
   /**
    * <pre>
-   * Разрешённый список: "operator.dlr.unresolved" | "notification.retry" —
-   * не произвольная строка (HLD §14, защита от использования Scheduler
-   * как открытого редиректа внутри Kafka).
+   * Разрешённый список: "operator.dlr.unresolved" | "notification.retry" |
+   * "pipeline.retry.triggers" — не произвольная строка (HLD §14, защита от
+   * использования Scheduler как открытого редиректа внутри Kafka).
    * </pre>
    *
    * <code>string target_topic = 6;</code>
@@ -102,4 +102,30 @@ public interface SchedulerBackgroundTaskOrBuilder extends
    */
   com.google.protobuf.ByteString
       getTargetTopicBytes();
+
+  /**
+   * <pre>
+   * Только для BACKGROUND_TASK_TYPE_STAGE_RETRY — `source_event_id` там не
+   * подходит по смыслу (для остальных двух типов это event_id ЧУЖОГО
+   * события-источника, здесь же нужен именно message_id самого Pipeline
+   * Engine, чтобы найти ExecutionState в Runtime Redis при редиспатче).
+   * </pre>
+   *
+   * <code>string message_id = 7;</code>
+   * @return The messageId.
+   */
+  java.lang.String getMessageId();
+  /**
+   * <pre>
+   * Только для BACKGROUND_TASK_TYPE_STAGE_RETRY — `source_event_id` там не
+   * подходит по смыслу (для остальных двух типов это event_id ЧУЖОГО
+   * события-источника, здесь же нужен именно message_id самого Pipeline
+   * Engine, чтобы найти ExecutionState в Runtime Redis при редиспатче).
+   * </pre>
+   *
+   * <code>string message_id = 7;</code>
+   * @return The bytes for messageId.
+   */
+  com.google.protobuf.ByteString
+      getMessageIdBytes();
 }

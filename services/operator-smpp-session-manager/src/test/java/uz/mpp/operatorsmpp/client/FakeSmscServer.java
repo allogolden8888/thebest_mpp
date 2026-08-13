@@ -24,6 +24,7 @@ public final class FakeSmscServer {
     private EventLoopGroup workerGroup;
     private Channel serverChannel;
     private final AtomicReference<Channel> lastChannel = new AtomicReference<>();
+    private final AtomicReference<ShortMessagePdu> lastSubmitSm = new AtomicReference<>();
     private volatile boolean dropSubmitResponses = false;
 
     public int start() throws InterruptedException {
@@ -48,6 +49,7 @@ public final class FakeSmscServer {
                                     respond(ctx, CommandId.BIND_TRANSCEIVER_RESP, CommandStatus.ESME_ROK, seq,
                                         new BindTransceiverResp(((BindTransceiver) pdu.body()).systemId()));
                                 case CommandId.SUBMIT_SM -> {
+                                    lastSubmitSm.set((ShortMessagePdu) pdu.body());
                                     // dropSubmitResponses имитирует реальный failure mode SMSC
                                     // из CODE_REVIEW.md finding #2 — "тихая" потеря ответа
                                     // без обрыва TCP-канала, не только явный timeout по TPS.
@@ -76,6 +78,11 @@ public final class FakeSmscServer {
     /** CODE_REVIEW.md finding #2 (тест) — не отвечать на submit_sm, имитируя тихую потерю ответа SMSC. */
     public void setDropSubmitResponses(boolean drop) {
         this.dropSubmitResponses = drop;
+    }
+
+    /** Тело последнего принятого submit_sm — как реально пришло по TCP, не то, что клиент думал, что отправил. */
+    public ShortMessagePdu lastSubmitSm() {
+        return lastSubmitSm.get();
     }
 
     /**

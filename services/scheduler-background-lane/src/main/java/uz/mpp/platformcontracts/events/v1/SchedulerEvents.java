@@ -68,18 +68,19 @@ public final class SchedulerEvents extends com.google.protobuf.GeneratedFile {
       ".v1.ExecutionControlScope\022\020\n\010scope_id\030\004 " +
       "\001(\t\022,\n\nstage_name\030\005 \001(\0162\030.mpp.common.v1." +
       "StageName\022+\n\007held_at\030\006 \001(\0132\032.google.prot" +
-      "obuf.Timestamp\"\351\001\n\027SchedulerBackgroundTa" +
+      "obuf.Timestamp\"\375\001\n\027SchedulerBackgroundTa" +
       "sk\0224\n\ttask_type\030\001 \001(\0162!.mpp.common.v1.Ba" +
       "ckgroundTaskType\022\027\n\017source_event_id\030\002 \001(" +
       "\t\022\017\n\007attempt\030\003 \001(\005\022*\n\006due_at\030\004 \001(\0132\032.goo" +
       "gle.protobuf.Timestamp\022,\n\010deadline\030\005 \001(\013" +
       "2\032.google.protobuf.Timestamp\022\024\n\014target_t" +
-      "opic\030\006 \001(\t\"\206\001\n\025NotificationRetryTask\022\022\n\n" +
-      "message_id\030\001 \001(\t\022\032\n\022lifecycle_event_id\030\002" +
-      " \001(\t\022\017\n\007attempt\030\003 \001(\005\022,\n\010retry_at\030\004 \001(\0132" +
-      "\032.google.protobuf.TimestampBP\n\"uz.mpp.pl" +
-      "atformcontracts.events.v1P\001Z(mpp/platfor" +
-      "mcontracts/events/v1;eventsv1b\006proto3"
+      "opic\030\006 \001(\t\022\022\n\nmessage_id\030\007 \001(\t\"\206\001\n\025Notif" +
+      "icationRetryTask\022\022\n\nmessage_id\030\001 \001(\t\022\032\n\022" +
+      "lifecycle_event_id\030\002 \001(\t\022\017\n\007attempt\030\003 \001(" +
+      "\005\022,\n\010retry_at\030\004 \001(\0132\032.google.protobuf.Ti" +
+      "mestampBP\n\"uz.mpp.platformcontracts.even" +
+      "ts.v1P\001Z(mpp/platformcontracts/events/v1" +
+      ";eventsv1b\006proto3"
     };
     descriptor = com.google.protobuf.Descriptors.FileDescriptor
       .internalBuildGeneratedFileFrom(descriptorData,
@@ -104,7 +105,7 @@ public final class SchedulerEvents extends com.google.protobuf.GeneratedFile {
     internal_static_mpp_events_v1_SchedulerBackgroundTask_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessage.FieldAccessorTable(
         internal_static_mpp_events_v1_SchedulerBackgroundTask_descriptor,
-        new java.lang.String[] { "TaskType", "SourceEventId", "Attempt", "DueAt", "Deadline", "TargetTopic", });
+        new java.lang.String[] { "TaskType", "SourceEventId", "Attempt", "DueAt", "Deadline", "TargetTopic", "MessageId", });
     internal_static_mpp_events_v1_NotificationRetryTask_descriptor =
       getDescriptor().getMessageType(3);
     internal_static_mpp_events_v1_NotificationRetryTask_fieldAccessorTable = new

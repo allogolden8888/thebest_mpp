@@ -1,11 +1,14 @@
+mod config_reload;
 mod health;
 mod kafka_io;
+mod offset_tracker;
 mod proto;
 mod route_table;
 mod routing;
 
+use arc_swap::ArcSwap;
 use health::HealthState;
-use route_table::{RouteTable, RouteTableSnapshot};
+use route_table::{ConfigOverlay, RouteTable, RouteTableSnapshot};
 use routing::ControlSnapshot;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -54,6 +57,13 @@ async fn main() {
     );
     let snapshot = RouteTableSnapshot::from_tables(tables);
 
+    // Статический файл — только bootstrap-нулевая точка; живое состояние
+    // дальше ведёт config_reload.rs (config.changes, entity_type=ROUTING_TABLE)
+    // — то, что раньше было объявленным, но никогда не подключённым arc-swap
+    // (см. README "Что НЕ реализовано").
+    let overlay = Arc::new(ConfigOverlay::new(snapshot));
+    let live_snapshot = Arc::new(ArcSwap::from_pointee(overlay.build_snapshot()));
+
     // Execution Control snapshot (scope=OPERATOR_ROUTE) — в проде проецируется
     // из execution.control (compacted) в локальный in-process snapshot; здесь
     // пустой (все маршруты ACTIVE по fail-open) до реализации Фазы 3.1.
@@ -65,6 +75,8 @@ async fn main() {
         .unwrap_or_else(|_| "kafka-bootstrap.mpp.svc:9092".to_string());
     let consumer = kafka_io::build_consumer(&bootstrap_servers, "routing-service");
     let producer = kafka_io::build_producer(&bootstrap_servers);
+    let config_consumer = config_reload::build_config_consumer(&bootstrap_servers, "routing-service-config");
+    tokio::spawn(config_reload::run_loop(config_consumer, overlay, live_snapshot.clone()));
 
-    kafka_io::run_loop(consumer, producer, snapshot, control).await;
+    kafka_io::run_loop(consumer, producer, live_snapshot, control).await;
 }

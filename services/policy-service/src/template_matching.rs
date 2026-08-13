@@ -563,4 +563,6 @@ mod tests {
         let warnings = check_pattern_selectivity("%w shartnoma bo'yicha %d{1,6} so'm to'lovni bugun amalga oshiring");
         assert!(warnings.is_empty(), "все литеральные фрагменты этого шаблона длиннее порога: {warnings:?}");
     }
+
+
 }

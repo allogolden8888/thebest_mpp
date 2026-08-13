@@ -26,4 +26,4 @@ RUN mvn -B -Dplatform-contracts.dir=/platform-contracts -DskipTests package
 FROM eclipse-temurin:25-jre-jammy
 COPY --from=builder /build/target/operator-smpp-session-manager.jar /app/app.jar
 EXPOSE 9090 9000
-ENTRYPOINT ["java", "-jar", "/app/app.jar"]
+ENTRYPOINT ["java", "-XX:StartFlightRecording=filename=/tmp/operator-smpp-session-manager.jfr,duration=150s,dumponexit=true,settings=profile", "-jar", "/app/app.jar"]

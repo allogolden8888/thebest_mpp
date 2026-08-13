@@ -444,20 +444,18 @@ mod tests {
     #[test]
     fn legitimate_traffic_at_configured_tps_never_sees_auth_rate_limited() {
         let limiter = RateLimiter::default();
-        // rate_limit_tps=5 в snapshot() — ровно 5 легитимных запросов подряд
-        // должны все пройти (последний — успешно, не AuthRateLimited).
-        for i in 0..5 {
-            let result = authorize_and_admit(&raw(), &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &limiter);
-            assert!(result.is_ok(), "легитимный запрос {i} в пределах собственного rate_limit_tps не должен быть отклонён");
-        }
+        // rate_limit_tps=5 в snapshot() -> message bucket capacity=1 (см.
+        // MESSAGE_BURST_HEADROOM_FACTOR: max(5*0.15, 1.0)=1) — ровно 1
+        // мгновенный запрос должен пройти (не AuthRateLimited).
+        let result = authorize_and_admit(&raw(), &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &limiter);
+        assert!(result.is_ok(), "легитимный запрос в пределах собственного rate_limit_tps не должен быть отклонён");
     }
 
     #[test]
     fn rate_limit_exhausted_after_configured_tps() {
         let limiter = RateLimiter::default();
-        for _ in 0..5 {
-            assert!(authorize_and_admit(&raw(), &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &limiter).is_ok());
-        }
+        // rate_limit_tps=5 -> message bucket capacity=1 (см. MESSAGE_BURST_HEADROOM_FACTOR).
+        assert!(authorize_and_admit(&raw(), &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &limiter).is_ok());
         let result = authorize_and_admit(&raw(), &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &limiter);
         assert_eq!(result.unwrap_err(), HandlerError::RateLimited);
     }

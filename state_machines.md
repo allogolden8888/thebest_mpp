@@ -185,3 +185,6 @@ apply_charge(account, charge_id, amount, expected_epoch):
 
 Все три файла в `state_machines/` запускаются без зависимостей (`python3 state_machines/<file>.py`), печатают список тестов и итог — это исполняемая спецификация, не только описание.
 
+
+
+

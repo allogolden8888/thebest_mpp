@@ -94,6 +94,11 @@ message DeliveryExtension {
   // DestinationResolution — добавлено сюда, а не переоткрыто заново из
   // route_id (route_id не гарантированно структурно кодирует operator_id).
   string resolved_operator_id = 4;
+  // SMPP priority_flag (0-3) — прокинуто из IncomingMessage.priority_flag
+  // через ExecutionState, потребляется operator-smpp-session-manager для
+  // приоритизации в туннеле к оператору (см. platform-contracts/events/
+  // message_events.proto).
+  int32 priority_flag = 5;
 }
 
 message DeliveryReconciliationExtension {

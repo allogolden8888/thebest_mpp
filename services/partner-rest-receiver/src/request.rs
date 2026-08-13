@@ -26,6 +26,10 @@ struct RequestBody {
     msisdn: String,
     sender_id: String,
     body: String,
+    /// SMPP priority_flag (0-3, 3=наивысший) — опционально, партнёр сам
+    /// решает; отсутствие поля не ошибка, см. `build_incoming.rs::DEFAULT_PRIORITY_FLAG`.
+    #[serde(default)]
+    priority: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,6 +42,9 @@ pub struct ValidatedRequest {
     pub sender_id: String,
     pub body: String,
     pub idempotency_key: Option<String>,
+    /// SMPP priority_flag (0-3), `None` если партнёр не указал — вызывающая
+    /// сторона (`build_incoming.rs`) применяет `DEFAULT_PRIORITY_FLAG`.
+    pub priority: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,7 +62,11 @@ pub enum ValidationError {
     EmptyBody,
     BodyTooLong,
     IdempotencyKeyTooLong,
+    InvalidPriority,
 }
+
+/// SMPP 3.4 §5.2.14 priority_flag — валидный диапазон 0-3.
+pub const MAX_PRIORITY_FLAG: u8 = 3;
 
 /// Произвольный, но задокументированный операционный лимит — нигде в спеках
 /// не зафиксирован дословно; ~10 сегментов GSM-7 конкатенации (153*10=1530,
@@ -118,6 +129,12 @@ pub fn validate_request_schema(raw: &RawRequest) -> Result<ValidatedRequest, Val
         }
     }
 
+    if let Some(priority) = parsed.priority {
+        if priority > MAX_PRIORITY_FLAG {
+            return Err(ValidationError::InvalidPriority);
+        }
+    }
+
     Ok(ValidatedRequest {
         partner_id,
         application_id,
@@ -127,6 +144,7 @@ pub fn validate_request_schema(raw: &RawRequest) -> Result<ValidatedRequest, Val
         sender_id: parsed.sender_id,
         body: parsed.body,
         idempotency_key,
+        priority: parsed.priority,
     })
 }
 
@@ -279,5 +297,26 @@ mod tests {
         let mut raw = valid_raw();
         raw.body_json = r#"{"msisdn":"998901331835","sender_id":"MPP-SMS Info","body":"text"}"#.into();
         assert!(validate_request_schema(&raw).is_ok());
+    }
+
+    #[test]
+    fn priority_absent_is_none_not_an_error() {
+        let result = validate_request_schema(&valid_raw()).unwrap();
+        assert_eq!(result.priority, None);
+    }
+
+    #[test]
+    fn priority_present_and_valid_passes_through() {
+        let mut raw = valid_raw();
+        raw.body_json = r#"{"msisdn":"998901331835","sender_id":"Click","body":"text","priority":3}"#.into();
+        let result = validate_request_schema(&raw).unwrap();
+        assert_eq!(result.priority, Some(3));
+    }
+
+    #[test]
+    fn priority_over_max_rejected() {
+        let mut raw = valid_raw();
+        raw.body_json = r#"{"msisdn":"998901331835","sender_id":"Click","body":"text","priority":4}"#.into();
+        assert_eq!(validate_request_schema(&raw), Err(ValidationError::InvalidPriority));
     }
 }

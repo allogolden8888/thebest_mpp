@@ -10,16 +10,45 @@
 //! (Фаза 2 development_plan.md), не готовая к продакшену реализация всех
 //! отказоустойчивых сценариев.
 
+use crate::offset_tracker::{OffsetTracker, PartitionKey};
 use crate::proto::stage_completed_event::StageResult;
 use crate::proto::stage_execute_command::StageExtension;
 use crate::proto::{DestinationResolutionResult, Outcome, StageCompletedEvent, StageExecuteCommand};
 use crate::resolver::{ResolveResult, Snapshot};
+use arc_swap::ArcSwap;
 use prost::Message;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::message::Message as _;
 use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::{Offset, TopicPartitionList};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Semaphore;
+
+fn concurrency_limit(env_var: &str, default: usize) -> usize {
+    std::env::var(env_var).ok().and_then(|s| s.parse().ok()).filter(|n| *n > 0).unwrap_or(default)
+}
+
+/// См. тот же таймаут в policy-service/src/kafka_io.rs для полного
+/// обоснования: без него зависшая задача (например осиротевший
+/// Kafka-produce future) навсегда, ПОЛНОСТЬЮ МОЛЧА замирает watermark
+/// `OffsetTracker` на этой партиции — реальная находка нагрузочного
+/// прогона (policy-service, тот же паттерн кода).
+fn timeout_secs(env_var: &str, default: u64) -> Duration {
+    Duration::from_secs(std::env::var(env_var).ok().and_then(|s| s.parse().ok()).filter(|n| *n > 0).unwrap_or(default))
+}
+
+fn commit_watermark(consumer: &StreamConsumer, key: &PartitionKey, next_offset: i64) {
+    let mut tpl = TopicPartitionList::new();
+    if let Err(e) = tpl.add_partition_offset(&key.topic, key.partition, Offset::Offset(next_offset)) {
+        tracing::error!("commit_watermark: add_partition_offset {}:{} -> {next_offset}: {e}", key.topic, key.partition);
+        return;
+    }
+    if let Err(e) = consumer.commit(&tpl, rdkafka::consumer::CommitMode::Async) {
+        tracing::error!("commit_watermark: commit {}:{} -> {next_offset}: {e}", key.topic, key.partition);
+    }
+}
 
 pub const INPUT_TOPIC: &str = "stage.destination-resolution";
 pub const OUTPUT_TOPIC: &str = "stage.completed";
@@ -37,6 +66,19 @@ pub fn build_producer(bootstrap_servers: &str) -> FutureProducer {
     ClientConfig::new()
         .set("bootstrap.servers", bootstrap_servers)
         .set("message.timeout.ms", "5000")
+        // Превентивно, зеркалируя находку в pipeline-engine/src/kafka_io.rs
+        // build_producer: тот же rdkafka::producer::FutureProducer, тот же
+        // конкурентный пул задач через Semaphore (см. run_loop ниже, до 256
+        // "в полёте" по умолчанию) на ОДИН общий producer. Там librdkafka-
+        // дефолт queue.buffering.max.messages (100000) под такой
+        // конкурентностью упирался в QueueFull, а FutureProducer::send
+        // ретраит на QueueFull каждые 100мс вплоть до queue_timeout — давало
+        // стабильные ~1700мс лишних на КАЖДОМ producer.send(). Здесь то же
+        // сочетание (FutureProducer + Semaphore-пул), под нагрузкой этот
+        // сервис — сильный кандидат на идентичный баг, даже если ручной
+        // тест этого не показал. Подняли явно, с запасом.
+        .set("queue.buffering.max.messages", "1000000")
+        .set("queue.buffering.max.kbytes", "2097151")
         .create()
         .expect("не удалось создать Kafka producer")
 }
@@ -89,37 +131,88 @@ fn build_rejected(command: &StageExecuteCommand, reason_code: &str) -> StageComp
     }
 }
 
-pub async fn run_loop(consumer: StreamConsumer, producer: FutureProducer, snapshot: Snapshot) {
+/// Обработка одной записи — вынесена из цикла, чтобы уходить в конкурентную
+/// spawned-задачу без заимствования `consumer`/msg. Возвращает `true`, если
+/// offset безопасно продвинуть.
+async fn process_one_record(payload: &[u8], producer: &FutureProducer, snapshot: &Snapshot) -> bool {
+    let command = match StageExecuteCommand::decode(payload) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("не удалось декодировать StageExecuteCommand: {e}");
+            return false;
+        }
+    };
+
+    let event = handle_command(snapshot, &command);
+    let bytes = event.encode_to_vec();
+
+    let record = FutureRecord::to(OUTPUT_TOPIC).key(&event.message_id).payload(&bytes);
+    if let Err((e, _)) = producer.send(record, Duration::from_secs(5)).await {
+        tracing::error!("не удалось опубликовать StageCompletedEvent: {e}");
+        return false; // не коммитим offset — at-least-once, сообщение будет переобработано
+    }
+    true
+}
+
+pub async fn run_loop(consumer: StreamConsumer, producer: FutureProducer, live_snapshot: Arc<ArcSwap<Snapshot>>) {
     consumer
         .subscribe(&[INPUT_TOPIC])
         .expect("не удалось подписаться на stage.destination-resolution");
 
+    // Реальная находка (нагрузочный прогон): раньше обработка была строго
+    // последовательной — decode -> resolve (in-memory, быстро) -> Kafka
+    // produce -> commit -> следующая запись. Этот сервис не делает ни
+    // одного Redis round-trip (весь resolve — чистая память), но
+    // последовательный Kafka produce+commit сам по себе оказался узким
+    // местом на реальной нагрузке (после того, как pipeline-engine и
+    // billing-service перестали быть боттлнеком первыми) — тот же паттерн,
+    // что уже был найден и исправлен в pipeline-engine/kafka_io.rs.
+    let consumer = Arc::new(consumer);
+    let semaphore = Arc::new(Semaphore::new(concurrency_limit("DESTINATION_RESOLUTION_CONCURRENCY", 256)));
+    let tracker = Arc::new(OffsetTracker::new());
+    let process_timeout = timeout_secs("DESTINATION_RESOLUTION_PROCESS_TIMEOUT_SECS", 30);
+
     loop {
         match consumer.recv().await {
             Ok(msg) => {
+                let key = PartitionKey { topic: msg.topic().to_string(), partition: msg.partition() };
+                let offset = msg.offset();
+                tracker.observe_received(&key, offset);
+
                 let Some(payload) = msg.payload() else {
                     tracing::warn!("получено сообщение без payload, пропущено");
+                    if let Some(commit_to) = tracker.mark_done(&key, offset) {
+                        commit_watermark(&consumer, &key, commit_to);
+                    }
                     continue;
                 };
-                let command = match StageExecuteCommand::decode(payload) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::error!("не удалось декодировать StageExecuteCommand: {e}");
-                        continue;
+                let payload = payload.to_vec();
+
+                let permit = semaphore.clone().acquire_owned().await.expect("semaphore не должен закрываться");
+                let consumer_task = consumer.clone();
+                let producer_task = producer.clone();
+                let snapshot = live_snapshot.load_full();
+                let tracker_task = tracker.clone();
+                let key_task = key.clone();
+
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    let done = match tokio::time::timeout(process_timeout, process_one_record(&payload, &producer_task, &snapshot)).await {
+                        Ok(done) => done,
+                        Err(_) => {
+                            tracing::error!(
+                                "process_one_record завис дольше {:?} (partition={} offset={offset}) — офсет НЕ коммитится, переобработается при следующем ребалансе/рестарте",
+                                process_timeout, key_task.partition
+                            );
+                            false
+                        }
+                    };
+                    if done {
+                        if let Some(commit_to) = tracker_task.mark_done(&key_task, offset) {
+                            commit_watermark(&consumer_task, &key_task, commit_to);
+                        }
                     }
-                };
-
-                let event = handle_command(&snapshot, &command);
-                let bytes = event.encode_to_vec();
-                let record = FutureRecord::to(OUTPUT_TOPIC).key(&event.message_id).payload(&bytes);
-                if let Err((e, _)) = producer.send(record, Duration::from_secs(5)).await {
-                    tracing::error!("не удалось опубликовать StageCompletedEvent: {e}");
-                    continue; // не коммитим offset — at-least-once, сообщение будет переобработано
-                }
-
-                if let Err(e) = consumer.commit_message(&msg, rdkafka::consumer::CommitMode::Async) {
-                    tracing::error!("не удалось закоммитить offset: {e}");
-                }
+                });
             }
             Err(e) => tracing::error!("ошибка Kafka consumer: {e}"),
         }

@@ -2,6 +2,7 @@ package uz.mpp.delivery;
 
 import io.grpc.ManagedChannel;
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
+import java.net.InetSocketAddress;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -40,7 +41,15 @@ public final class OperatorSubmitClient implements AutoCloseable {
             String[] parts = e.split(":", 2);
             String host = parts[0];
             int port = parts.length > 1 ? Integer.parseInt(parts[1]) : 443;
-            return NettyChannelBuilder.forAddress(host, port).usePlaintext().build();
+            // forAddress(String, int) уходит через NameResolverRegistry по scheme
+            // таргета ("host:port" без "//"); в grpc-netty-shaded это иногда
+            // резолвится в зарегистрированный UdsNameResolverProvider (scheme
+            // "unix") вместо dns — реальная находка (docker-compose прогон против
+            // живого SMSC, не статичное чтение): submit падал с
+            // "Address types of NameResolver 'unix' ... not supported by transport"
+            // для обычного IP:port. forAddress(SocketAddress) обходит резолвер
+            // целиком — адрес используется напрямую, без разбора схемы.
+            return NettyChannelBuilder.forAddress(new InetSocketAddress(host, port)).usePlaintext().build();
         });
     }
 

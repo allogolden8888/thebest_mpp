@@ -19,6 +19,7 @@ use crate::execution_state::ExecutionState;
 use redis::AsyncCommands;
 use redis::aio::MultiplexedConnection;
 use std::collections::HashMap;
+use tokio::sync::OnceCell;
 
 pub const DEADLINE_BUCKETS: u64 = 16;
 
@@ -44,16 +45,32 @@ pub fn bucket_for(stage_execution_id: &str, num_buckets: u64) -> u64 {
 
 pub struct RedisStateStore {
     client: redis::Client,
+    // Реальная находка (нагрузочный прогон): раньше каждый вызов load/
+    // cas_advance/finalize открывал НОВОЕ соединение через
+    // get_multiplexed_async_connection() — при последовательной обработке
+    // (одна запись за раз) это было незаметно, но при конкурентной
+    // обработке (сотни задач одновременно, см. kafka_io.rs) стало бы новым
+    // узким местом — TCP-хендшейк на каждый Redis round-trip вместо
+    // мультиплексирования множества конкурентных запросов через ОДНО
+    // соединение (в этом и есть весь смысл MultiplexedConnection —
+    // дёшево клонируется, разделяет один и тот же сокет). Ленивая
+    // однократная инициализация, дальше — просто клонирование хендла.
+    connection: OnceCell<MultiplexedConnection>,
 }
 
 impl RedisStateStore {
     pub fn new(redis_url: &str) -> Result<Self, String> {
         let client = redis::Client::open(redis_url).map_err(|e| format!("невалидный REDIS_RUNTIME_URL: {e}"))?;
-        Ok(Self { client })
+        Ok(Self { client, connection: OnceCell::new() })
     }
 
     async fn connection(&self) -> Result<MultiplexedConnection, String> {
-        self.client.get_multiplexed_async_connection().await.map_err(|e| format!("не удалось подключиться к Runtime Redis: {e}"))
+        self.connection
+            .get_or_try_init(|| async {
+                self.client.get_multiplexed_async_connection().await.map_err(|e| format!("не удалось подключиться к Runtime Redis: {e}"))
+            })
+            .await
+            .cloned()
     }
 
     /// `load_current_state` (упрощённое имя из hld.md §7.2 табличного вида) —
@@ -81,6 +98,8 @@ impl RedisStateStore {
             route_id: fields.get("route_id").filter(|s| !s.is_empty()).cloned(),
             protocol: fields.get("protocol").and_then(|v| v.parse::<i32>().ok()).filter(|p| *p >= 0),
             route_version: fields.get("route_version").filter(|s| !s.is_empty()).cloned(),
+            priority_flag: fields.get("priority_flag").and_then(|v| v.parse().ok()).unwrap_or(2), // MEDIUM — см. build_incoming.rs::DEFAULT_PRIORITY_FLAG
+            message_ttl_ms: fields.get("message_ttl_ms").and_then(|v| v.parse().ok()).unwrap_or(i64::MAX),
             destination_address: fields.get("destination_address").cloned().unwrap_or_default(),
             deadline_ms: fields.get("deadline_ms").and_then(|v| v.parse().ok()).unwrap_or(0),
         }))
@@ -121,6 +140,8 @@ impl RedisStateStore {
             .arg(&new_state.destination_address)
             .arg(new_state.deadline_ms)
             .arg(old_stage_execution_id_to_remove.unwrap_or(""))
+            .arg(new_state.priority_flag)
+            .arg(new_state.message_ttl_ms)
             .invoke_async(&mut conn)
             .await
             .map_err(|e| format!("EVAL cas_transition: {e}"))?;
@@ -194,6 +215,8 @@ mod tests {
             route_id: None,
             protocol: None,
             route_version: None,
+            priority_flag: 2,
+            message_ttl_ms: i64::MAX,
             destination_address: "998901331835".to_string(),
             deadline_ms: 1_000_000,
         }

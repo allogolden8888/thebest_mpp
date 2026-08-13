@@ -1,13 +1,14 @@
 package uz.mpp.billingreconciliation.grpcclient;
 
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
+import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 import uz.mpp.platformcontracts.common.v1.ExecutionControlScope;
 import uz.mpp.platformcontracts.common.v1.ExecutionControlState;
 import uz.mpp.platformcontracts.grpc.v1.ApplyOverrideRequest;
 import uz.mpp.platformcontracts.grpc.v1.ClearOverrideRequest;
 import uz.mpp.platformcontracts.grpc.v1.ExecutionControlServiceGrpc;
 
+import java.net.InetSocketAddress;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -27,7 +28,12 @@ public final class ExecutionControlClient implements AutoCloseable {
     private final ExecutionControlServiceGrpc.ExecutionControlServiceBlockingStub stub;
 
     public ExecutionControlClient(String host, int port) {
-        this.channel = ManagedChannelBuilder.forAddress(host, port).usePlaintext().build();
+        // ManagedChannelBuilder.forAddress(host, port) уходит через NameResolverRegistry
+        // по scheme таргета — реальная находка в delivery-service/OperatorSubmitClient.java
+        // (прогон против живого SMSC): в grpc-netty-shaded это иногда резолвится в
+        // зарегистрированный UdsNameResolverProvider ("unix") вместо dns и падает даже
+        // для обычного IP:port. forAddress(SocketAddress) обходит резолвер целиком.
+        this.channel = NettyChannelBuilder.forAddress(new InetSocketAddress(host, port)).usePlaintext().build();
         this.stub = ExecutionControlServiceGrpc.newBlockingStub(channel);
     }
 

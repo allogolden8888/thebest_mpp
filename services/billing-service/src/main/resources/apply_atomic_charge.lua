@@ -11,6 +11,19 @@
 -- а "race невозможен структурно".
 --
 -- KEYS[1] = billing:account:{account_id}
+-- KEYS[2] = billing:account:{account_id}:charges — Redis SET, dedup по
+--           charge_id. Реальная находка нагрузочного прогона (JFR +
+--           thread dump + redis INFO stats под 1000 msg/s): раньше
+--           processed_charge_ids хранился запятой-разделённой строкой в
+--           этом же хэше и сканировался ЛИНЕЙНО (string.gmatch) на КАЖДОЕ
+--           списание — уже задокументированный, но не исправленный
+--           unbounded growth. Биллинг здесь per-partner, не per-msisdn
+--           (один Redis-ключ на партнёра), так что для одного активного
+--           партнёра эта строка реально доросла до 47k+ charge_id за
+--           сессию нагрузочных прогонов — Redis (однопоточный) упёрся в
+--           100% CPU при ~300 ops/sec просто на O(n) скан+перезапись
+--           растущей строки. SADD/SISMEMBER — нативный O(1) hash-set на
+--           стороне Redis, без этого роста стоимости на операцию.
 -- ARGV[1] = charge_id
 -- ARGV[2] = amount (minor units, integer as string)
 -- ARGV[3] = expected_epoch (integer as string)
@@ -19,6 +32,7 @@
 -- разбирается на Java-стороне (BillingAccountStore.java).
 
 local key = KEYS[1]
+local charges_key = KEYS[2]
 local charge_id = ARGV[1]
 local amount = tonumber(ARGV[2])
 local expected_epoch = tonumber(ARGV[3])
@@ -26,37 +40,19 @@ local expected_epoch = tonumber(ARGV[3])
 local state = redis.call('HGET', key, 'state')
 local balance_raw = redis.call('HGET', key, 'balance')
 local epoch_raw = redis.call('HGET', key, 'epoch')
-local processed_raw = redis.call('HGET', key, 'processed_charge_ids')
 
 -- Счёт ещё не существовал в Redis — тот же дефолт, что Account.fresh(0)
--- на Java-стороне: ACTIVE, epoch=0, пустой баланс/dedup-набор.
+-- на Java-стороне: ACTIVE, epoch=0, пустой баланс.
 if state == false then
     state = 'ACTIVE'
     balance_raw = '0'
     epoch_raw = '0'
-    processed_raw = ''
 end
 
 local balance = tonumber(balance_raw)
 local epoch = tonumber(epoch_raw)
 
--- Дедупликация по charge_id — линейный скан по запятой-разделённому
--- списку, тот же формат хранения (и то же O(n) поведение, включая уже
--- задокументированный unbounded growth — не исправлено здесь, см.
--- billing-service/README.md), что в текущей Java-реализации.
-local function contains_charge_id(csv, id)
-    if csv == nil or csv == '' then
-        return false
-    end
-    for candidate in string.gmatch(csv, '([^,]+)') do
-        if candidate == id then
-            return true
-        end
-    end
-    return false
-end
-
-if contains_charge_id(processed_raw, charge_id) then
+if redis.call('SISMEMBER', charges_key, charge_id) == 1 then
     return {'ALREADY_PROCESSED', tostring(balance), state, tostring(epoch)}
 end
 
@@ -69,17 +65,8 @@ if state == 'FROZEN' then
 end
 
 local new_balance = balance - amount
-local new_processed
-if processed_raw == nil or processed_raw == '' then
-    new_processed = charge_id
-else
-    new_processed = processed_raw .. ',' .. charge_id
-end
 
-redis.call('HSET', key,
-    'state', state,
-    'balance', tostring(new_balance),
-    'epoch', tostring(epoch),
-    'processed_charge_ids', new_processed)
+redis.call('HSET', key, 'state', state, 'balance', tostring(new_balance), 'epoch', tostring(epoch))
+redis.call('SADD', charges_key, charge_id)
 
 return {'APPLIED', tostring(new_balance), state, tostring(epoch)}

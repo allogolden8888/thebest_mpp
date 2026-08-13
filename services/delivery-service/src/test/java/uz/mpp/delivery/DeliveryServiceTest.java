@@ -6,6 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import uz.mpp.delivery.DeliveryService.SubmitOutcome;
 import uz.mpp.delivery.MessageContextStore.MessageContext;
 import uz.mpp.delivery.SegmentMessage.Segment;
@@ -32,7 +34,8 @@ class DeliveryServiceTest {
             .setDelivery(DeliveryExtension.newBuilder()
                 .setRouteId("beeline_smpp_primary")
                 .setProtocol(Protocol.PROTOCOL_SMPP)
-                .setResolvedOperatorId("beeline"))
+                .setResolvedOperatorId("beeline")
+                .setPriorityFlag(3))
             .build();
     }
 
@@ -93,6 +96,18 @@ class DeliveryServiceTest {
     }
 
     @Test
+    void buildSubmitRequestCarriesPriorityFlagFromDeliveryExtensionAsPlainPassthrough() {
+        // priority_flag — уже разрешён/дефолтирован выше по потоку в
+        // partner-rest-receiver; здесь никакой логики, только передача на
+        // саму SMPP-трубу (см. platform-contracts/grpc/operator_gateway.proto
+        // SubmitRequest.priority_flag, field 9).
+        MessageContext ctx = new MessageContext("hello", "Click", "998901331835", "GSM7");
+        List<Segment> segments = SegmentMessage.segment(ctx.body(), ctx.encoding());
+        SubmitRequest request = DeliveryService.buildSubmitRequest(command(), command().getDelivery(), ctx, "q1", segments);
+        assertEquals(3, request.getPriorityFlag());
+    }
+
+    @Test
     void buildEventCarriesQueueMsgIdInDeliveryResult() {
         StageCompletedEvent event = DeliveryService.buildEvent(command(), "q1", new SubmitOutcome(Outcome.OUTCOME_SUCCEEDED, "", "smsc-1"));
         assertEquals(Outcome.OUTCOME_SUCCEEDED, event.getOutcome());
@@ -102,10 +117,64 @@ class DeliveryServiceTest {
     }
 
     @Test
-    void buildEventMarksNonSucceededAsRetryable() {
-        StageCompletedEvent event = DeliveryService.buildEvent(command(), "q1", new SubmitOutcome(Outcome.OUTCOME_SUBMISSION_OUTCOME_UNKNOWN, "TIMEOUT", ""));
+    void buildEventMarksTransientReasonAsRetryable() {
+        // GATEWAY_INSTANCE_NOT_FOUND — нет реального side effect (registry
+        // ещё не перерегистрировался), безопасно ретраится сколько угодно.
+        StageCompletedEvent event = DeliveryService.buildEvent(command(), "q1",
+            new SubmitOutcome(Outcome.OUTCOME_SUBMISSION_OUTCOME_UNKNOWN, "GATEWAY_INSTANCE_NOT_FOUND", ""));
         assertTrue(event.getRetryable());
-        assertEquals("TIMEOUT", event.getReasonCode());
+        assertEquals("GATEWAY_INSTANCE_NOT_FOUND", event.getReasonCode());
+    }
+
+    @Test
+    void buildEventMarksPermanentReasonAsNotRetryable() {
+        // Настоящий SMPP-level reject оператора — ретрай до истечения TTL
+        // только сожжёт ёмкость трубы на заведомо неисправимое.
+        StageCompletedEvent event = DeliveryService.buildEvent(command(), "q1",
+            new SubmitOutcome(Outcome.OUTCOME_FAILED, "SMPP_STATUS_0x43", ""));
+        assertFalse(event.getRetryable());
+        assertEquals("SMPP_STATUS_0x43", event.getReasonCode());
+    }
+
+    /**
+     * Табличный тест классификации {@code isRetryable} — покрывает каждый
+     * reasonCode, реально встречающийся в этом сервисе или на другом конце
+     * gRPC-вызова к operator-smpp-session-manager (найдено обзором
+     * {@code DeliveryService.java}/{@code KafkaIo.java} + reason-строк,
+     * реально публикуемых {@code OperatorSubmitServer}), плюс пограничные
+     * случаи (неизвестный код, gRPC Status.Code имя, null) — оба по
+     * умолчанию permanent, консервативная сторона ошибки.
+     */
+    @ParameterizedTest
+    @CsvSource({
+        // Retryable — transient/capacity.
+        "TPS_THROTTLED, true",
+        "PACER_QUEUE_FULL, true",
+        "PACER_QUEUE_TIMEOUT, true",
+        "SUBMIT_TIMEOUT, true",
+        "GATEWAY_INSTANCE_NOT_FOUND, true",
+        "AMBIGUOUS_PRIOR_ATTEMPT_NOT_RESUBMITTED, true",
+        // Permanent — настоящий SMPP-level reject.
+        "SMPP_STATUS_0x43, false",
+        "SMPP_STATUS_0x0B, false",
+        // Permanent — данных нет, повтор их не создаст.
+        "MESSAGE_CONTEXT_NOT_FOUND, false",
+        // Permanent — gRPC-транспортный Status.Code (handleGrpcFailure в
+        // KafkaIo передаёт e.getStatus().getCode().name()); на этом уровне
+        // чаще реальная конфиг/роутинг проблема, а не нехватка ёмкости.
+        "UNAVAILABLE, false",
+        "DEADLINE_EXCEEDED, false",
+        // Permanent — неизвестный/непредвиденный код, консервативный дефолт.
+        "INVALID_DESTINATION, false",
+        "'', false",
+    })
+    void isRetryableClassifiesEachKnownReasonCode(String reasonCode, boolean expectedRetryable) {
+        assertEquals(expectedRetryable, DeliveryService.isRetryable(reasonCode));
+    }
+
+    @Test
+    void isRetryableTreatsNullReasonCodeAsPermanent() {
+        assertFalse(DeliveryService.isRetryable(null));
     }
 
     @Test

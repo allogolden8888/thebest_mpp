@@ -34,6 +34,7 @@ public final class BackgroundCommandProcessor implements Processor<String, byte[
     public static final String STORE_NAME = "background-tasks-store";
     public static final String DLR_SINK = "dlr-sink";
     public static final String NOTIFICATION_SINK = "notification-sink";
+    public static final String STAGE_RETRY_SINK = "stage-retry-sink";
 
     private ProcessorContext<String, byte[]> context;
     private KeyValueStore<String, BackgroundTask> store;
@@ -49,9 +50,14 @@ public final class BackgroundCommandProcessor implements Processor<String, byte[
     public void process(Record<String, byte[]> record) {
         try {
             SchedulerBackgroundTask cmd = SchedulerBackgroundTask.parseFrom(record.value());
+            String taskType = Topics.taskTypeFromEnumName(cmd.getTaskType().name());
+            // STAGE_RETRY несёт message_id, не source_event_id (см.
+            // BackgroundTask.sourceEventId javadoc) — переиспользуем то же
+            // поле-слот под ключ стора, не заводим отдельную ветку хранения.
+            String correlationId = "STAGE_RETRY".equals(taskType) ? cmd.getMessageId() : cmd.getSourceEventId();
             BackgroundTask task = new BackgroundTask(
-                Topics.taskTypeFromEnumName(cmd.getTaskType().name()),
-                cmd.getSourceEventId(),
+                taskType,
+                correlationId,
                 cmd.getAttempt(),
                 cmd.getDueAt().getSeconds() * 1000,
                 cmd.getDeadline().getSeconds() * 1000,
@@ -85,6 +91,10 @@ public final class BackgroundCommandProcessor implements Processor<String, byte[
                 case "NOTIFICATION_RETRY" -> {
                     NotificationRetryTask retry = DispatchBuilder.buildNotificationRetry(task, now);
                     context.forward(new Record<>(task.sourceEventId(), retry.toByteArray(), timestampMs), NOTIFICATION_SINK);
+                }
+                case "STAGE_RETRY" -> {
+                    SchedulerBackgroundTask trigger = DispatchBuilder.buildStageRetryTrigger(task, now);
+                    context.forward(new Record<>(task.sourceEventId(), trigger.toByteArray(), timestampMs), STAGE_RETRY_SINK);
                 }
                 default -> System.err.println("неизвестный task_type: " + task.taskType());
             }

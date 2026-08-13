@@ -5,10 +5,14 @@ import io.grpc.Server;
 import io.grpc.ServerBuilder;
 import uz.mpp.operatorsmpp.client.OperatorSmppClient;
 import uz.mpp.operatorsmpp.client.SmppConnectionSupervisor;
+import uz.mpp.operatorsmpp.core.PacerCore;
+import uz.mpp.operatorsmpp.core.PacerMetrics;
 import uz.mpp.operatorsmpp.core.PriorityGate;
+import uz.mpp.operatorsmpp.core.PriorityTier;
 import uz.mpp.operatorsmpp.core.TokenBucket;
 import uz.mpp.operatorsmpp.grpcserver.OperatorQuerySmServer;
 import uz.mpp.operatorsmpp.grpcserver.OperatorSubmitServer;
+import uz.mpp.operatorsmpp.grpcserver.QueuedSubmit;
 import uz.mpp.operatorsmpp.health.HealthServer;
 import uz.mpp.operatorsmpp.kafkaio.OperatorEventPublisher;
 import uz.mpp.operatorsmpp.registry.OperatorRouteRegistry;
@@ -17,20 +21,30 @@ import uz.mpp.platformcontracts.events.v1.OperatorDlr;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.EnumMap;
+import java.util.Map;
 import java.util.Timer;
 import java.util.TimerTask;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
 
 /**
  * Operator SMPP Session Manager (services_specifictaion.md §2.3) — SMPP
  * binds с операторами, reconnect, enquire_link, TPS/throttling,
  * submit_sm/DLR, приоритет submit_sm над query_sm.
+ *
+ * <p>dynamic-seeking-russell.md "Priority-tier scheduler": единственный
+ * процесс, владеющий реальным SMPP-туннелем к данному оператору — поэтому
+ * пейсер (3 очереди по приоритету + HTB-style bucket'ы + Semaphore
+ * конкурентности + tick-петля) живёт здесь, а не в delivery-service (там
+ * может быть много реплик, ни одна не имела бы корректного глобального
+ * представления об общем туннеле).
  */
 public final class Main {
 
     public static void main(String[] args) throws Exception {
-        HealthServer health = new HealthServer();
-        health.start();
-
         String operatorId = env("OPERATOR_ID", "beeline_uz");
         String routeId = env("ROUTE_ID", "route-1");
         String kafkaBrokers = env("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap.mpp.svc:9092");
@@ -48,6 +62,51 @@ public final class Main {
                 .build();
             eventPublisher.publishDlr(dlr);
         });
+
+        // --- Priority-tier scheduler (пейсер) ---
+        double tpsLimit = Double.parseDouble(env("TPS_LIMIT", "500"));
+        int maxConcurrentSubmits = Integer.parseInt(env("MAX_CONCURRENT_SUBMITS", "100"));
+        long nowMs = System.currentTimeMillis();
+
+        // ceilBucket — полный потолок туннеля (capacity==rate, БЕЗ
+        // headroom-урезания — та же семантика "просто TPS-лимит", что была
+        // у старого tpsBucket). highBucket/mediumBucket/lowBucket — С
+        // headroom-урезанием (см. TokenBucket.withBurstHeadroom): это они
+        // копят токены простоя и потом могли бы единомоментно их слить,
+        // ceilBucket ничего "не копит" сверх своего honest rate.
+        TokenBucket ceilBucket = new TokenBucket(tpsLimit, tpsLimit, nowMs);
+        TokenBucket highBucket = TokenBucket.withBurstHeadroom(tpsLimit * PacerCore.HIGH_SHARE, nowMs);
+        TokenBucket mediumBucket = TokenBucket.withBurstHeadroom(tpsLimit * PacerCore.MEDIUM_SHARE, nowMs);
+        TokenBucket lowBucket = TokenBucket.withBurstHeadroom(tpsLimit * PacerCore.LOW_SHARE, nowMs);
+        PacerCore pacerCore = new PacerCore(ceilBucket, highBucket, mediumBucket, lowBucket);
+
+        // Semaphore — НОВЫЙ механизм, отдельный от PriorityGate: PriorityGate
+        // сегодня только СЧИТАЕТ in-flight submit'ы, чтобы решить, откладывать
+        // ли query_sm (enforce_query_sm_priority), реального предела
+        // конкурентности не задаёт. Semaphore(MAX_CONCURRENT_SUBMITS) — жёсткий
+        // предел одновременных client.submitSm() к оператору.
+        Semaphore concurrentSubmitPermits = new Semaphore(maxConcurrentSubmits);
+
+        Map<PriorityTier, Integer> maxQueueDepthByTier = buildMaxQueueDepthByTier(tpsLimit);
+        Map<PriorityTier, ArrayBlockingQueue<QueuedSubmit>> queuesByTier = new EnumMap<>(PriorityTier.class);
+        for (PriorityTier tier : PriorityTier.values()) {
+            // Реальная Java-ёмкость всегда >= 1 (ArrayBlockingQueue не
+            // поддерживает 0) — логический предел (может быть 0, например
+            // MAX_QUEUE_DEPTH_PER_TIER=0 в тестах) применяется отдельно,
+            // явной проверкой в OperatorSubmitServer.submit().
+            queuesByTier.put(tier, new ArrayBlockingQueue<>(Math.max(1, maxQueueDepthByTier.get(tier))));
+        }
+
+        long maxQueueWaitMs = Long.parseLong(env("MAX_QUEUE_WAIT_MS", "2000"));
+
+        PacerMetrics pacerMetrics = new PacerMetrics();
+        for (PriorityTier tier : PriorityTier.values()) {
+            ArrayBlockingQueue<QueuedSubmit> queue = queuesByTier.get(tier);
+            pacerMetrics.bindQueueDepth(tier, queue::size);
+        }
+
+        HealthServer health = new HealthServer(pacerMetrics, client);
+        health.start();
 
         connectAndBindWithRetry(client, operatorId, routeId, routeRegistry);
 
@@ -74,14 +133,34 @@ public final class Main {
             }
         }, 30_000, 30_000);
 
-        TokenBucket tpsBucket = new TokenBucket(
-            Double.parseDouble(env("TPS_LIMIT", "500")),
-            Double.parseDouble(env("TPS_LIMIT", "500")),
-            System.currentTimeMillis());
-        PriorityGate priorityGate = new PriorityGate(Integer.parseInt(env("MAX_CONCURRENT_SUBMITS", "100")));
+        PriorityGate priorityGate = new PriorityGate(maxConcurrentSubmits);
+        OperatorSubmitServer submitServer = new OperatorSubmitServer(
+            client, queuesByTier, maxQueueDepthByTier, priorityGate, eventPublisher, pacerMetrics);
+
+        // Worker-пул, дёргающий реальный client.submitSm() — тот же
+        // daemon-ThreadFactory convention, что уже установлен в
+        // billing-service/KafkaIo.java и delivery-service/KafkaIo.java.
+        ExecutorService pacerWorkerPool = Executors.newFixedThreadPool(maxConcurrentSubmits, r -> {
+            Thread t = new Thread(r, "operator-smpp-pacer-worker");
+            t.setDaemon(true);
+            return t;
+        });
+
+        // Tick-петля пейсера — 20мс (50Hz), тот же Timer-паттерн, что и
+        // enquire-link-tick выше. Каждый тик: дренирует протухшие элементы
+        // (safety valve max-wait), считает PacerCore.decide(), диспетчирует
+        // допущенные элементы в pacerWorkerPool.
+        Timer pacerTimer = new Timer("pacer-dispatch-tick", true);
+        pacerTimer.scheduleAtFixedRate(new TimerTask() {
+            @Override
+            public void run() {
+                runPacerTick(queuesByTier, pacerCore, concurrentSubmitPermits, pacerMetrics,
+                    submitServer, pacerWorkerPool, maxQueueWaitMs);
+            }
+        }, 0, 20);
 
         Server grpcServer = ServerBuilder.forPort(Integer.parseInt(env("GRPC_PORT", "9000")))
-            .addService(new OperatorSubmitServer(client, tpsBucket, priorityGate, eventPublisher))
+            .addService(submitServer)
             .addService(new OperatorQuerySmServer(priorityGate))
             .build()
             .start();
@@ -92,6 +171,8 @@ public final class Main {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             connectionSupervisor.stop();
             enquireLinkTimer.cancel();
+            pacerTimer.cancel();
+            pacerWorkerPool.shutdown();
             grpcServer.shutdown();
             client.close();
             routeRegistry.unregister(operatorId, routeId);
@@ -101,6 +182,97 @@ public final class Main {
         }));
 
         grpcServer.awaitTermination();
+    }
+
+    /**
+     * Safety valve + PacerCore.decide() + фактическая диспетчеризация в
+     * worker-пул — один тик (20мс) tick-петли пейсера. Единственный
+     * "consumer" всех трёх очередей (single-threaded Timer), поэтому
+     * состояние очередей между началом и концом одного вызова не может
+     * поменяться конкурентно ниоткуда, кроме producer-стороны (submit()
+     * добавляет новые элементы через offer(), это безопасно для
+     * ArrayBlockingQueue при конкурентном poll()).
+     */
+    private static void runPacerTick(Map<PriorityTier, ArrayBlockingQueue<QueuedSubmit>> queuesByTier,
+                                      PacerCore pacerCore, Semaphore concurrentSubmitPermits, PacerMetrics pacerMetrics,
+                                      OperatorSubmitServer submitServer, ExecutorService pacerWorkerPool, long maxQueueWaitMs) {
+        long now = System.currentTimeMillis();
+
+        // Safety valve: max-wait-per-item. Протухшие элементы (дольше
+        // MAX_QUEUE_WAIT_MS в голове FIFO) дренируются и отклоняются ДО
+        // расчёта плана диспетчеризации — PacerCore ничего не знает о
+        // времени ожидания (только про глубину очереди/bucket'ы), значит
+        // без этого шага протухший элемент мог бы всё равно попасть в план.
+        for (PriorityTier tier : PriorityTier.values()) {
+            ArrayBlockingQueue<QueuedSubmit> queue = queuesByTier.get(tier);
+            QueuedSubmit head;
+            while ((head = queue.peek()) != null && now - head.enqueuedAtEpochMs() > maxQueueWaitMs) {
+                QueuedSubmit expired = queue.poll();
+                if (expired == null) {
+                    break;
+                }
+                pacerMetrics.recordRejected(tier, "PACER_QUEUE_TIMEOUT");
+                OperatorSubmitServer.sendRejected(expired.responseObserver(), "PACER_QUEUE_TIMEOUT");
+            }
+        }
+
+        Map<PriorityTier, Integer> queueDepth = new EnumMap<>(PriorityTier.class);
+        for (PriorityTier tier : PriorityTier.values()) {
+            queueDepth.put(tier, queuesByTier.get(tier).size());
+        }
+
+        PacerCore.AdmitPlan plan = pacerCore.decide(queueDepth, concurrentSubmitPermits.availablePermits(), now);
+
+        for (PriorityTier tier : PriorityTier.values()) {
+            ArrayBlockingQueue<QueuedSubmit> queue = queuesByTier.get(tier);
+            int admits = plan.forTier(tier);
+            for (int i = 0; i < admits; i++) {
+                QueuedSubmit queued = queue.poll();
+                if (queued == null) {
+                    break; // очередь опустела раньше плана (например протухла между расчётом и дренажом) — защитно
+                }
+                if (!concurrentSubmitPermits.tryAcquire()) {
+                    // PacerCore уже учёл availablePermits при расчёте плана —
+                    // сюда попадаем только при гонке, которой в
+                    // single-threaded tick-петле быть не должно. Защитно
+                    // возвращаем элемент в очередь (в хвост — FIFO-порядок
+                    // здесь не критичен, это fallback-путь, не штатный).
+                    queue.offer(queued);
+                    break;
+                }
+                pacerMetrics.recordDispatched(tier);
+                pacerWorkerPool.submit(() -> {
+                    try {
+                        submitServer.dispatchOne(queued);
+                    } finally {
+                        concurrentSubmitPermits.release();
+                    }
+                });
+            }
+        }
+    }
+
+    /**
+     * MAX_QUEUE_DEPTH_PER_TIER — если задан, применяется КАК ЕСТЬ ко всем
+     * трём tier'ам одинаково (используется в тестах, например =0, чтобы
+     * форсировать немедленный PACER_QUEUE_FULL). Если не задан — дефолт
+     * ≈3 секунды гарантированного трафика ЭТОГО tier'а (dynamic-seeking-russell.md
+     * "Safety valve"), считается из TPS_LIMIT и его доли (70/20/10).
+     */
+    private static Map<PriorityTier, Integer> buildMaxQueueDepthByTier(double tpsLimit) {
+        Map<PriorityTier, Integer> maxQueueDepthByTier = new EnumMap<>(PriorityTier.class);
+        String override = System.getenv("MAX_QUEUE_DEPTH_PER_TIER");
+        if (override != null && !override.isEmpty()) {
+            int depth = Integer.parseInt(override);
+            for (PriorityTier tier : PriorityTier.values()) {
+                maxQueueDepthByTier.put(tier, depth);
+            }
+            return maxQueueDepthByTier;
+        }
+        maxQueueDepthByTier.put(PriorityTier.HIGH, (int) Math.round(3 * tpsLimit * PacerCore.HIGH_SHARE));
+        maxQueueDepthByTier.put(PriorityTier.MEDIUM, (int) Math.round(3 * tpsLimit * PacerCore.MEDIUM_SHARE));
+        maxQueueDepthByTier.put(PriorityTier.LOW, (int) Math.round(3 * tpsLimit * PacerCore.LOW_SHARE));
+        return maxQueueDepthByTier;
     }
 
     /**
@@ -118,6 +290,15 @@ public final class Main {
         int port = Integer.parseInt(env("OPERATOR_SMSC_PORT", "2775"));
         String systemId = env("SMPP_SYSTEM_ID", "mpp_esme");
         String password = env("SMPP_PASSWORD", "demo_password");
+        // HLD §11.4 / GatewayRegistry.resolve (delivery-service): endpoint в
+        // operator_route:{operator_id}:{route_id} — адрес ВЛАДЕЮЩЕГО ИНСТАНСА
+        // для instance-addressed gRPC от Delivery, не адрес SMSC. Реальная
+        // находка (docker-compose прогон против живого SMSC, не статичное
+        // чтение): здесь ошибочно писался host+port SMSC — Delivery дозванивался
+        // напрямую на SMPP-порт SMSC как на gRPC-таргет и падал с UNAVAILABLE.
+        // Тот же паттерн, что уже сделан правильно в partner-smpp-gateway/Main.java
+        // (env("HOSTNAME") + ":" + свой listen-порт).
+        String ownGrpcEndpoint = env("HOSTNAME", "operator-smpp-session-manager-0") + ":" + env("GRPC_PORT", "9000");
 
         int attempt = 0;
         while (true) {
@@ -125,7 +306,7 @@ public final class Main {
                 client.connect(host, port);
                 client.bind(systemId, password, "", 5000);
                 long routeEpoch = System.nanoTime();
-                routeRegistry.register(operatorId, routeId, routeEpoch, host + ":" + port);
+                routeRegistry.register(operatorId, routeId, routeEpoch, ownGrpcEndpoint);
                 return;
             } catch (Exception e) {
                 attempt++;

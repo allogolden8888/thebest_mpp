@@ -56,7 +56,7 @@ public final class RecurringBillingJob implements Runnable {
 
         for (RecurringCharges.PlannedCharge charge : charges) {
             try {
-                long expectedEpoch = accountStore.peek(accountId).epoch();
+                long expectedEpoch = accountStore.peekEpoch(accountId);
                 var result = accountStore.applyChargeAtomically(accountId, charge.chargeId(), charge.amount(), expectedEpoch);
                 switch (result.outcome()) {
                     case APPLIED -> LOG.info(() -> "recurring charge applied: " + charge.description());

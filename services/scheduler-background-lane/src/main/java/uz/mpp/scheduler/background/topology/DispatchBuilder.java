@@ -53,6 +53,26 @@ public final class DispatchBuilder {
             .build();
     }
 
+    /**
+     * dispatch_stage_retry — publish на pipeline.retry.triggers. В отличие
+     * от DLR/notification republish, `attempt` здесь НЕ увеличивается ещё
+     * раз при отработке задержки — Pipeline Engine уже увеличил
+     * ExecutionState.attempt ДО постановки самой задачи (см.
+     * kafka_io.rs::schedule_stage_retry), это счётчик попыток самой
+     * DELIVERY-стадии, не счётчик попыток разбудить фоновую задачу (тот
+     * смысл, для которого attempt+1 существует у DLR/notification).
+     */
+    public static SchedulerBackgroundTask buildStageRetryTrigger(BackgroundTask task, Instant now) {
+        return SchedulerBackgroundTask.newBuilder()
+            .setTaskType(BackgroundTaskType.BACKGROUND_TASK_TYPE_STAGE_RETRY)
+            .setMessageId(task.sourceEventId()) // см. BackgroundTask.sourceEventId javadoc — message_id для этого типа
+            .setAttempt(task.attempt())
+            .setDueAt(toTimestamp(now))
+            .setDeadline(task.deadlineEpochMs() > 0 ? toTimestamp(Instant.ofEpochMilli(task.deadlineEpochMs())) : Timestamp.getDefaultInstance())
+            .setTargetTopic(task.targetTopic())
+            .build();
+    }
+
     private static Timestamp toTimestamp(Instant instant) {
         return Timestamp.newBuilder().setSeconds(instant.getEpochSecond()).setNanos(instant.getNano()).build();
     }

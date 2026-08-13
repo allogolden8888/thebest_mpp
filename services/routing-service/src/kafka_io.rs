@@ -3,17 +3,44 @@
 //! чистая функция (тестируется без сети), `run_loop` — реальная Kafka-обвязка,
 //! не интеграционно проверенная в этом окружении.
 
+use crate::offset_tracker::{OffsetTracker, PartitionKey};
 use crate::proto::stage_completed_event::StageResult;
 use crate::proto::stage_execute_command::StageExtension;
 use crate::proto::{Outcome, Protocol, RoutingResult, StageCompletedEvent, StageExecuteCommand};
 use crate::route_table::RouteTableSnapshot;
 use crate::routing::{ControlSnapshot, RoutingError, resolve_final_route};
+use arc_swap::ArcSwap;
 use prost::Message;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::message::Message as _;
 use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::{Offset, TopicPartitionList};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Semaphore;
+
+fn concurrency_limit(env_var: &str, default: usize) -> usize {
+    std::env::var(env_var).ok().and_then(|s| s.parse().ok()).filter(|n| *n > 0).unwrap_or(default)
+}
+
+/// См. то же обоснование в policy-service/src/kafka_io.rs — без потолка
+/// зависшая задача навсегда, ПОЛНОСТЬЮ МОЛЧА замирает watermark
+/// `OffsetTracker` на этой партиции.
+fn timeout_secs(env_var: &str, default: u64) -> Duration {
+    Duration::from_secs(std::env::var(env_var).ok().and_then(|s| s.parse().ok()).filter(|n| *n > 0).unwrap_or(default))
+}
+
+fn commit_watermark(consumer: &StreamConsumer, key: &PartitionKey, next_offset: i64) {
+    let mut tpl = TopicPartitionList::new();
+    if let Err(e) = tpl.add_partition_offset(&key.topic, key.partition, Offset::Offset(next_offset)) {
+        tracing::error!("commit_watermark: add_partition_offset {}:{} -> {next_offset}: {e}", key.topic, key.partition);
+        return;
+    }
+    if let Err(e) = consumer.commit(&tpl, rdkafka::consumer::CommitMode::Async) {
+        tracing::error!("commit_watermark: commit {}:{} -> {next_offset}: {e}", key.topic, key.partition);
+    }
+}
 
 pub const INPUT_TOPIC: &str = "stage.routing";
 pub const OUTPUT_TOPIC: &str = "stage.completed";
@@ -31,6 +58,17 @@ pub fn build_producer(bootstrap_servers: &str) -> FutureProducer {
     ClientConfig::new()
         .set("bootstrap.servers", bootstrap_servers)
         .set("message.timeout.ms", "5000")
+        // Тот же паттерн, что уже был найден и исправлен в pipeline-engine/src/kafka_io.rs
+        // build_producer: run_loop здесь тоже гоняет до 256 конкурентных задач ("в полёте",
+        // см. concurrency_limit("ROUTING_CONCURRENCY", 256) ниже) через ОДИН общий
+        // FutureProducer. С librdkafka-дефолтом queue.buffering.max.messages (100000)
+        // локальная очередь под такой конкурентностью упирается в QueueFull, а
+        // rdkafka-rust's FutureProducer::send ретраит на QueueFull каждые 100мс вплоть до
+        // queue_timeout — в pipeline-engine это давало стабильные ~1700мс на каждый
+        // .send() под нагрузкой. Поднимаем превентивно, тем же значением, не дожидаясь
+        // отдельного подтверждения на этом сервисе.
+        .set("queue.buffering.max.messages", "1000000")
+        .set("queue.buffering.max.kbytes", "2097151")
         .create()
         .expect("не удалось создать Kafka producer")
 }
@@ -86,31 +124,99 @@ fn build_event(command: &StageExecuteCommand, outcome: Outcome, reason_code: &st
     }
 }
 
-pub async fn run_loop(consumer: StreamConsumer, producer: FutureProducer, snapshot: RouteTableSnapshot, control: ControlSnapshot) {
+/// Обработка одной записи — вынесена из цикла для конкурентной spawned-задачи.
+/// Возвращает `true`, если offset безопасно продвинуть.
+async fn process_one_record(
+    payload: &[u8],
+    producer: &FutureProducer,
+    snapshot: &RouteTableSnapshot,
+    control: &ControlSnapshot,
+) -> bool {
+    let command = match StageExecuteCommand::decode(payload) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("не удалось декодировать StageExecuteCommand: {e}");
+            return false;
+        }
+    };
+
+    let event = handle_command(&command, snapshot, control);
+
+    let bytes = event.encode_to_vec();
+    let record = FutureRecord::to(OUTPUT_TOPIC).key(&event.message_id).payload(&bytes);
+
+    if let Err((e, _)) = producer.send(record, Duration::from_secs(5)).await {
+        tracing::error!("не удалось опубликовать StageCompletedEvent: {e}");
+        return false;
+    }
+    true
+}
+
+pub async fn run_loop(
+    consumer: StreamConsumer,
+    producer: FutureProducer,
+    live_snapshot: Arc<ArcSwap<RouteTableSnapshot>>,
+    control: ControlSnapshot,
+) {
     consumer.subscribe(&[INPUT_TOPIC]).expect("не удалось подписаться на stage.routing");
+
+    // Реальная находка (нагрузочный прогон 1000 msg/s): handle_command здесь
+    // чисто in-memory (ArcSwap-снапшот + ControlSnapshot), ни одного Redis
+    // round-trip — но последовательный Kafka produce+commit (одна запись за
+    // раз) сам по себе оказался узким местом, тот же класс находки, что уже
+    // был исправлен в destination-resolution-service/kafka_io.rs.
+    let consumer = Arc::new(consumer);
+    let control = Arc::new(control);
+    let semaphore = Arc::new(Semaphore::new(concurrency_limit("ROUTING_CONCURRENCY", 256)));
+    let tracker = Arc::new(OffsetTracker::new());
+    let process_timeout = timeout_secs("ROUTING_PROCESS_TIMEOUT_SECS", 30);
 
     loop {
         match consumer.recv().await {
             Ok(msg) => {
-                let Some(payload) = msg.payload() else { continue };
-                let command = match StageExecuteCommand::decode(payload) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::error!("не удалось декодировать StageExecuteCommand: {e}");
-                        continue;
-                    }
-                };
+                let key = PartitionKey { topic: msg.topic().to_string(), partition: msg.partition() };
+                let offset = msg.offset();
+                tracker.observe_received(&key, offset);
 
-                let event = handle_command(&command, &snapshot, &control);
-                let bytes = event.encode_to_vec();
-                let record = FutureRecord::to(OUTPUT_TOPIC).key(&event.message_id).payload(&bytes);
-                if let Err((e, _)) = producer.send(record, Duration::from_secs(5)).await {
-                    tracing::error!("не удалось опубликовать StageCompletedEvent: {e}");
+                let Some(payload) = msg.payload() else {
+                    if let Some(commit_to) = tracker.mark_done(&key, offset) {
+                        commit_watermark(&consumer, &key, commit_to);
+                    }
                     continue;
-                }
-                if let Err(e) = consumer.commit_message(&msg, rdkafka::consumer::CommitMode::Async) {
-                    tracing::error!("не удалось закоммитить offset: {e}");
-                }
+                };
+                let payload = payload.to_vec();
+
+                let permit = semaphore.clone().acquire_owned().await.expect("semaphore не должен закрываться");
+                let consumer_task = consumer.clone();
+                let producer_task = producer.clone();
+                let snapshot = live_snapshot.load_full();
+                let control_task = control.clone();
+                let tracker_task = tracker.clone();
+                let key_task = key.clone();
+
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    let done = match tokio::time::timeout(
+                        process_timeout,
+                        process_one_record(&payload, &producer_task, &snapshot, &control_task),
+                    )
+                    .await
+                    {
+                        Ok(done) => done,
+                        Err(_) => {
+                            tracing::error!(
+                                "process_one_record завис дольше {:?} (partition={} offset={offset}) — офсет НЕ коммитится, переобработается при следующем ребалансе/рестарте",
+                                process_timeout, key_task.partition
+                            );
+                            false
+                        }
+                    };
+                    if done {
+                        if let Some(commit_to) = tracker_task.mark_done(&key_task, offset) {
+                            commit_watermark(&consumer_task, &key_task, commit_to);
+                        }
+                    }
+                });
             }
             Err(e) => tracing::error!("ошибка Kafka consumer: {e}"),
         }

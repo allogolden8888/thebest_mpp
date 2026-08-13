@@ -9,6 +9,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 public final class Main {
 
@@ -88,11 +90,30 @@ public final class Main {
             accountStore.close();
         }, "billing-service-shutdown"));
 
+        // Реальная находка (нагрузочный прогон, 1000 msg/s): раньше
+        // необработанное исключение из KafkaIo.run() (например
+        // CommitFailedException — consumer выброшен из группы за
+        // превышение max.poll.interval.ms) просто вываливалось из main() и
+        // печаталось как "Exception in thread main", но JVM НЕ завершался —
+        // HealthServer держит внутренний com.sun.net.httpserver.HttpServer
+        // с НЕ-daemon потоком "HTTP-Dispatcher" (публичного API сделать его
+        // daemon нет, setExecutor() влияет только на обработчики хендлеров,
+        // не на сам dispatcher-поток), так что процесс оставался "живым"
+        // (docker ps: Up) с полностью мёртвым consumer'ом, при этом
+        // /healthz и /readyz продолжали отвечать 200 — невидимый полный
+        // отказ. System.exit() — единственный надёжный способ гарантированно
+        // завершить JVM независимо от того, какие ещё не-daemon потоки
+        // библиотеки создают; restart-policy в docker-compose.yml поднимет
+        // контейнер заново после этого.
         try {
             KafkaIo.run(consumer, producer, accountStore, billingService, accountId, running);
-        } finally {
             consumer.close();
             producer.close();
+        } catch (Throwable t) {
+            Logger.getLogger(Main.class.getName()).log(Level.SEVERE, t,
+                () -> "billing-service Kafka consumer loop упал фатально — принудительно завершаем "
+                    + "процесс (не остаёмся zombie-процессом с живым /healthz у мёртвого consumer'а)");
+            System.exit(1);
         }
     }
 }

@@ -2,6 +2,7 @@ package uz.mpp.delivery;
 
 import com.google.protobuf.ByteString;
 import java.util.List;
+import java.util.Set;
 import uz.mpp.delivery.MessageContextStore.MessageContext;
 import uz.mpp.delivery.SegmentMessage.Segment;
 import uz.mpp.platformcontracts.common.v1.DeliveryExtension;
@@ -64,7 +65,13 @@ public final class DeliveryService {
                 .setQueueMsgId(queueMsgId)
                 .setOperatorId(extension.getResolvedOperatorId())
                 .setRouteId(extension.getRouteId())
-                .setDestinationAddress(context.msisdn());
+                .setDestinationAddress(context.msisdn())
+                // Приоритет — partner-supplied (REST API), разрешён ещё на
+                // ingestion в partner-rest-receiver (там же и дефолт для
+                // непомеченного трафика). Здесь чистый passthrough до самой
+                // SMPP-трубы — тарификация по приоритету осознанно не входит
+                // в этот срез.
+                .setPriorityFlag(extension.getPriorityFlag());
         for (Segment segment : segments) {
             builder.addSegments(
                 MessageSegment.newBuilder()
@@ -78,8 +85,81 @@ public final class DeliveryService {
         return builder.build();
     }
 
+    /**
+     * Причины, по которым имеет смысл повторить попытку — временная нехватка
+     * ёмкости/окна, а не настоящий отказ. До сих пор {@code retryable}
+     * значило "outcome != SUCCEEDED", то есть true для абсолютно любой
+     * неудачи, включая настоящие SMPP-отклонения — поле при этом нигде не
+     * читалось (pipeline-engine его игнорировал), так что мёртвые данные не
+     * вредили. pipeline-engine параллельно дорабатывается, чтобы ретраить
+     * DELIVERY до истечения {@code message_ttl} именно по этому полю —
+     * значит разметка должна стать честной: бесконечный ретрай настоящего
+     * permanent-отказа (реальный SMPP reject от оператора) хуже, чем один
+     * раз не отретраить пограничный transient-случай, поэтому неизвестный
+     * reasonCode по умолчанию считается permanent, а не retryable.
+     *
+     * <p>Retryable (transient/capacity):
+     * <ul>
+     *   <li>{@code TPS_THROTTLED} — legacy-причина отказа TokenBucket в
+     *       operator-smpp-session-manager, может ещё недолго встречаться
+     *       параллельно с новым HTB-пейсером</li>
+     *   <li>{@code PACER_QUEUE_FULL}/{@code PACER_QUEUE_TIMEOUT} — safety
+     *       valve нового приоритетного пейсера (переполнение очереди тира /
+     *       превышение максимального ожидания в ней) — чистая нехватка
+     *       ёмкости трубы, не отказ оператора</li>
+     *   <li>{@code SUBMIT_TIMEOUT} — OperatorSubmitServer не дождался ответа
+     *       SMSC на {@code submit_sm} за {@code SUBMIT_TIMEOUT_MS}; исход
+     *       {@code AMBIGUOUS}, не факт, что оператор реально отклонил</li>
+     *   <li>{@code GATEWAY_INSTANCE_NOT_FOUND} — GatewayRegistry ещё не
+     *       перерегистрировался/переизбрание в процессе (см. KafkaIo); нет
+     *       реального side effect, ретраится сколько угодно раз безопасно</li>
+     *   <li>{@code AMBIGUOUS_PRIOR_ATTEMPT_NOT_RESUBMITTED} — крэш между
+     *       реальным submit и записью исхода (см. KafkaIo); неизвестно,
+     *       дошёл ли submit, но сама причина не запрещает попытку позже</li>
+     * </ul>
+     *
+     * <p>Permanent (не retryable):
+     * <ul>
+     *   <li>{@code SMPP_STATUS_0x...} — настоящий SMPP-level reject
+     *       оператора (см. {@code OperatorSubmitServer})</li>
+     *   <li>{@code MESSAGE_CONTEXT_NOT_FOUND} — данных в Redis нет (см.
+     *       KafkaIo), повторный submit их не создаст</li>
+     *   <li>имена {@code io.grpc.Status.Code} (например
+     *       {@code UNAVAILABLE}/{@code DEADLINE_EXCEEDED}, см.
+     *       {@code handleGrpcFailure} в KafkaIo) — на gRPC-транспортном
+     *       уровне это чаще реальная конфиг/роутинг проблема, а не
+     *       временная нехватка ёмкости пейсера</li>
+     *   <li>всё остальное неизвестное — permanent по умолчанию (см. выше
+     *       про консервативность)</li>
+     * </ul>
+     */
+    private static final Set<String> RETRYABLE_REASON_CODES = Set.of(
+        "TPS_THROTTLED",
+        "PACER_QUEUE_FULL",
+        "PACER_QUEUE_TIMEOUT",
+        "SUBMIT_TIMEOUT",
+        "GATEWAY_INSTANCE_NOT_FOUND",
+        "AMBIGUOUS_PRIOR_ATTEMPT_NOT_RESUBMITTED"
+    );
+
+    /**
+     * Пакетная (не {@code private}) видимость намеренно — чистая функция,
+     * покрывается табличным тестом напрямую из {@code DeliveryServiceTest}
+     * без похода через gRPC/Kafka.
+     */
+    static boolean isRetryable(String reasonCode) {
+        if (reasonCode == null) {
+            return false;
+        }
+        if (reasonCode.startsWith("SMPP_STATUS_0x")) {
+            return false;
+        }
+        return RETRYABLE_REASON_CODES.contains(reasonCode);
+    }
+
     /** {@code publish_stage_completed} — построение события, без публикации. */
     public static StageCompletedEvent buildEvent(StageExecuteCommand command, String queueMsgId, SubmitOutcome outcome) {
+        boolean retryable = outcome.outcome() != Outcome.OUTCOME_SUCCEEDED && isRetryable(outcome.reasonCode());
         return StageCompletedEvent.newBuilder()
             .setEventId("evt-" + command.getStageExecutionId())
             .setMessageId(command.getMessageId())
@@ -88,7 +168,7 @@ public final class DeliveryService {
             .setStageName(command.getStageName())
             .setOutcome(outcome.outcome())
             .setReasonCode(outcome.reasonCode() == null ? "" : outcome.reasonCode())
-            .setRetryable(outcome.outcome() != Outcome.OUTCOME_SUCCEEDED)
+            .setRetryable(retryable)
             .setTraceparent(command.getTraceparent())
             .setDelivery(DeliveryResult.newBuilder().setQueueMsgId(queueMsgId))
             .build();

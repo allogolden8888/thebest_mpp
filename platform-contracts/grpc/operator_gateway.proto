@@ -28,6 +28,11 @@ message SubmitRequest {
   string destination_address = 6;
   repeated MessageSegment segments = 7;
   google.protobuf.Timestamp deadline = 8;
+  // SMPP priority_flag (0-3, 3=наивысший) — прокинуто без изменений в
+  // ShortMessagePdu.priorityFlag на operator-smpp-session-manager, также
+  // определяет очередь приоритета в пейсере туннеля (см. DeliveryExtension
+  // в platform-contracts/common/stage_contract.proto).
+  int32 priority_flag = 9;
 }
 
 message MessageSegment {

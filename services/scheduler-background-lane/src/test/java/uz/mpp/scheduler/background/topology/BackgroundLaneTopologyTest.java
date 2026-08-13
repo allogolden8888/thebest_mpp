@@ -52,6 +52,17 @@ class BackgroundLaneTopologyTest {
             .build();
     }
 
+    /** STAGE_RETRY несёт message_id, не source_event_id — см. BackgroundTask.sourceEventId javadoc. */
+    private static SchedulerBackgroundTask stageRetryTask(String messageId, int attempt, long dueAtEpochSec) {
+        return SchedulerBackgroundTask.newBuilder()
+            .setTaskType(BackgroundTaskType.BACKGROUND_TASK_TYPE_STAGE_RETRY)
+            .setMessageId(messageId)
+            .setAttempt(attempt)
+            .setDueAt(Timestamp.newBuilder().setSeconds(dueAtEpochSec).build())
+            .setTargetTopic(Topics.PIPELINE_RETRY_TRIGGERS)
+            .build();
+    }
+
     @Test
     void dlrRetryTaskDispatchedOnceDue() {
         long now = Instant.now().getEpochSecond();
@@ -104,6 +115,39 @@ class BackgroundLaneTopologyTest {
 
         var store = driver.<String, uz.mpp.scheduler.background.core.BackgroundTask>getKeyValueStore(BackgroundCommandProcessor.STORE_NAME);
         assertEquals(null, store.get("evt-4"), "задача должна быть удалена из store после диспатча");
+    }
+
+    @Test
+    void stageRetryTaskDispatchedToPipelineRetryTriggersWithAttemptUnchanged() {
+        // В отличие от DLR/notification republish (attempt+1 — счётчик
+        // попыток РАЗБУДИТЬ саму фоновую задачу), для STAGE_RETRY attempt
+        // уже увеличен Pipeline Engine'ом ДО постановки задачи (см.
+        // DispatchBuilder.buildStageRetryTrigger javadoc) — здесь он
+        // остаётся тем же, не удваивается.
+        long now = Instant.now().getEpochSecond();
+        input.pipeInput("m1", stageRetryTask("m1", 2, now - 10).toByteArray());
+
+        driver.advanceWallClockTime(Duration.ofSeconds(1));
+
+        TestOutputTopic<String, byte[]> output = driver.createOutputTopic(
+            Topics.PIPELINE_RETRY_TRIGGERS, Serdes.String().deserializer(), Serdes.ByteArray().deserializer());
+        assertFalse(output.isEmpty(), "просроченная STAGE_RETRY задача должна быть диспатчнута");
+
+        SchedulerBackgroundTask dispatched = parse(output.readValue());
+        assertEquals("m1", dispatched.getMessageId());
+        assertEquals(2, dispatched.getAttempt(), "attempt НЕ должен увеличиться повторно на диспатче STAGE_RETRY");
+    }
+
+    @Test
+    void stageRetryTaskNotYetDueIsNotDispatched() {
+        long now = Instant.now().getEpochSecond();
+        input.pipeInput("m2", stageRetryTask("m2", 1, now + 3600).toByteArray());
+
+        driver.advanceWallClockTime(Duration.ofSeconds(1));
+
+        TestOutputTopic<String, byte[]> output = driver.createOutputTopic(
+            Topics.PIPELINE_RETRY_TRIGGERS, Serdes.String().deserializer(), Serdes.ByteArray().deserializer());
+        assertTrue(output.isEmpty(), "задача с будущим due_at не должна диспатчиться сейчас");
     }
 
     private static SchedulerBackgroundTask parse(byte[] bytes) {

@@ -1,12 +1,17 @@
 package uz.mpp.delivery;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
@@ -74,7 +79,39 @@ public final class KafkaIo {
         props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
         props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
+        // Тот же класс риска, что уже найден и исправлен в
+        // billing-service/KafkaIo.java#buildProducer (см. комментарий там
+        // для полного разбора): без явной настройки KafkaProducer
+        // (kafka-clients 3.9.0) работает на дефолтах — buffer.memory=32MB,
+        // max.block.ms=60000мс — а до DELIVERY_CONCURRENCY (128 по
+        // умолчанию) worker-потоков шлют в один и тот же shared producer.
+        // Здесь риск даже более прямой, чем в billing: producer.send()
+        // вызывается ПОСЛЕ блокирующего gRPC submit (реальный SMPP
+        // round-trip), так что каждый воркер держит слот в буфере дольше,
+        // прежде чем его сообщение реально уйдёт в сеть — если брокер
+        // отстаёт от темпа продьюса, send() молча БЛОКИРУЕТ вызывающий
+        // поток до max.block.ms (60с!) в ожидании места в буфере, ДО
+        // возврата Future, то есть до PRODUCER_SEND_TIMEOUT на .get() дело
+        // не доходит. Применяем тот же фикс превентивно, тем же способом:
+        // 1) buffer.memory поднят с запасом на всю конкурентность сервиса;
+        // 2) max.block.ms снижен до PRODUCER_SEND_TIMEOUT — если
+        // backpressure всё же наступит, воркер падает громко за 10с
+        // (at-least-once переподхватит), а не зависает на минуту молча.
+        props.put(ProducerConfig.BUFFER_MEMORY_CONFIG, 67_108_864L); // 64MB (было 32MB по умолчанию)
+        props.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, PRODUCER_SEND_TIMEOUT.toMillis()); // 10s (было 60s по умолчанию)
         return new KafkaProducer<>(props);
+    }
+
+    private static int envInt(String key, int fallback) {
+        String v = System.getenv(key);
+        if (v == null || v.isEmpty()) {
+            return fallback;
+        }
+        try {
+            return Integer.parseInt(v);
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
     }
 
     public static void run(
@@ -88,23 +125,57 @@ public final class KafkaIo {
         AtomicBoolean running
     ) {
         consumer.subscribe(List.of(INPUT_TOPIC));
+        // Реальная находка (нагрузочный прогон 1000 msg/s, JFR подтвердил
+        // отсутствие CPU-хотспота — сервис большую часть времени ждёт, не
+        // считает): последовательная обработка — Redis fetch(msgctx) ->
+        // Redis resolve(gateway) -> БЛОКИРУЮЩИЙ gRPC submit (реальный SMPP
+        // round-trip до SMSC через operator-smpp-session-manager) -> Kafka
+        // produce().get() -> следующая запись. Тот же класс находки, что
+        // уже был исправлен в billing-service/KafkaIo.java (пул потоков,
+        // существующий OffsetTracker переиспользован без изменений — только
+        // подаём результаты в него в порядке offset, не порядке завершения).
+        // Все зависимости (MessageContextStore/GatewayRegistry/
+        // SubmitIdempotencyStore — один общий Lettuce-коннекшн,
+        // OperatorSubmitClient — ManagedChannel в ConcurrentHashMap,
+        // KafkaProducer — потокобезопасен по документации клиента) уже были
+        // сделаны потокобезопасными в более ранних правках этой сессии.
+        ExecutorService pool = Executors.newFixedThreadPool(envInt("DELIVERY_CONCURRENCY", 128), r -> {
+            Thread t = new Thread(r, "delivery-worker");
+            t.setDaemon(true);
+            return t;
+        });
         try {
             while (running.get()) {
                 ConsumerRecords<String, byte[]> records = consumer.poll(Duration.ofSeconds(1));
+                if (records.isEmpty()) {
+                    continue;
+                }
+
+                Map<ConsumerRecord<String, byte[]>, Future<Void>> futures = new HashMap<>();
+                Map<TopicPartition, List<ConsumerRecord<String, byte[]>>> byPartition = new HashMap<>();
+                for (ConsumerRecord<String, byte[]> record : records) {
+                    byPartition.computeIfAbsent(new TopicPartition(record.topic(), record.partition()), k -> new ArrayList<>()).add(record);
+                    futures.put(record, pool.submit(() -> {
+                        processRecord(record, contextStore, gatewayRegistry, controlSnapshot, submitClient, idempotencyStore, producer);
+                        return null;
+                    }));
+                }
 
                 OffsetTracker tracker = new OffsetTracker();
-                for (ConsumerRecord<String, byte[]> record : records) {
-                    TopicPartition tp = new TopicPartition(record.topic(), record.partition());
-                    if (tracker.isSuspended(tp)) {
-                        continue;
-                    }
-                    try {
-                        processRecord(record, contextStore, gatewayRegistry, controlSnapshot, submitClient, idempotencyStore, producer);
-                        tracker.recordSuccess(tp, record.offset());
-                    } catch (Exception e) {
-                        LOG.log(Level.SEVERE, "не удалось обработать stage.delivery запись partition=" + tp
-                            + " offset=" + record.offset() + ", оффсет не коммитится, партишен приостановлен до следующего поллинга", e);
-                        tracker.recordFailure(tp);
+                for (Map.Entry<TopicPartition, List<ConsumerRecord<String, byte[]>>> entry : byPartition.entrySet()) {
+                    TopicPartition tp = entry.getKey();
+                    List<ConsumerRecord<String, byte[]>> ordered = entry.getValue();
+                    ordered.sort(Comparator.comparingLong(ConsumerRecord::offset));
+                    for (ConsumerRecord<String, byte[]> record : ordered) {
+                        try {
+                            futures.get(record).get();
+                            tracker.recordSuccess(tp, record.offset());
+                        } catch (Exception e) {
+                            LOG.log(Level.SEVERE, "не удалось обработать stage.delivery запись partition=" + tp
+                                + " offset=" + record.offset() + ", оффсет не коммитится, партишен приостановлен до следующего поллинга", e);
+                            tracker.recordFailure(tp);
+                            break; // остальные записи этой партиции в батче остаются неподтверждёнными, at-least-once
+                        }
                     }
                 }
 
@@ -119,6 +190,8 @@ public final class KafkaIo {
             if (running.get()) {
                 throw e;
             }
+        } finally {
+            pool.shutdown();
         }
     }
 
@@ -186,8 +259,7 @@ public final class KafkaIo {
                 + command.getMessageId() + ", завершаем как SUBMISSION_OUTCOME_UNKNOWN вместо блокировки партиции");
             SubmitOutcome outcome = DeliveryService.handleGrpcFailure("MESSAGE_CONTEXT_NOT_FOUND");
             StageCompletedEvent event = DeliveryService.buildEvent(command, deterministicQueueMsgId, outcome);
-            producer.send(new ProducerRecord<>(OUTPUT_TOPIC, event.getMessageId(), event.toByteArray()))
-                .get(PRODUCER_SEND_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            sendCompletedEvent(producer, event);
             return;
         }
 
@@ -238,6 +310,14 @@ public final class KafkaIo {
         }
 
         StageCompletedEvent event = DeliveryService.buildEvent(command, queueMsgId, outcome);
+        sendCompletedEvent(producer, event);
+    }
+
+    /**
+     * Общий helper для обоих мест публикации {@code stage.completed} в
+     * {@link #processRecord} (путь MESSAGE_CONTEXT_NOT_FOUND и обычный путь).
+     */
+    private static void sendCompletedEvent(KafkaProducer<String, byte[]> producer, StageCompletedEvent event) throws Exception {
         producer.send(new ProducerRecord<>(OUTPUT_TOPIC, event.getMessageId(), event.toByteArray()))
             .get(PRODUCER_SEND_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
     }

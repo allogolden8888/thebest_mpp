@@ -37,12 +37,26 @@ public final class BillingAccountStore {
     private static final String SCRIPT = loadScript();
 
     private final RedisClient client;
+    // Реальная находка (нагрузочный прогон): peek()/applyChargeAtomically()
+    // раньше каждый открывали НОВОЕ соединение (client.connect() в
+    // try-with-resources) — на КАЖДЫЙ charge это два полных TCP-хендшейка +
+    // Redis AUTH вместо одного переиспользуемого соединения. Под
+    // конкурентной обработкой (см. KafkaIo.run — теперь пул потоков, не
+    // последовательный цикл) это стало бы ещё заметнее: тот же класс
+    // находки, что уже был исправлен в delivery-service (MessageContextStore/
+    // GatewayRegistry) — Lettuce StatefulRedisConnection документированно
+    // потокобезопасно для конкурентного использования из многих потоков
+    // (внутреннее мультиплексирование поверх одного сокета), держим его на
+    // весь жизненный цикл сервиса, не на вызов.
+    private final StatefulRedisConnection<String, String> connection;
 
     public BillingAccountStore(String redisUrl) {
         this.client = RedisClient.create(redisUrl);
+        this.connection = client.connect();
     }
 
     public void close() {
+        connection.close();
         client.shutdown();
     }
 
@@ -68,9 +82,26 @@ public final class BillingAccountStore {
      * отклонит устаревший вызов).
      */
     public Account peek(String accountId) {
-        try (StatefulRedisConnection<String, String> connection = client.connect()) {
-            return readAccount(connection.sync(), "billing:account:" + accountId);
-        }
+        return readAccount(connection.sync(), "billing:account:" + accountId);
+    }
+
+    private static String chargesKey(String accountId) {
+        return "billing:account:" + accountId + ":charges";
+    }
+
+    /**
+     * Облегчённая версия {@link #peek} только для {@code expectedEpoch} —
+     * реальная находка (JFR-профилирование под нагрузкой): вызывающая
+     * сторона (KafkaIo/RecurringBillingJob) до этого фикса дёргала
+     * {@code peek(accountId).epoch()} на КАЖДОЕ сообщение, что тянуло за
+     * собой {@link #readAccount} и его {@code Set.of(raw.split(","))} —
+     * пересборку всей (растущей без ограничения) истории charge_id
+     * аккаунта ради одного числа. Один точечный HGET вместо HGETALL +
+     * парсинг всех полей.
+     */
+    public long peekEpoch(String accountId) {
+        String raw = connection.sync().hget("billing:account:" + accountId, "epoch");
+        return raw == null ? 0 : Long.parseLong(raw);
     }
 
     /**
@@ -83,39 +114,32 @@ public final class BillingAccountStore {
     @SuppressWarnings("unchecked")
     public ChargeResult applyChargeAtomically(String accountId, String chargeId, long amount, long expectedEpoch) {
         String key = "billing:account:" + accountId;
-        try (StatefulRedisConnection<String, String> connection = client.connect()) {
-            RedisCommands<String, String> commands = connection.sync();
-            List<Object> result = (List<Object>) commands.eval(
-                SCRIPT, ScriptOutputType.MULTI, new String[] {key}, chargeId, String.valueOf(amount), String.valueOf(expectedEpoch));
+        RedisCommands<String, String> commands = connection.sync();
+        List<Object> result = (List<Object>) commands.eval(
+            SCRIPT, ScriptOutputType.MULTI, new String[] {key, chargesKey(accountId)},
+            chargeId, String.valueOf(amount), String.valueOf(expectedEpoch));
 
-            String outcomeName = (String) result.get(0);
-            long balance = Long.parseLong((String) result.get(1));
-            AccountState state = AccountState.valueOf((String) result.get(2));
-            long epoch = Long.parseLong((String) result.get(3));
+        String outcomeName = (String) result.get(0);
+        long balance = Long.parseLong((String) result.get(1));
+        AccountState state = AccountState.valueOf((String) result.get(2));
+        long epoch = Long.parseLong((String) result.get(3));
 
-            ChargeOutcome outcome = ChargeOutcome.valueOf(outcomeName);
-            Set<String> processedChargeIds = outcome == ChargeOutcome.APPLIED
-                ? peekProcessedChargeIds(commands, key)
-                : Set.of();
-            Account account = new Account(balance, state, epoch, processedChargeIds);
-            return new ChargeResult(account, outcome);
-        }
-    }
-
-    /**
-     * Только для заполнения {@link Account#processedChargeIds()} в
-     * возвращаемом результате (вызывающая сторона нигде не читает этот
-     * набор из результата напрямую в проде — используется только в тестах
-     * для проверки, что charge_id реально добавлен); отдельный HGET, не
-     * часть атомарности — набор уже гарантированно обновлён Lua-скриптом
-     * до этого чтения.
-     */
-    private Set<String> peekProcessedChargeIds(RedisCommands<String, String> commands, String key) {
-        String raw = commands.hget(key, "processed_charge_ids");
-        if (raw == null || raw.isEmpty()) {
-            return Set.of();
-        }
-        return Set.of(raw.split(","));
+        ChargeOutcome outcome = ChargeOutcome.valueOf(outcomeName);
+        // Реальная находка (JFR-профилирование под нагрузкой): раньше здесь
+        // после каждого APPLIED делался ещё один HGET processed_charge_ids
+        // + String.split(",") + Set.of(...) — пересборка ВСЕЙ (растущей без
+        // ограничения, см. apply_atomic_charge.lua) истории charge_id
+        // аккаунта на каждое единичное списание. `Set.of()` из этого
+        // распада доминировал в CPU-профиле (java.util.ImmutableCollections
+        // $SetN.probe — 62% всех ExecutionSample-сэмплов на реальном
+        // прогоне). Ни один вызывающий код не читает
+        // Account#processedChargeIds() из ВОЗВРАЩАЕМОГО результата этого
+        // метода ни в проде (KafkaIo/BillingService.buildEvent используют
+        // только outcome()), ни в тестах (BillingAccountStoreTest проверяет
+        // dedup-набор через отдельный store.peek(), не через этот возврат) —
+        // само поле здесь чистый мёртвый груз.
+        Account account = new Account(balance, state, epoch, Set.of());
+        return new ChargeResult(account, outcome);
     }
 
     private Account readAccount(RedisCommands<String, String> commands, String key) {
@@ -126,9 +150,13 @@ public final class BillingAccountStore {
         AccountState state = AccountState.valueOf(fields.get("state"));
         long balance = Long.parseLong(fields.get("balance"));
         long epoch = Long.parseLong(fields.get("epoch"));
-        Set<String> processedChargeIds = fields.containsKey("processed_charge_ids") && !fields.get("processed_charge_ids").isEmpty()
-            ? Set.of(fields.get("processed_charge_ids").split(","))
-            : Set.of();
+        // dedup-набор — отдельный Redis SET (billing:account:{id}:charges),
+        // не поле этого хэша, см. apply_atomic_charge.lua. Ключ аккаунта —
+        // "billing:account:{id}", отсюда и достаём accountId обратно для
+        // SMEMBERS, не идеально красиво, но readAccount() — не hot path
+        // (peek() используется только в тестах после fix'а peekEpoch()).
+        String accountId = key.substring("billing:account:".length());
+        Set<String> processedChargeIds = commands.smembers(chargesKey(accountId));
         return new Account(balance, state, epoch, processedChargeIds);
     }
 }

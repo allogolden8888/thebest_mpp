@@ -18,12 +18,21 @@ fn main() {
             includes.push(candidate.to_string());
         }
     }
+    // config_and_control.proto (ConfigChangeEvent) — тот же package mpp.events.v1,
+    // что message_events.proto, поэтому просто добавлен в тот же вызов (мержится
+    // в тот же mpp.events.v1.rs) — не нужен отдельный compile_protos/extern_path,
+    // как в сервисах с плоской (не nested) раскладкой модулей (см.
+    // destination-resolution-service/build.rs).
     prost_build::compile_protos(
         &[
             format!("{proto_root}/common/enums.proto"),
             format!("{proto_root}/common/types.proto"),
             format!("{proto_root}/common/stage_contract.proto"),
             format!("{proto_root}/events/message_events.proto"),
+            format!("{proto_root}/events/config_and_control.proto"),
+            // Retry-until-expiry (dynamic-seeking-russell.md): STAGE_RETRY
+            // SchedulerBackgroundTask — та же mpp.events.v1, тот же вызов.
+            format!("{proto_root}/events/scheduler_events.proto"),
         ],
         &includes,
     )
@@ -33,4 +42,6 @@ fn main() {
     println!("cargo:rerun-if-changed={proto_root}/common/types.proto");
     println!("cargo:rerun-if-changed={proto_root}/common/stage_contract.proto");
     println!("cargo:rerun-if-changed={proto_root}/events/message_events.proto");
+    println!("cargo:rerun-if-changed={proto_root}/events/config_and_control.proto");
+    println!("cargo:rerun-if-changed={proto_root}/events/scheduler_events.proto");
 }

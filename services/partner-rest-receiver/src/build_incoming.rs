@@ -29,6 +29,14 @@ fn to_timestamp(t: SystemTime) -> Timestamp {
 /// SMSC/операторов) явно помечено как выбор этого среза, не найденное число.
 pub const DEFAULT_MESSAGE_TTL: Duration = Duration::from_secs(24 * 3600);
 
+/// SMPP priority_flag дефолт для партнёров, не указавших `priority` явно —
+/// намеренно НЕ 0 (SMPP-дефолт для непомеченного трафика), а MEDIUM (2 —
+/// см. `PriorityTier.forPriorityFlag` на operator-smpp-session-manager),
+/// чтобы немаркированный/легаси-трафик не проваливался в LOW-очередь
+/// (гарантия всего 10% туннеля) просто из-за того, что партнёр не обновил
+/// интеграцию.
+pub const DEFAULT_PRIORITY_FLAG: i32 = 2;
+
 pub fn build_incoming_message(
     req: &ValidatedRequest,
     message_id: String,
@@ -53,6 +61,7 @@ pub fn build_incoming_message(
         body: Some(Body::Sms(sms)),
         received_at: Some(to_timestamp(now)),
         message_ttl: Some(to_timestamp(now + DEFAULT_MESSAGE_TTL)),
+        priority_flag: req.priority.map(|p| p as i32).unwrap_or(DEFAULT_PRIORITY_FLAG),
     }
 }
 
@@ -71,6 +80,7 @@ mod tests {
             sender_id: "Click".into(),
             body: "Your OTP is 123456".into(),
             idempotency_key: None,
+            priority: None,
         }
     }
 
@@ -121,5 +131,19 @@ mod tests {
             Some(Body::Sms(sms)) => assert_eq!(sms.encoding, "UCS2"),
             other => panic!("ожидали SMS payload, получили {other:?}"),
         }
+    }
+
+    #[test]
+    fn priority_absent_defaults_to_medium() {
+        let msg = build_incoming_message(&req(), "m1".into(), "t1".into(), SystemTime::now());
+        assert_eq!(msg.priority_flag, DEFAULT_PRIORITY_FLAG);
+    }
+
+    #[test]
+    fn priority_present_passes_through_unchanged() {
+        let mut r = req();
+        r.priority = Some(3);
+        let msg = build_incoming_message(&r, "m1".into(), "t1".into(), SystemTime::now());
+        assert_eq!(msg.priority_flag, 3);
     }
 }

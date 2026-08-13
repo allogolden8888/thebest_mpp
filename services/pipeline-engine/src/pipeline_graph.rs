@@ -11,6 +11,7 @@
 
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Node {
@@ -42,5 +43,99 @@ impl PipelineDefinition {
 
     pub fn entry_node(&self) -> &Node {
         self.node(&self.entry_node_id).expect("entry_node_id обязан ссылаться на существующий узел (config_schemas/pipeline.schema.json уже это проверяет)")
+    }
+}
+
+/// `config.changes` (entity_type=PIPELINE) — `config_schemas/pipeline.schema.json`
+/// целиком. `partner_id`/`application_id` сознательно проигнорированы
+/// (`#[serde(default)]`, не читаются) — этот сервис резолвит один
+/// платформенный дефолт-пайплайн, не per-partner (та же упрощённая
+/// семантика, что уже была у статического файла, hot-reload её не
+/// расширяет, только подключает к реальному Kafka).
+#[derive(Debug, Clone, Deserialize)]
+pub struct PipelineConfigPayload {
+    pub pipeline_id: String,
+    pub version: u32,
+    pub status: String, // "active" | "archived"
+    pub entry_node_id: String,
+    pub nodes: Vec<Node>,
+}
+
+/// Живое состояние графа поверх статического bootstrap-файла — единый
+/// глобальный слот (last-active-wins), тот же принцип, что
+/// policy-service::config_reload::ConfigOverlay для POLICY_RULESET. arc-swap
+/// был объявлен в services_specifictaion.md §2.3, но до этого файла не был
+/// даже зависимостью Cargo.toml, не то что подключён к реальному консьюмеру
+/// (см. README "Что НЕ реализовано").
+pub struct ConfigOverlay {
+    base: PipelineDefinition,
+    overlay: Mutex<Option<PipelineDefinition>>,
+}
+
+impl ConfigOverlay {
+    pub fn new(base: PipelineDefinition) -> Self {
+        ConfigOverlay { base, overlay: Mutex::new(None) }
+    }
+
+    pub fn apply(&self, payload: PipelineConfigPayload) {
+        let mut overlay = self.overlay.lock().expect("overlay mutex poisoned");
+        *overlay = if payload.status == "archived" {
+            None
+        } else {
+            Some(PipelineDefinition {
+                pipeline_id: payload.pipeline_id,
+                version: payload.version,
+                entry_node_id: payload.entry_node_id,
+                nodes: payload.nodes,
+            })
+        };
+    }
+
+    pub fn current(&self) -> PipelineDefinition {
+        self.overlay.lock().expect("overlay mutex poisoned").clone().unwrap_or_else(|| self.base.clone())
+    }
+}
+
+#[cfg(test)]
+mod overlay_tests {
+    use super::*;
+
+    fn base() -> PipelineDefinition {
+        serde_json::from_str(include_str!("../../../config_schemas/examples/pipeline.valid.json")).unwrap()
+    }
+
+    fn payload(status: &str, entry_node_id: &str) -> PipelineConfigPayload {
+        PipelineConfigPayload {
+            pipeline_id: "hot-reloaded".to_string(),
+            version: 2,
+            status: status.to_string(),
+            entry_node_id: entry_node_id.to_string(),
+            nodes: vec![Node { node_id: entry_node_id.to_string(), stage_name: "DESTINATION_RESOLUTION".to_string(), next: HashMap::new() }],
+        }
+    }
+
+    #[test]
+    fn starts_out_matching_the_static_baseline() {
+        let overlay = ConfigOverlay::new(base());
+        assert_eq!(overlay.current().pipeline_id, base().pipeline_id);
+    }
+
+    #[test]
+    fn active_event_replaces_the_pipeline() {
+        let overlay = ConfigOverlay::new(base());
+        overlay.apply(payload("active", "n1"));
+        let current = overlay.current();
+        assert_eq!(current.pipeline_id, "hot-reloaded");
+        assert_eq!(current.entry_node_id, "n1");
+    }
+
+    #[test]
+    fn archived_event_reverts_to_static_baseline() {
+        let overlay = ConfigOverlay::new(base());
+        overlay.apply(payload("active", "n1"));
+        assert_eq!(overlay.current().pipeline_id, "hot-reloaded");
+
+        overlay.apply(payload("archived", "n1"));
+        assert_eq!(overlay.current().pipeline_id, base().pipeline_id);
     }
 }

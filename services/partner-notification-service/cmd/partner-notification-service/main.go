@@ -126,6 +126,12 @@ func main() {
 		// ... капается на 5 минут, а не растёт неограниченно к 24ч TTL.
 		RetryBackoffBase: 30 * time.Second,
 		RetryBackoffMax:  5 * time.Minute,
+		// MaxAttempts — реальная находка нагрузочного тестирования: раньше
+		// единственным пределом был 24ч TTL, так что стабильно отказывающий
+		// partner-webhook (или любой другой постоянно недоступный endpoint)
+		// ретраился вплоть до суток на сообщение — см. PublishArchived. 2
+		// попытки (первая из message.lifecycle + один ретрай), затем архив.
+		MaxAttempts: 2,
 	}
 
 	healthState.SetReady(true)

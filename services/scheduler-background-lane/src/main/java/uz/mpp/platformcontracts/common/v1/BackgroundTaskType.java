@@ -27,6 +27,18 @@ public enum BackgroundTaskType
    * <code>BACKGROUND_TASK_TYPE_NOTIFICATION_RETRY = 2;</code>
    */
   BACKGROUND_TASK_TYPE_NOTIFICATION_RETRY(2),
+  /**
+   * <pre>
+   * Отложенный редиспатч DELIVERY-стадии после транзиентного отказа
+   * (TPS_THROTTLED/PACER_QUEUE_FULL/PACER_QUEUE_TIMEOUT и т.п., см.
+   * Pipeline Engine execution_state.rs Decision::RetryLater), пока TTL
+   * сообщения не истёк — публикуется Pipeline Engine, потребляется им же
+   * (через pipeline.retry.triggers) после отработки задержки Background Lane.
+   * </pre>
+   *
+   * <code>BACKGROUND_TASK_TYPE_STAGE_RETRY = 3;</code>
+   */
+  BACKGROUND_TASK_TYPE_STAGE_RETRY(3),
   UNRECOGNIZED(-1),
   ;
 
@@ -51,6 +63,18 @@ public enum BackgroundTaskType
    * <code>BACKGROUND_TASK_TYPE_NOTIFICATION_RETRY = 2;</code>
    */
   public static final int BACKGROUND_TASK_TYPE_NOTIFICATION_RETRY_VALUE = 2;
+  /**
+   * <pre>
+   * Отложенный редиспатч DELIVERY-стадии после транзиентного отказа
+   * (TPS_THROTTLED/PACER_QUEUE_FULL/PACER_QUEUE_TIMEOUT и т.п., см.
+   * Pipeline Engine execution_state.rs Decision::RetryLater), пока TTL
+   * сообщения не истёк — публикуется Pipeline Engine, потребляется им же
+   * (через pipeline.retry.triggers) после отработки задержки Background Lane.
+   * </pre>
+   *
+   * <code>BACKGROUND_TASK_TYPE_STAGE_RETRY = 3;</code>
+   */
+  public static final int BACKGROUND_TASK_TYPE_STAGE_RETRY_VALUE = 3;
 
 
   public final int getNumber() {
@@ -80,6 +104,7 @@ public enum BackgroundTaskType
       case 0: return BACKGROUND_TASK_TYPE_UNSPECIFIED;
       case 1: return BACKGROUND_TASK_TYPE_DLR_CORRELATION_RETRY;
       case 2: return BACKGROUND_TASK_TYPE_NOTIFICATION_RETRY;
+      case 3: return BACKGROUND_TASK_TYPE_STAGE_RETRY;
       default: return null;
     }
   }

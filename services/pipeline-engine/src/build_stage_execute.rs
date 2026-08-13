@@ -9,6 +9,18 @@ use crate::proto::common::{
     PolicyExtension, RoutingExtension, StageExecuteCommand, StageName,
 };
 
+/// `i64::MAX` (см. `ExecutionState::message_ttl_ms` — "нет TTL, никогда не
+/// истекает") намеренно НЕ конвертируется в реальный `Timestamp` — секунды
+/// переполнили бы разумный диапазон и не несут полезной информации;
+/// `None` на wire для "без TTL" — то же самое, что уже означало отсутствие
+/// поля до этой правки.
+fn message_ttl_to_timestamp(message_ttl_ms: i64) -> Option<prost_types::Timestamp> {
+    if message_ttl_ms == i64::MAX {
+        return None;
+    }
+    Some(prost_types::Timestamp { seconds: message_ttl_ms / 1000, nanos: ((message_ttl_ms % 1000) * 1_000_000) as i32 })
+}
+
 fn stage_name_to_proto(stage_name: &str) -> Result<StageName, String> {
     match stage_name {
         "DESTINATION_RESOLUTION" => Ok(StageName::DestinationResolution),
@@ -65,6 +77,9 @@ pub fn build_stage_execute(
                 // значение с этапа DestinationResolution — только не
                 // прокидывал дальше сюда.
                 resolved_operator_id: state.resolved_operator_id.clone().unwrap_or_default(),
+                // Партнёрское поле (SMPP priority_flag, 0-3), прокинутое от
+                // приёма без изменений — см. ExecutionState.priority_flag.
+                priority_flag: state.priority_flag,
             })
         }
         StageName::DeliveryReconciliation => {
@@ -93,7 +108,13 @@ pub fn build_stage_execute(
         stage_execution_id,
         attempt: state.attempt,
         deadline: None,
-        message_ttl: None,
+        // Реальная находка: раньше это поле было хардкожено в None для
+        // ЛЮБОЙ стадии, несмотря на то, что ExecutionState с этой правки
+        // реально несёт message_ttl_ms — теперь заполняется для всех стадий
+        // одинаково, не только для Delivery (retry-until-expiry читает его
+        // именно отсюда через StageCompletedEvent -> ExecutionState, не
+        // напрямую из этого поля, но wire-контракт должен быть честным).
+        message_ttl: message_ttl_to_timestamp(state.message_ttl_ms),
         config_versions: state.config_versions.clone(),
         traceparent: String::new(),
         payload_ref: None,
@@ -113,7 +134,7 @@ mod tests {
     #[test]
     fn destination_resolution_command_carries_destination_address() {
         let pipeline = pipeline();
-        let state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1);
+        let state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX);
         let decision = NextStageDecision { node_id: "n1_destination_resolution".into(), stage_name: "DESTINATION_RESOLUTION".into() };
         let command = build_stage_execute(&decision, &state, "998901331835", "se1".into()).unwrap();
         match command.stage_extension {
@@ -126,7 +147,7 @@ mod tests {
     #[test]
     fn billing_command_carries_accumulated_operator_and_category() {
         let pipeline = pipeline();
-        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 3);
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 3, 2, i64::MAX);
         state.resolved_operator_id = Some("beeline".into());
         state.category = Some("TRANSACTION".into());
         let decision = NextStageDecision { node_id: "n3_billing".into(), stage_name: "BILLING".into() };
@@ -145,7 +166,7 @@ mod tests {
     fn delivery_command_carries_real_route_from_routing_result_not_routing_extension() {
         // Прямая регрессия на находку кодревью: раньше здесь строился RoutingExtension.
         let pipeline = pipeline();
-        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1);
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX);
         state.route_id = Some("beeline_smpp_primary".into());
         state.protocol = Some(1); // PROTOCOL_SMPP
         state.route_version = Some("3".into());
@@ -169,7 +190,7 @@ mod tests {
         // Delivery не может резолвить Operator Route Registry
         // (operator_route:{operator_id}:{route_id}) без него.
         let pipeline = pipeline();
-        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1);
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX);
         state.resolved_operator_id = Some("beeline".into());
         state.route_id = Some("beeline_smpp_primary".into());
         state.protocol = Some(1);
@@ -182,9 +203,28 @@ mod tests {
     }
 
     #[test]
+    fn delivery_command_carries_priority_flag_and_message_ttl_from_state() {
+        // Партнёрское поле (SMPP priority_flag) и message_ttl прокинуты через
+        // ExecutionState без изменений — не выводятся из category, как
+        // resolved_operator_id/route_id выше.
+        let pipeline = pipeline();
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 3, 1_700_000_000_000);
+        state.route_id = Some("beeline_smpp_primary".into());
+        state.protocol = Some(1);
+        let decision = NextStageDecision { node_id: "n5_delivery".into(), stage_name: "DELIVERY".into() };
+        let command = build_stage_execute(&decision, &state, "998901331835", "se5".into()).unwrap();
+        match command.stage_extension {
+            Some(StageExtension::Delivery(ext)) => assert_eq!(ext.priority_flag, 3),
+            other => panic!("ожидали DeliveryExtension, получили {other:?}"),
+        }
+        let ttl = command.message_ttl.expect("message_ttl должен быть заполнен, не None");
+        assert_eq!(ttl.seconds, 1_700_000_000);
+    }
+
+    #[test]
     fn delivery_command_without_route_in_state_is_rejected_not_built_with_empty_fields() {
         let pipeline = pipeline();
-        let state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1); // route_id/protocol всё ещё None
+        let state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX); // route_id/protocol всё ещё None
         let decision = NextStageDecision { node_id: "n5_delivery".into(), stage_name: "DELIVERY".into() };
         assert!(build_stage_execute(&decision, &state, "998901331835", "se5".into()).is_err());
     }
@@ -192,7 +232,7 @@ mod tests {
     #[test]
     fn delivery_reconciliation_command_carries_delivery_reconciliation_extension() {
         let pipeline = pipeline();
-        let state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1);
+        let state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX);
         let decision = NextStageDecision { node_id: "n6_reconciliation".into(), stage_name: "DELIVERY_RECONCILIATION".into() };
         let command = build_stage_execute(&decision, &state, "998901331835", "se6".into()).unwrap();
         match command.stage_extension {
@@ -210,7 +250,7 @@ mod tests {
         // внутри build_stage_execute) — контроль за этим лежит на вызывающей стороне,
         // здесь только доказано, что значение пробрасывается как есть.
         let pipeline = pipeline();
-        let state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1);
+        let state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX);
         let decision = NextStageDecision { node_id: "n1_destination_resolution".into(), stage_name: "DESTINATION_RESOLUTION".into() };
         let command = build_stage_execute(&decision, &state, "998901331835", "stable-id-123".into()).unwrap();
         assert_eq!(command.stage_execution_id, "stable-id-123");

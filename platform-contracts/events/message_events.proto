@@ -29,6 +29,12 @@ message IncomingMessage {
   // До какого момента сообщение считается живым — используется Pipeline
   // Engine, Scheduler, Message State Resolver (HLD §4).
   google.protobuf.Timestamp message_ttl = 21;
+
+  // SMPP 3.4 §5.2.14 priority_flag (0-3, 3=наивысший) — партнёрское поле,
+  // не выводится из категории сообщения, течёт без изменений до самого
+  // submit_sm на operator-smpp-session-manager (см. ShortMessagePdu.priorityFlag).
+  // Туннель-QoS концепция, не специфична для SMS — top-level, не внутри oneof body.
+  int32 priority_flag = 22;
 }
 
 // Партнёрский, внешний переход статуса — публикуется Message State Resolver

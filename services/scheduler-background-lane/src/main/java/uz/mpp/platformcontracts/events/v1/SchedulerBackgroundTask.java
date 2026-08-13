@@ -35,6 +35,7 @@ private static final long serialVersionUID = 0L;
     taskType_ = 0;
     sourceEventId_ = "";
     targetTopic_ = "";
+    messageId_ = "";
   }
 
   public static final com.google.protobuf.Descriptors.Descriptor
@@ -191,9 +192,9 @@ private static final long serialVersionUID = 0L;
   private volatile java.lang.Object targetTopic_ = "";
   /**
    * <pre>
-   * Разрешённый список: "operator.dlr.unresolved" | "notification.retry" —
-   * не произвольная строка (HLD §14, защита от использования Scheduler
-   * как открытого редиректа внутри Kafka).
+   * Разрешённый список: "operator.dlr.unresolved" | "notification.retry" |
+   * "pipeline.retry.triggers" — не произвольная строка (HLD §14, защита от
+   * использования Scheduler как открытого редиректа внутри Kafka).
    * </pre>
    *
    * <code>string target_topic = 6;</code>
@@ -214,9 +215,9 @@ private static final long serialVersionUID = 0L;
   }
   /**
    * <pre>
-   * Разрешённый список: "operator.dlr.unresolved" | "notification.retry" —
-   * не произвольная строка (HLD §14, защита от использования Scheduler
-   * как открытого редиректа внутри Kafka).
+   * Разрешённый список: "operator.dlr.unresolved" | "notification.retry" |
+   * "pipeline.retry.triggers" — не произвольная строка (HLD §14, защита от
+   * использования Scheduler как открытого редиректа внутри Kafka).
    * </pre>
    *
    * <code>string target_topic = 6;</code>
@@ -231,6 +232,59 @@ private static final long serialVersionUID = 0L;
           com.google.protobuf.ByteString.copyFromUtf8(
               (java.lang.String) ref);
       targetTopic_ = b;
+      return b;
+    } else {
+      return (com.google.protobuf.ByteString) ref;
+    }
+  }
+
+  public static final int MESSAGE_ID_FIELD_NUMBER = 7;
+  @SuppressWarnings("serial")
+  private volatile java.lang.Object messageId_ = "";
+  /**
+   * <pre>
+   * Только для BACKGROUND_TASK_TYPE_STAGE_RETRY — `source_event_id` там не
+   * подходит по смыслу (для остальных двух типов это event_id ЧУЖОГО
+   * события-источника, здесь же нужен именно message_id самого Pipeline
+   * Engine, чтобы найти ExecutionState в Runtime Redis при редиспатче).
+   * </pre>
+   *
+   * <code>string message_id = 7;</code>
+   * @return The messageId.
+   */
+  @java.lang.Override
+  public java.lang.String getMessageId() {
+    java.lang.Object ref = messageId_;
+    if (ref instanceof java.lang.String) {
+      return (java.lang.String) ref;
+    } else {
+      com.google.protobuf.ByteString bs = 
+          (com.google.protobuf.ByteString) ref;
+      java.lang.String s = bs.toStringUtf8();
+      messageId_ = s;
+      return s;
+    }
+  }
+  /**
+   * <pre>
+   * Только для BACKGROUND_TASK_TYPE_STAGE_RETRY — `source_event_id` там не
+   * подходит по смыслу (для остальных двух типов это event_id ЧУЖОГО
+   * события-источника, здесь же нужен именно message_id самого Pipeline
+   * Engine, чтобы найти ExecutionState в Runtime Redis при редиспатче).
+   * </pre>
+   *
+   * <code>string message_id = 7;</code>
+   * @return The bytes for messageId.
+   */
+  @java.lang.Override
+  public com.google.protobuf.ByteString
+      getMessageIdBytes() {
+    java.lang.Object ref = messageId_;
+    if (ref instanceof java.lang.String) {
+      com.google.protobuf.ByteString b = 
+          com.google.protobuf.ByteString.copyFromUtf8(
+              (java.lang.String) ref);
+      messageId_ = b;
       return b;
     } else {
       return (com.google.protobuf.ByteString) ref;
@@ -269,6 +323,9 @@ private static final long serialVersionUID = 0L;
     if (!com.google.protobuf.GeneratedMessage.isStringEmpty(targetTopic_)) {
       com.google.protobuf.GeneratedMessage.writeString(output, 6, targetTopic_);
     }
+    if (!com.google.protobuf.GeneratedMessage.isStringEmpty(messageId_)) {
+      com.google.protobuf.GeneratedMessage.writeString(output, 7, messageId_);
+    }
     getUnknownFields().writeTo(output);
   }
   private int computeSerializedSize_0() {
@@ -294,6 +351,9 @@ private static final long serialVersionUID = 0L;
     }
     if (!com.google.protobuf.GeneratedMessage.isStringEmpty(targetTopic_)) {
       size += com.google.protobuf.GeneratedMessage.computeStringSize(6, targetTopic_);
+    }
+    if (!com.google.protobuf.GeneratedMessage.isStringEmpty(messageId_)) {
+      size += com.google.protobuf.GeneratedMessage.computeStringSize(7, messageId_);
     }
     return size;
   }
@@ -336,6 +396,8 @@ private static final long serialVersionUID = 0L;
     }
     if (!getTargetTopic()
         .equals(other.getTargetTopic())) return false;
+    if (!getMessageId()
+        .equals(other.getMessageId())) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -363,6 +425,8 @@ private static final long serialVersionUID = 0L;
     }
     hash = (37 * hash) + TARGET_TOPIC_FIELD_NUMBER;
     hash = (53 * hash) + getTargetTopic().hashCode();
+    hash = (37 * hash) + MESSAGE_ID_FIELD_NUMBER;
+    hash = (53 * hash) + getMessageId().hashCode();
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -519,6 +583,7 @@ private static final long serialVersionUID = 0L;
         deadlineBuilder_ = null;
       }
       targetTopic_ = "";
+      messageId_ = "";
       return this;
     }
 
@@ -577,6 +642,9 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000020) != 0)) {
         result.targetTopic_ = targetTopic_;
       }
+      if (((from_bitField0_ & 0x00000040) != 0)) {
+        result.messageId_ = messageId_;
+      }
       result.bitField0_ |= to_bitField0_;
     }
 
@@ -612,6 +680,11 @@ private static final long serialVersionUID = 0L;
       if (!other.getTargetTopic().isEmpty()) {
         targetTopic_ = other.targetTopic_;
         bitField0_ |= 0x00000020;
+        onChanged();
+      }
+      if (!other.getMessageId().isEmpty()) {
+        messageId_ = other.messageId_;
+        bitField0_ |= 0x00000040;
         onChanged();
       }
       this.mergeUnknownFields(other.getUnknownFields());
@@ -674,6 +747,11 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000020;
               break;
             } // case 50
+            case 58: {
+              messageId_ = input.readStringRequireUtf8();
+              bitField0_ |= 0x00000040;
+              break;
+            } // case 58
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -1117,9 +1195,9 @@ private static final long serialVersionUID = 0L;
     private java.lang.Object targetTopic_ = "";
     /**
      * <pre>
-     * Разрешённый список: "operator.dlr.unresolved" | "notification.retry" —
-     * не произвольная строка (HLD §14, защита от использования Scheduler
-     * как открытого редиректа внутри Kafka).
+     * Разрешённый список: "operator.dlr.unresolved" | "notification.retry" |
+     * "pipeline.retry.triggers" — не произвольная строка (HLD §14, защита от
+     * использования Scheduler как открытого редиректа внутри Kafka).
      * </pre>
      *
      * <code>string target_topic = 6;</code>
@@ -1139,9 +1217,9 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * Разрешённый список: "operator.dlr.unresolved" | "notification.retry" —
-     * не произвольная строка (HLD §14, защита от использования Scheduler
-     * как открытого редиректа внутри Kafka).
+     * Разрешённый список: "operator.dlr.unresolved" | "notification.retry" |
+     * "pipeline.retry.triggers" — не произвольная строка (HLD §14, защита от
+     * использования Scheduler как открытого редиректа внутри Kafka).
      * </pre>
      *
      * <code>string target_topic = 6;</code>
@@ -1162,9 +1240,9 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * Разрешённый список: "operator.dlr.unresolved" | "notification.retry" —
-     * не произвольная строка (HLD §14, защита от использования Scheduler
-     * как открытого редиректа внутри Kafka).
+     * Разрешённый список: "operator.dlr.unresolved" | "notification.retry" |
+     * "pipeline.retry.triggers" — не произвольная строка (HLD §14, защита от
+     * использования Scheduler как открытого редиректа внутри Kafka).
      * </pre>
      *
      * <code>string target_topic = 6;</code>
@@ -1181,9 +1259,9 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * Разрешённый список: "operator.dlr.unresolved" | "notification.retry" —
-     * не произвольная строка (HLD §14, защита от использования Scheduler
-     * как открытого редиректа внутри Kafka).
+     * Разрешённый список: "operator.dlr.unresolved" | "notification.retry" |
+     * "pipeline.retry.triggers" — не произвольная строка (HLD §14, защита от
+     * использования Scheduler как открытого редиректа внутри Kafka).
      * </pre>
      *
      * <code>string target_topic = 6;</code>
@@ -1197,9 +1275,9 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * Разрешённый список: "operator.dlr.unresolved" | "notification.retry" —
-     * не произвольная строка (HLD §14, защита от использования Scheduler
-     * как открытого редиректа внутри Kafka).
+     * Разрешённый список: "operator.dlr.unresolved" | "notification.retry" |
+     * "pipeline.retry.triggers" — не произвольная строка (HLD §14, защита от
+     * использования Scheduler как открытого редиректа внутри Kafka).
      * </pre>
      *
      * <code>string target_topic = 6;</code>
@@ -1212,6 +1290,113 @@ private static final long serialVersionUID = 0L;
       checkByteStringIsUtf8(value);
       targetTopic_ = value;
       bitField0_ |= 0x00000020;
+      onChanged();
+      return this;
+    }
+
+    private java.lang.Object messageId_ = "";
+    /**
+     * <pre>
+     * Только для BACKGROUND_TASK_TYPE_STAGE_RETRY — `source_event_id` там не
+     * подходит по смыслу (для остальных двух типов это event_id ЧУЖОГО
+     * события-источника, здесь же нужен именно message_id самого Pipeline
+     * Engine, чтобы найти ExecutionState в Runtime Redis при редиспатче).
+     * </pre>
+     *
+     * <code>string message_id = 7;</code>
+     * @return The messageId.
+     */
+    public java.lang.String getMessageId() {
+      java.lang.Object ref = messageId_;
+      if (!(ref instanceof java.lang.String)) {
+        com.google.protobuf.ByteString bs =
+            (com.google.protobuf.ByteString) ref;
+        java.lang.String s = bs.toStringUtf8();
+        messageId_ = s;
+        return s;
+      } else {
+        return (java.lang.String) ref;
+      }
+    }
+    /**
+     * <pre>
+     * Только для BACKGROUND_TASK_TYPE_STAGE_RETRY — `source_event_id` там не
+     * подходит по смыслу (для остальных двух типов это event_id ЧУЖОГО
+     * события-источника, здесь же нужен именно message_id самого Pipeline
+     * Engine, чтобы найти ExecutionState в Runtime Redis при редиспатче).
+     * </pre>
+     *
+     * <code>string message_id = 7;</code>
+     * @return The bytes for messageId.
+     */
+    public com.google.protobuf.ByteString
+        getMessageIdBytes() {
+      java.lang.Object ref = messageId_;
+      if (ref instanceof String) {
+        com.google.protobuf.ByteString b = 
+            com.google.protobuf.ByteString.copyFromUtf8(
+                (java.lang.String) ref);
+        messageId_ = b;
+        return b;
+      } else {
+        return (com.google.protobuf.ByteString) ref;
+      }
+    }
+    /**
+     * <pre>
+     * Только для BACKGROUND_TASK_TYPE_STAGE_RETRY — `source_event_id` там не
+     * подходит по смыслу (для остальных двух типов это event_id ЧУЖОГО
+     * события-источника, здесь же нужен именно message_id самого Pipeline
+     * Engine, чтобы найти ExecutionState в Runtime Redis при редиспатче).
+     * </pre>
+     *
+     * <code>string message_id = 7;</code>
+     * @param value The messageId to set.
+     * @return This builder for chaining.
+     */
+    public Builder setMessageId(
+        java.lang.String value) {
+      if (value == null) { throw new NullPointerException(); }
+      messageId_ = value;
+      bitField0_ |= 0x00000040;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * Только для BACKGROUND_TASK_TYPE_STAGE_RETRY — `source_event_id` там не
+     * подходит по смыслу (для остальных двух типов это event_id ЧУЖОГО
+     * события-источника, здесь же нужен именно message_id самого Pipeline
+     * Engine, чтобы найти ExecutionState в Runtime Redis при редиспатче).
+     * </pre>
+     *
+     * <code>string message_id = 7;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearMessageId() {
+      messageId_ = getDefaultInstance().getMessageId();
+      bitField0_ = (bitField0_ & ~0x00000040);
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * Только для BACKGROUND_TASK_TYPE_STAGE_RETRY — `source_event_id` там не
+     * подходит по смыслу (для остальных двух типов это event_id ЧУЖОГО
+     * события-источника, здесь же нужен именно message_id самого Pipeline
+     * Engine, чтобы найти ExecutionState в Runtime Redis при редиспатче).
+     * </pre>
+     *
+     * <code>string message_id = 7;</code>
+     * @param value The bytes for messageId to set.
+     * @return This builder for chaining.
+     */
+    public Builder setMessageIdBytes(
+        com.google.protobuf.ByteString value) {
+      if (value == null) { throw new NullPointerException(); }
+      checkByteStringIsUtf8(value);
+      messageId_ = value;
+      bitField0_ |= 0x00000040;
       onChanged();
       return this;
     }

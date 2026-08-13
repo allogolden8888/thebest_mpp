@@ -32,7 +32,18 @@ services:
 
   redis-runtime:
     image: redis:7-alpine
-    command: ["redis-server", "--requirepass", "mpp_local_dev"]
+    # --save "" отключает RDB point-in-time snapshotting (дефолт "3600 1 300
+    # 100 60 10000") — реальная находка нагрузочного теста: под 300 TPS
+    # (~19 Redis-round-trip'ов на сообщение с pipeline-engine/policy/billing/
+    # delivery суммарно) порог "60 10000" стабильно триггерился, каждый
+    # BGSAVE занимал ~7с (INFO persistence: rdb_last_bgsave_time_sec) и forkал
+    # процесс под конкурентной записью — реальный, измеримый вклад в то, что
+    # redis-runtime стабильно показывал 90-165% CPU в docker stats во время
+    # прогона. Runtime Redis здесь — чисто эфемерное состояние (TTL'd
+    # ключи/CAS-состояние, которое пайплайн переживает без диска — ничего
+    # здесь не должно требовать durability между рестартами локального
+    # docker-compose), так что персистентность не нужна вообще.
+    command: ["redis-server", "--requirepass", "mpp_local_dev", "--save", ""]
     ports:
       - "6380:6379"
     healthcheck:
@@ -85,14 +96,49 @@ services:
       # не дефолтом.
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      # Дефолт образа (num.network.threads=3) — под 6 сервисами, у каждого
+      # несколько consumer/producer-подключений на 30 топиков — реальная
+      # находка: kafka стабильно показывал 100-200% CPU в docker stats под
+      # нагрузкой даже после того, как producer-side backpressure (QueueFull)
+      # и redis-runtime CPU были устранены. Подняли явно, не гадая на дефолте.
+      KAFKA_NUM_NETWORK_THREADS: "6"
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       CLUSTER_ID: "mpp-local-dev-cluster-1"
+      # Дефолт образа -Xmx1G/-Xms1G — при 33 топиках/365 партициях (число
+      # партиций считается из PRODUCTION replica-counts в
+      # generate_kafka_topics.py, не подогнано под один локальный брокер)
+      # это было диагностировано как реальная причина многосекундной
+      # задержки НА КАЖДОМ хопе пайплайна равномерно (не конкретно
+      # ROUTING->DELIVERY) — см. dynamic-seeking-russell.md investigation.
+      KAFKA_HEAP_OPTS: "-Xmx2G -Xms2G"
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
       interval: 10s
       timeout: 10s
       retries: 15
+
+  # Публикует config.changes из config.config_outbox (PostgreSQL) — реальный
+  # источник для проверки config-hot-reload в destination-resolution-service
+  # (config_reload.rs), не синтетическая заглушка. Мигрирует не сам —
+  # V001..V023 применяются вручную (см. migrations/README.md) до старта.
+  config-event-publisher:
+    image: mpp/config-event-publisher:test
+    ports:
+      - "9102:9090"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: mpp
+      POSTGRES_USER: mpp
+      POSTGRES_PASSWORD: mpp_local_dev
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      POLL_INTERVAL_MS: "500"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
 
   # Первый сервис "ходового скелета" — входная точка REST-ingest. credential_ref
   # "vault://partners/click_uz/main/api_key" (config_schemas/examples/partner.valid.json,
@@ -177,6 +223,12 @@ services:
       REDIS_BILLING_HOST: redis-billing
       REDIS_BILLING_PORT: "6379"
       REDIS_BILLING_PASSWORD: mpp_local_dev
+    # Реальная находка (нагрузочный прогон): Main.java теперь принудительно
+    # System.exit(1) на фатальной ошибке consumer-цикла (иначе HealthServer
+    # держит процесс "живым" не-daemon потоком с /healthz=200 у мёртвого
+    # consumer'а) — без restart здесь этот честный exit просто останавливал
+    # бы контейнер навсегда вместо самовосстановления.
+    restart: unless-stopped
     depends_on:
       kafka:
         condition: service_healthy
@@ -222,6 +274,12 @@ services:
   # GatewayRegistry (Runtime Redis) при поиске по (operator_id, route_id).
   operator-smpp-session-manager:
     image: mpp/operator-smpp-session-manager:test
+    # hostname явно задан — Main.java пишет в OperatorRouteRegistry свой
+    # HOSTNAME как gRPC-адрес для delivery-service (тот же паттерн, что
+    # partner-smpp-gateway; в k8s это резолвится через headless Service DNS
+    # StatefulSet-пода). Без явного hostname тут Docker подставляет случайный
+    # container ID, который delivery-service не сможет резолвить.
+    hostname: operator-smpp-session-manager
     ports:
       - "9099:9090"
       - "9000:9000"
@@ -240,6 +298,66 @@ services:
       kafka:
         condition: service_healthy
       redis-runtime:
+        condition: service_healthy
+
+  # Девятый хоп — не участник stage.* пайплайна, а параллельный агрегатор:
+  # слушает stage.completed (все стадии) + delivery.status, строит единый
+  # message.lifecycle и его же changelog (transactional producer). На старте
+  # полностью вычитывает message-state.changelog (restore), только потом
+  # readyz=true — первый реальный прогон этого transactional-пути против
+  # настоящего Kafka (раньше не проверялся живьём, см. README).
+  message-state-resolver:
+    image: mpp/message-state-resolver:test
+    ports:
+      - "9100:9090"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # Десятый хоп — слушает message.lifecycle (девятый хоп) + notification.retry,
+  # резолвит канал уведомления партнёра (SMPP/REST) через msgctx.partner_id.
+  # PARTNER_CONFIG_PATH указывает на тот же partner.valid.json, что уже
+  # запечён в partner-rest-receiver (единственный тестовый партнёр click_uz,
+  # notification_callback_url — настоящий внешний домен, не слушающий в этой
+  # песочнице) — доставка ожидаемо уходит в retry-петлю (schedule.go, 30с база
+  # / 5мин потолок) до NotificationTTL (24ч), это штатное поведение локального
+  # прогона, не баг. SMPP-канал тоже недостижим: Partner SMPP Gateway не
+  # реализован ни в одном репозитории, smpp:partner_session:* в Redis пуст.
+  partner-notification-service:
+    image: mpp/partner-notification-service:test
+    ports:
+      - "9101:9090"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_RUNTIME_HOST: redis-runtime
+      REDIS_RUNTIME_PORT: "6379"
+      REDIS_RUNTIME_PASSWORD: mpp_local_dev
+    volumes:
+      - ../../config_schemas/examples/partner.valid.json:/config/partner.valid.json:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis-runtime:
+        condition: service_healthy
+
+  # dynamic-seeking-russell.md "Retry-until-expiry для DELIVERY" — держит
+  # STAGE_RETRY (наравне с уже существующими DLR_CORRELATION_RETRY/
+  # NOTIFICATION_RETRY) до due_at, затем перепубликует в
+  # pipeline.retry.triggers, который потребляет сам Pipeline Engine.
+  # Kafka Streams (exactly_once_v2, RocksDB state store) — не собирается из
+  # корня репозитория как остальные Java-сервисы: protobuf-код закоммичен
+  # (см. services/scheduler-background-lane/README.md "Регенерация
+  # protobuf"), build context — сама директория сервиса.
+  scheduler-background-lane:
+    image: mpp/scheduler-background-lane:test
+    ports:
+      - "9103:9090"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      kafka:
         condition: service_healthy
 
 volumes:

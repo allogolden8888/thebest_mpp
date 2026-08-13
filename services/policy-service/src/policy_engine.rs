@@ -77,36 +77,91 @@ struct RawPolicyRuleset {
     banwords: RawBanwords,
 }
 
+/// Форма ровно `config_schemas/policy_ruleset.schema.json` целиком — в
+/// отличие от [`RawPolicyRuleset`] (только поля, нужные статическому
+/// bootstrap-файлу), несёт `status`, нужный, чтобы отличить `archived` от
+/// `active` при живом `config.changes`-событии. `partner_id`/`operator_id`
+/// сознательно проигнорированы (`#[serde(default)]`, не читаются) — этот
+/// сервис не резолвит ruleset по партнёру/оператору, тот же единый
+/// глобальный ruleset, что уже был у статического файла (см. README) —
+/// hot-reload не расширяет эту упрощённую семантику, только подключает её
+/// к реальному Kafka вместо запечённого в образ файла.
+#[derive(Deserialize)]
+struct RawPolicyRulesetConfigChange {
+    #[serde(default)]
+    #[allow(dead_code)]
+    partner_id: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    operator_id: Option<String>,
+    status: String,
+    unmatched_template_behavior: String,
+    anti_spam: RawAntiSpam,
+    time_of_day: Vec<RawTimeOfDayEntry>,
+    sender_validation: RawSenderValidation,
+    banwords: RawBanwords,
+}
+
+fn convert_time_of_day(entries: Vec<RawTimeOfDayEntry>) -> HashMap<String, (NaiveTime, NaiveTime)> {
+    entries
+        .into_iter()
+        .map(|e| {
+            let parse = |s: &str| NaiveTime::parse_from_str(s, "%H:%M").expect("HH:MM");
+            (e.category, (parse(&e.allowed_from), parse(&e.allowed_to)))
+        })
+        .collect()
+}
+
+fn convert_unmatched_template_behavior(s: &str) -> UnmatchedTemplateBehavior {
+    match s {
+        "CATEGORIZE_AS_UNTEMPLATED" => UnmatchedTemplateBehavior::CategorizeAsUntemplated,
+        "REJECT" => UnmatchedTemplateBehavior::Reject,
+        other => panic!("неизвестный unmatched_template_behavior: {other}"),
+    }
+}
+
+fn convert_anti_spam_scope(s: &str) -> AntiSpamScope {
+    match s {
+        "PER_MSISDN" => AntiSpamScope::PerMsisdn,
+        "PER_MSISDN_PER_CATEGORY" => AntiSpamScope::PerMsisdnPerCategory,
+        other => panic!("неизвестный anti_spam.scope: {other}"),
+    }
+}
+
 impl PolicyRulesetConfig {
     pub fn from_config_schema_json(json_str: &str) -> Self {
         let raw: RawPolicyRuleset = serde_json::from_str(json_str).expect("policy_ruleset.schema.json форма");
-        let time_of_day = raw
-            .time_of_day
-            .into_iter()
-            .map(|e| {
-                let parse = |s: &str| NaiveTime::parse_from_str(s, "%H:%M").expect("HH:MM");
-                (e.category, (parse(&e.allowed_from), parse(&e.allowed_to)))
-            })
-            .collect();
-        let unmatched_template_behavior = match raw.unmatched_template_behavior.as_str() {
-            "CATEGORIZE_AS_UNTEMPLATED" => UnmatchedTemplateBehavior::CategorizeAsUntemplated,
-            "REJECT" => UnmatchedTemplateBehavior::Reject,
-            other => panic!("неизвестный unmatched_template_behavior: {other}"),
-        };
-        let anti_spam_scope = match raw.anti_spam.scope.as_str() {
-            "PER_MSISDN" => AntiSpamScope::PerMsisdn,
-            "PER_MSISDN_PER_CATEGORY" => AntiSpamScope::PerMsisdnPerCategory,
-            other => panic!("неизвестный anti_spam.scope: {other}"),
-        };
         Self {
-            unmatched_template_behavior,
+            unmatched_template_behavior: convert_unmatched_template_behavior(&raw.unmatched_template_behavior),
             anti_spam_max_messages: raw.anti_spam.max_messages,
             anti_spam_window_seconds: raw.anti_spam.window_seconds,
-            anti_spam_scope,
-            time_of_day,
+            anti_spam_scope: convert_anti_spam_scope(&raw.anti_spam.scope),
+            time_of_day: convert_time_of_day(raw.time_of_day),
             allowed_sender_ids: raw.sender_validation.allowed_sender_ids.into_iter().collect(),
             banwords: raw.banwords.words,
         }
+    }
+
+    /// `config.changes` (entity_type=POLICY_RULESET) — в отличие от
+    /// [`Self::from_config_schema_json`] (bootstrap, `panic!` на кривом
+    /// файле — оправдано, сервис не должен стартовать с плохим конфигом),
+    /// здесь `Result`: одно кривое Kafka-сообщение не должно ронять уже
+    /// работающий процесс. Возвращает `(config, status)` — вызывающая
+    /// сторона (`config_reload.rs`) решает, что делать с `archived`.
+    pub fn try_from_config_change_payload(payload_json: &[u8]) -> Result<(Self, String), serde_json::Error> {
+        let raw: RawPolicyRulesetConfigChange = serde_json::from_slice(payload_json)?;
+        Ok((
+            Self {
+                unmatched_template_behavior: convert_unmatched_template_behavior(&raw.unmatched_template_behavior),
+                anti_spam_max_messages: raw.anti_spam.max_messages,
+                anti_spam_window_seconds: raw.anti_spam.window_seconds,
+                anti_spam_scope: convert_anti_spam_scope(&raw.anti_spam.scope),
+                time_of_day: convert_time_of_day(raw.time_of_day),
+                allowed_sender_ids: raw.sender_validation.allowed_sender_ids.into_iter().collect(),
+                banwords: raw.banwords.words,
+            },
+            raw.status,
+        ))
     }
 }
 

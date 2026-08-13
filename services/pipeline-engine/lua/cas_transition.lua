@@ -21,6 +21,8 @@
 -- ARGV[12] = new destination_address
 -- ARGV[13] = new deadline_ms (unix ms)
 -- ARGV[14] = old_stage_execution_id для ZREM из deadlines ("" если нечего удалять — первый диспетч)
+-- ARGV[15] = new priority_flag (SMPP 0-3, партнёрское поле, не меняется по ходу пайплайна)
+-- ARGV[16] = new message_ttl_ms (unix ms, i64::MAX если TTL не задан)
 --
 -- Возврат: {"OK"} при успехе, {"CONFLICT", <реальный awaiting_stage_execution_id>} при гонке.
 --
@@ -63,7 +65,9 @@ redis.call('HSET', exec_key,
     'protocol', ARGV[10],
     'route_version', ARGV[11],
     'destination_address', ARGV[12],
-    'deadline_ms', ARGV[13])
+    'deadline_ms', ARGV[13],
+    'priority_flag', ARGV[15],
+    'message_ttl_ms', ARGV[16])
 
 local new_stage_execution_id = ARGV[5]
 if new_stage_execution_id ~= '' then

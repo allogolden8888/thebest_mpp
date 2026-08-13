@@ -121,6 +121,12 @@ enum BackgroundTaskType {
   BACKGROUND_TASK_TYPE_UNSPECIFIED = 0;
   BACKGROUND_TASK_TYPE_DLR_CORRELATION_RETRY = 1;
   BACKGROUND_TASK_TYPE_NOTIFICATION_RETRY = 2;
+  // Отложенный редиспатч DELIVERY-стадии после транзиентного отказа
+  // (TPS_THROTTLED/PACER_QUEUE_FULL/PACER_QUEUE_TIMEOUT и т.п., см.
+  // Pipeline Engine execution_state.rs Decision::RetryLater), пока TTL
+  // сообщения не истёк — публикуется Pipeline Engine, потребляется им же
+  // (через pipeline.retry.triggers) после отработки задержки Background Lane.
+  BACKGROUND_TASK_TYPE_STAGE_RETRY = 3;
 }
 
 // Тип ручной команды Scheduler Critical Sweep (HLD §9.1).

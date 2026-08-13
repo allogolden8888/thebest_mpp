@@ -28,7 +28,16 @@ fn main() {
     )
     .expect("не удалось скомпилировать platform-contracts/common/*.proto");
 
+    // config.changes (ConfigChangeEvent) — см. destination-resolution-service/build.rs
+    // для полного обоснования отдельного вызова + extern_path.
+    let mut events_config = prost_build::Config::new();
+    events_config.extern_path(".mpp.common.v1", "crate::proto");
+    events_config
+        .compile_protos(&[format!("{proto_root}/events/config_and_control.proto")], &includes)
+        .expect("не удалось скомпилировать platform-contracts/events/config_and_control.proto");
+
     println!("cargo:rerun-if-changed={proto_root}/common/enums.proto");
     println!("cargo:rerun-if-changed={proto_root}/common/types.proto");
     println!("cargo:rerun-if-changed={proto_root}/common/stage_contract.proto");
+    println!("cargo:rerun-if-changed={proto_root}/events/config_and_control.proto");
 }

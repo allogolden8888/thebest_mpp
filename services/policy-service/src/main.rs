@@ -1,18 +1,22 @@
 mod banwords;
+mod config_reload;
 mod health;
 mod kafka_io;
+mod offset_tracker;
 mod policy_engine;
 mod proto;
 mod redis_url;
 mod template_check;
 mod template_matching;
 
+use arc_swap::ArcSwap;
+use config_reload::ConfigOverlay;
 use health::HealthState;
 use kafka_io::{MessageContextStore, RedisMessageContextStore};
 use policy_engine::{PolicyRulesetConfig, RuntimeState};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use template_matching::{CompiledRuleset, Template};
+use template_matching::Template;
 
 #[tokio::main]
 async fn main() {
@@ -46,9 +50,14 @@ async fn main() {
         pattern: template_raw["pattern"].as_str().unwrap().to_string(),
         category: template_raw["category"].as_str().unwrap().to_string(),
     };
-    let templates = CompiledRuleset::new(vec![template]);
-    let banwords = banwords::BanwordChecker::new(&ruleset.banwords);
     let runtime = RuntimeState::default();
+
+    // Статические файлы — только bootstrap-нулевая точка; живое состояние
+    // дальше ведёт config_reload.rs (config.changes, entity_type=POLICY_RULESET
+    // и POLICY_TEMPLATE) — то, что раньше было объявленным, но никогда не
+    // подключённым arc-swap (см. README "Что НЕ реализовано").
+    let overlay = Arc::new(ConfigOverlay::new(ruleset, vec![template]));
+    let live_policy = Arc::new(ArcSwap::from_pointee(overlay.build_live_state()));
 
     health_state.ready.store(true, Ordering::Relaxed);
 
@@ -56,9 +65,11 @@ async fn main() {
         .unwrap_or_else(|_| "kafka-bootstrap.mpp.svc:9092".to_string());
     let consumer = kafka_io::build_consumer(&bootstrap_servers, "policy-service");
     let producer = kafka_io::build_producer(&bootstrap_servers);
+    let config_consumer = config_reload::build_config_consumer(&bootstrap_servers, "policy-service-config");
+    tokio::spawn(config_reload::run_loop(config_consumer, overlay, live_policy.clone()));
 
     let redis_runtime_url = redis_url::build_redis_runtime_url();
-    let context_store: Box<dyn MessageContextStore> = Box::new(RedisMessageContextStore::new(&redis_runtime_url));
+    let context_store: Arc<dyn MessageContextStore> = Arc::new(RedisMessageContextStore::new(&redis_runtime_url));
 
-    kafka_io::run_loop(consumer, producer, context_store, ruleset, templates, banwords, runtime).await;
+    kafka_io::run_loop(consumer, producer, context_store, live_policy, runtime).await;
 }
