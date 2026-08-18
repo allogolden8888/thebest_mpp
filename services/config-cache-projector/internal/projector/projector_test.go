@@ -153,6 +153,162 @@ func TestWriteProjectionKeepsVersionAndCurrentConsistentForActive(t *testing.T) 
 	}
 }
 
+// Ф2 плана (luminous-hugging-charm.md, "Реестр отправителей"): partner
+// entity_type + status=active должен спроецировать senders[] в
+// config:sender:{sender_id} -> partner_id, ПОМИМО существующих
+// config:current/config:version для самого partner-объекта (не в
+// изоляции — если этот тест сломает существующий путь, это регрессия).
+func TestWriteProjectionWritesSenderOwnersForActivePartner(t *testing.T) {
+	c := newTestClient(t)
+	ctx := context.Background()
+
+	event := &eventsv1.ConfigChangeEvent{
+		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER,
+		EntityId:   "acme",
+		Version:    3,
+		PayloadJson: []byte(`{
+			"partner_id": "acme",
+			"senders": [
+				{"sender_id": "ACME-ALPHA", "type": "ALPHANAME", "status": "active"},
+				{"sender_id": "998900000000", "type": "SHORT_NUMBER", "status": "active"}
+			]
+		}`),
+		Status: "active",
+	}
+
+	if err := c.WriteProjection(ctx, event); err != nil {
+		t.Fatalf("WriteProjection failed: %v", err)
+	}
+
+	// Существующий путь не должен был сломаться.
+	current, err := c.CurrentVersion(ctx, "partner", "acme")
+	if err != nil {
+		t.Fatalf("CurrentVersion failed: %v", err)
+	}
+	if current != 3 {
+		t.Fatalf("ожидали current version 3, получили %d", current)
+	}
+	payload, err := c.VersionPayload(ctx, "partner", "acme", 3)
+	if err != nil {
+		t.Fatalf("VersionPayload failed: %v", err)
+	}
+	if string(payload) != string(event.PayloadJson) {
+		t.Fatalf("payload не совпадает: %s", payload)
+	}
+
+	// Новый sender-реестр.
+	for _, senderID := range []string{"ACME-ALPHA", "998900000000"} {
+		got, err := c.rdb.Get(ctx, senderOwnerKey(senderID)).Result()
+		if err != nil {
+			t.Fatalf("Get(%s) failed: %v", senderOwnerKey(senderID), err)
+		}
+		if got != "acme" {
+			t.Fatalf("config:sender:%s = %q, ожидали \"acme\"", senderID, got)
+		}
+	}
+}
+
+// Гейтирование config:sender:* должно совпадать с гейтированием
+// config:current — архивная версия не должна затирать живой реестр
+// отправителей устаревшими данными.
+func TestWriteProjectionDoesNotWriteSenderOwnersForArchivedPartner(t *testing.T) {
+	c := newTestClient(t)
+	ctx := context.Background()
+
+	event := &eventsv1.ConfigChangeEvent{
+		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER,
+		EntityId:   "acme",
+		Version:    4,
+		PayloadJson: []byte(`{
+			"partner_id": "acme",
+			"senders": [{"sender_id": "ACME-ALPHA", "type": "ALPHANAME", "status": "active"}]
+		}`),
+		Status: "archived",
+	}
+
+	if err := c.WriteProjection(ctx, event); err != nil {
+		t.Fatalf("WriteProjection failed: %v", err)
+	}
+
+	// config:version всё равно должен быть записан (существующее поведение).
+	payload, err := c.VersionPayload(ctx, "partner", "acme", 4)
+	if err != nil {
+		t.Fatalf("VersionPayload failed: %v", err)
+	}
+	if string(payload) != string(event.PayloadJson) {
+		t.Fatalf("archived payload не совпадает: %s", payload)
+	}
+
+	if _, err := c.rdb.Get(ctx, senderOwnerKey("ACME-ALPHA")).Result(); err != redis.Nil {
+		t.Fatalf("config:sender:ACME-ALPHA не должен быть записан для archived-версии, err=%v", err)
+	}
+}
+
+// Малформед/отсутствующий senders в payload не должен ронять запись
+// config:current/config:version для самого partner-объекта.
+func TestWriteProjectionToleratesMalformedSendersPayload(t *testing.T) {
+	cases := map[string]string{
+		"malformed_json":  `{not valid json`,
+		"missing_senders": `{"partner_id":"acme"}`,
+		"senders_empty":   `{"partner_id":"acme","senders":[]}`,
+	}
+
+	for name, payloadJSON := range cases {
+		t.Run(name, func(t *testing.T) {
+			c := newTestClient(t)
+			ctx := context.Background()
+
+			event := &eventsv1.ConfigChangeEvent{
+				EntityType:  commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER,
+				EntityId:    "acme",
+				Version:     1,
+				PayloadJson: []byte(payloadJSON),
+				Status:      "active",
+			}
+
+			if err := c.WriteProjection(ctx, event); err != nil {
+				t.Fatalf("WriteProjection failed (payload=%s): %v", payloadJSON, err)
+			}
+
+			current, err := c.CurrentVersion(ctx, "partner", "acme")
+			if err != nil {
+				t.Fatalf("CurrentVersion failed: %v", err)
+			}
+			if current != 1 {
+				t.Fatalf("ожидали current version 1, получили %d", current)
+			}
+		})
+	}
+}
+
+// Sanity check: sender-реестр строго ограничен entity_type=partner —
+// другие entity types (например policy_template) не должны писать
+// config:sender:* даже если бы в их payload случайно оказалось поле
+// senders.
+func TestWriteProjectionDoesNotWriteSenderOwnersForNonPartnerEntity(t *testing.T) {
+	c := newTestClient(t)
+	ctx := context.Background()
+
+	event := &eventsv1.ConfigChangeEvent{
+		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_POLICY_TEMPLATE,
+		EntityId:   "tmpl-1",
+		Version:    1,
+		PayloadJson: []byte(`{
+			"partner_id": "acme",
+			"senders": [{"sender_id": "ACME-ALPHA", "type": "ALPHANAME", "status": "active"}]
+		}`),
+		Status: "active",
+	}
+
+	if err := c.WriteProjection(ctx, event); err != nil {
+		t.Fatalf("WriteProjection failed: %v", err)
+	}
+
+	if _, err := c.rdb.Get(ctx, senderOwnerKey("ACME-ALPHA")).Result(); err != redis.Nil {
+		t.Fatalf("config:sender:ACME-ALPHA не должен быть записан для entity_type=policy_template, err=%v", err)
+	}
+}
+
 func TestEntityTypeStringMatchesPostgresConvention(t *testing.T) {
 	cases := map[commonv1.ConfigEntityType]string{
 		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PIPELINE:           "pipeline",

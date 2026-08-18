@@ -65,8 +65,14 @@ npm test
 | `DlqBrowseView.vue` (`/dlq`) | `handle_dlq_browse` + `handle_replay_request` | таблица DLQ с фильтрами + кнопка "Replay" на каждой строке (естественный UX-поток: сначала посмотреть, потом реплеить) |
 | `ReconciliationView.vue` (`/reconciliation`) | `handle_reconciliation_browse` | таблица reconciliation cases с фильтрами |
 | `ReportsView.vue` (`/reports`) | `handle_report_query` | таблица почасовых агрегатов (partner/stage/outcome) |
+| `AccessControlView.vue` (`/access-control`) | `/iam/*` (Phase 0, iam-service) | назначение/отзыв ролей сотрудников, гейт `iam:manage` |
+| `AuditLogView.vue` (`/audit`) | `handleAuditBrowse` (Phase 0) | агрегированный audit log с курсорной пагинацией, гейт `audit:read` |
+| `IncidentsView.vue` (`/incidents`) | `/incidents/*` (luminous-hugging-charm.md Ф7, incidents.go → IncidentService) | открыть/список/детали (карточка+таймлайн из execution-control+заметки)/добавить заметку/закрыть инцидент, гейт `incident:manage` |
+| `OpsHealthView.vue` (`/ops-health`) | `GET /ops/snapshot` (luminous-hugging-charm.md Ф8, ops.go — плоский HTTP-прокси в ops-visibility-service, НЕ gRPC) | таблица Kafka consumer-group lag (сводка по группам + развёрнутые партиции) и грид `/readyz` по всем сервисам платформы, гейт `ops:read` |
 
 `GetActiveVersion` (часть `handle_config_crud`) сгенерирован в `schema.d.ts`, но не вызывается ни из одного view в этом срезе — см. "Что НЕ реализовано".
+
+Начиная с `AccessControlView.vue`/`AuditLogView.vue`, новые экраны гейтятся через `RequirePermission.vue` (серверное гранулярное право, `auth.hasPermission()` — `GET /v1/me`), а не через `RequireAdmin.vue`/`auth.isAdmin()` (JWT-декодированная роль `backoffice-admin`) — см. `RequirePermission.vue` package doc для полного разбора. `IncidentsView.vue`/`OpsHealthView.vue` следуют этому же более новому паттерну, не старому role-based.
 
 ## Аутентификация и авторизация
 
@@ -76,7 +82,7 @@ npm test
 
 ## Тесты — что реально проверено
 
-42/42 тестов, `npm test` (Vitest + jsdom + `@vue/test-utils`):
+78/78 тестов, `npm test` (Vitest + jsdom + `@vue/test-utils`) — счёт по состоянию на Ф7/Ф8 (Incidents/Ops Health), список ниже не исчерпывающий (не документирует каждый добавленный после Phase 0 view-тест построчно, см. сами `*.test.ts`):
 
 * `src/stores/auth.test.ts` — реальный Pinia store, реальный `localStorage` (jsdom), не мок; включая `hasRole`/`isAdmin` на реальных JWT-подобных токенах
 * `src/stores/jwtRoles.test.ts` — разбор `realm_access.roles` из JWT payload, включая мусорные/неполные токены (не должны кидать исключение или притворяться admin'ом)
@@ -88,6 +94,8 @@ npm test
 * `src/App.test.ts` — меню реально скрывает/показывает Execution Control и Force Scheduler Command по роли
 * `src/views/ExecutionControlView.test.ts` — не-admin гейтится, admin: пустой `reason` блокирует отправку без единого запроса, Apply/Clear Override реально требуют клика по кнопке подтверждения в диалоге перед тем, как `api.POST` вызывается хоть раз
 * `src/views/SchedulerForceCommandView.test.ts` — тот же паттерн для Force Scheduler Command
+* `src/views/IncidentsView.test.ts` — гейт `incident:manage`, форма открытия инцидента (валидность до заполнения title+severity, тело POST), выбор строки грузит детали (композированный GET с таймлайном+заметками), добавление заметки, закрытие инцидента реально требует подтверждения в диалоге перед `POST /resolve`
+* `src/views/OpsHealthView.test.ts` — гейт `ops:read`, рендер сводки по группам + развёрнутых партиций lag и readyz-грида, явный `kafka_lag_available:false` показывает предупреждение а не пустую таблицу, кнопка "Обновить" реально триггерит повторный запрос
 
 **Известная проблема с localStorage в Node 26** — при запуске `vitest` в этом окружении (Node 26.5.0) глобальный `localStorage`, который сама Node.js предоставляет экспериментально (флаг `--localstorage-file`), конфликтует с `localStorage`, который должен предоставлять jsdom-окружение Vitest: без явного отключения через `NODE_OPTIONS=--no-experimental-webstorage` все тесты, трогающие `localStorage`, падают с `Cannot read properties of undefined`. Диагностировано и исправлено в этом срезе — `package.json` `"test"` скрипт уже включает этот флаг.
 

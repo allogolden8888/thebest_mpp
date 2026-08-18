@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h } from "vue";
+import { computed, h, watch } from "vue";
 import { RouterLink, RouterView, useRoute } from "vue-router";
 import {
   NConfigProvider,
@@ -14,9 +14,35 @@ import {
   darkTheme,
 } from "naive-ui";
 import { useAuthStore, ADMIN_ROLE } from "./stores/auth";
+import { useApi } from "./api/useApi";
 
 const auth = useAuthStore();
 const route = useRoute();
+const api = useApi();
+
+// Phase 0 (iam-service) gap — `auth.permissions` (server-side, GET /v1/me)
+// isn't a JWT claim, so it can't be decoded client-side like `auth.roles`
+// is. App.vue is the one component that's always mounted for the whole
+// lifetime of an authenticated session (it's the root layout — see
+// `<RouterView>` below), so a `watch` here on `auth.token` (immediate: true)
+// covers both cases in one place: a fresh login (token goes null -> value)
+// and a page reload with an already-persisted token (token is non-null on
+// first run, `immediate: true` fires right away). Judgment call: menu items
+// gated on `hasPermission(...)` (below) will briefly not show while this
+// fetch is in flight — no loading spinner in the nav for that gap — since
+// the contract here is only about correctness (fail-closed, never shows a
+// permission-gated entry before we've actually confirmed it), not about
+// eliminating a sub-second flash; `RequirePermission.vue` is the real
+// enforcement layer for direct-URL access regardless.
+watch(
+  () => auth.token,
+  (token) => {
+    if (token && !auth.meLoaded) {
+      void auth.fetchMe(api);
+    }
+  },
+  { immediate: true },
+);
 
 // CODE_REVIEW.md CRITICAL finding (subagent-1 / backoffice-ui #1a) — раньше
 // это меню было статическим массивом, показанным одинаково любому
@@ -25,24 +51,64 @@ const route = useRoute();
 // отфильтровываются для не-admin токенов (defense in depth дополняется
 // RequireAdmin.vue на уровне самих views — на случай прямого перехода по
 // URL/закладке, минуя меню).
+// `permission` (fine-grained server-side, GET /v1/me — see stores/auth.ts)
+// kept alongside the pre-existing `adminOnly` (JWT realm_access.roles) so
+// every entry below has an identical shape (both fields present, undefined
+// where not applicable) — this keeps TS inference for `allMenuOptions`
+// structural/uniform, same as before this change, rather than introducing a
+// named interface that has to be independently reconciled against
+// naive-ui's own (union) `MenuOption` prop type.
 const allMenuOptions = [
-  { label: () => h(RouterLink, { to: "/config" }, () => "Configuration"), key: "config", adminOnly: false },
+  { label: () => h(RouterLink, { to: "/config" }, () => "Configuration"), key: "config", adminOnly: false, permission: undefined as string | undefined },
   {
     label: () => h(RouterLink, { to: "/execution-control" }, () => "Execution Control"),
     key: "execution-control",
     adminOnly: true,
+    permission: undefined as string | undefined,
   },
   {
     label: () => h(RouterLink, { to: "/scheduler" }, () => "Force Scheduler Command"),
     key: "scheduler",
     adminOnly: true,
+    permission: undefined as string | undefined,
   },
-  { label: () => h(RouterLink, { to: "/dlq" }, () => "DLQ / Replay"), key: "dlq", adminOnly: false },
-  { label: () => h(RouterLink, { to: "/reconciliation" }, () => "Reconciliation"), key: "reconciliation", adminOnly: false },
-  { label: () => h(RouterLink, { to: "/reports" }, () => "Reports"), key: "reports", adminOnly: false },
+  { label: () => h(RouterLink, { to: "/dlq" }, () => "DLQ / Replay"), key: "dlq", adminOnly: false, permission: undefined as string | undefined },
+  {
+    label: () => h(RouterLink, { to: "/reconciliation" }, () => "Reconciliation"),
+    key: "reconciliation",
+    adminOnly: false,
+    permission: undefined as string | undefined,
+  },
+  { label: () => h(RouterLink, { to: "/reports" }, () => "Reports"), key: "reports", adminOnly: false, permission: undefined as string | undefined },
+  {
+    label: () => h(RouterLink, { to: "/access-control" }, () => "Users & Roles"),
+    key: "access-control",
+    adminOnly: false,
+    permission: "iam:manage" as string | undefined,
+  },
+  {
+    label: () => h(RouterLink, { to: "/audit" }, () => "Audit Log"),
+    key: "audit",
+    adminOnly: false,
+    permission: "audit:read" as string | undefined,
+  },
+  {
+    label: () => h(RouterLink, { to: "/incidents" }, () => "Incidents"),
+    key: "incidents",
+    adminOnly: false,
+    permission: "incident:manage" as string | undefined,
+  },
+  {
+    label: () => h(RouterLink, { to: "/ops-health" }, () => "Ops Health"),
+    key: "ops-health",
+    adminOnly: false,
+    permission: "ops:read" as string | undefined,
+  },
 ];
 
-const menuOptions = computed(() => allMenuOptions.filter((o) => !o.adminOnly || auth.isAdmin()));
+const menuOptions = computed(() =>
+  allMenuOptions.filter((o) => (!o.adminOnly || auth.isAdmin()) && (!o.permission || auth.hasPermission(o.permission))),
+);
 
 const activeKey = computed(() => (route.name as string) ?? null);
 </script>

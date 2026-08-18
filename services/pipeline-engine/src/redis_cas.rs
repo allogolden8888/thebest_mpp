@@ -91,6 +91,8 @@ impl RedisStateStore {
             current_node_id: fields.get("current_node_id").cloned().unwrap_or_default(),
             attempt: fields.get("attempt").and_then(|v| v.parse().ok()).unwrap_or(1),
             config_versions: HashMap::new(),
+            partner_id: fields.get("partner_id").cloned().unwrap_or_default(),
+            sandbox: fields.get("sandbox").map(|v| v == "1").unwrap_or(false),
             awaiting_stage_execution_id: fields.get("awaiting_stage_execution_id").filter(|s| !s.is_empty()).cloned(),
             resolved_operator_id: fields.get("resolved_operator_id").filter(|s| !s.is_empty()).cloned(),
             category: fields.get("category").filter(|s| !s.is_empty()).cloned(),
@@ -142,6 +144,8 @@ impl RedisStateStore {
             .arg(old_stage_execution_id_to_remove.unwrap_or(""))
             .arg(new_state.priority_flag)
             .arg(new_state.message_ttl_ms)
+            .arg(&new_state.partner_id)
+            .arg(if new_state.sandbox { "1" } else { "0" })
             .invoke_async(&mut conn)
             .await
             .map_err(|e| format!("EVAL cas_transition: {e}"))?;
@@ -208,6 +212,8 @@ mod tests {
             current_node_id: "n1_destination_resolution".to_string(),
             attempt: 1,
             config_versions: HashMap::new(),
+            partner_id: "acme".to_string(),
+            sandbox: false,
             awaiting_stage_execution_id: Some(stage_execution_id.to_string()),
             resolved_operator_id: None,
             category: None,
@@ -236,6 +242,26 @@ mod tests {
         assert_eq!(loaded.current_node_id, "n1_destination_resolution");
         assert_eq!(loaded.awaiting_stage_execution_id.as_deref(), Some("se1"));
         assert_eq!(loaded.destination_address, "998901331835");
+        assert_eq!(loaded.partner_id, "acme", "partner_id обязан пережить round-trip через Redis CAS (Фаза 5a)");
+        assert!(!loaded.sandbox, "sandbox=false по умолчанию обязан пережить round-trip");
+
+        store.finalize(&message_id, "se1").await.unwrap();
+    }
+
+    /// Фаза 11: тот же round-trip, что выше, но с sandbox=true — доказывает,
+    /// что true не теряется/не путается с "поле отсутствует" (в отличие от
+    /// пустой строки для String-полей, bool-поле здесь сериализуется как
+    /// "0"/"1", не пустая строка при false).
+    #[tokio::test]
+    async fn cas_advance_then_load_round_trips_sandbox_true() {
+        let store = RedisStateStore::new(&redis_url()).unwrap();
+        let message_id = format!("test-msg-{}", uuid::Uuid::new_v4());
+        let mut state = sample_state(&message_id, "se1");
+        state.sandbox = true;
+
+        store.cas_advance(None, None, &state).await.unwrap();
+        let loaded = store.load(&message_id).await.unwrap().expect("состояние должно быть найдено после cas_advance");
+        assert!(loaded.sandbox, "sandbox=true обязан пережить round-trip через Redis CAS");
 
         store.finalize(&message_id, "se1").await.unwrap();
     }

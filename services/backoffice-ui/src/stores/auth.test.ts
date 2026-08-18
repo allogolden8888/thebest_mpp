@@ -1,7 +1,8 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { useAuthStore, ADMIN_ROLE } from "./auth";
 import { makeTestJwt } from "../test-utils/jwt";
+import type { ApiClient } from "../api/client";
 
 describe("useAuthStore", () => {
   beforeEach(() => {
@@ -73,6 +74,77 @@ describe("useAuthStore", () => {
       expect(auth.isAuthenticated).toBe(true);
       expect(auth.isAdmin()).toBe(false);
       expect(auth.roles).toEqual([]);
+    });
+  });
+
+  // Phase 0 (iam-service) gap — `permissions`/`hasPermission`/`fetchMe` are
+  // the server-side (GET /v1/me) counterpart to the JWT-decoded `roles`/
+  // `hasRole` above: fine-grained permission strings (e.g. `iam:manage`)
+  // live in Postgres (iam.role_permissions), not in any JWT claim.
+  describe("hasPermission / fetchMe — GET /v1/me permission fetch (Phase 0 iam-service)", () => {
+    it("hasPermission возвращает false без предварительного fetchMe", () => {
+      const auth = useAuthStore();
+      auth.setToken("jwt-token");
+
+      expect(auth.hasPermission("iam:manage")).toBe(false);
+      expect(auth.meLoaded).toBe(false);
+    });
+
+    it("fetchMe заполняет permissions и meLoaded из ответа GET /v1/me", async () => {
+      const auth = useAuthStore();
+      auth.setToken("jwt-token");
+      const fakeGet = vi.fn(async () => ({
+        data: { external_id: "u1", roles: ["ops-viewer"], permissions: ["ops:read", "audit:read"] },
+        error: undefined,
+      }));
+      const fakeApi = { GET: fakeGet } as unknown as ApiClient;
+
+      await auth.fetchMe(fakeApi);
+
+      expect(fakeGet).toHaveBeenCalledWith("/me");
+      expect(auth.meLoaded).toBe(true);
+      expect(auth.hasPermission("audit:read")).toBe(true);
+      expect(auth.hasPermission("iam:manage")).toBe(false);
+    });
+
+    it("fetchMe не вызывает GET, если токена нет", async () => {
+      const auth = useAuthStore();
+      const fakeGet = vi.fn();
+      const fakeApi = { GET: fakeGet } as unknown as ApiClient;
+
+      await auth.fetchMe(fakeApi);
+
+      expect(fakeGet).not.toHaveBeenCalled();
+      expect(auth.meLoaded).toBe(false);
+    });
+
+    it("fetchMe оставляет permissions пустым и meLoaded=false при ошибке ответа (fail-closed, можно повторить)", async () => {
+      const auth = useAuthStore();
+      auth.setToken("jwt-token");
+      const fakeGet = vi.fn(async () => ({ data: undefined, error: "недоступно" }));
+      const fakeApi = { GET: fakeGet } as unknown as ApiClient;
+
+      await auth.fetchMe(fakeApi);
+
+      expect(auth.meLoaded).toBe(false);
+      expect(auth.permissions).toEqual([]);
+      expect(auth.hasPermission("audit:read")).toBe(false);
+    });
+
+    it("clearToken сбрасывает permissions и meLoaded", async () => {
+      const auth = useAuthStore();
+      auth.setToken("jwt-token");
+      const fakeApi = {
+        GET: vi.fn(async () => ({ data: { external_id: "u1", roles: [], permissions: ["iam:manage"] }, error: undefined })),
+      } as unknown as ApiClient;
+      await auth.fetchMe(fakeApi);
+      expect(auth.hasPermission("iam:manage")).toBe(true);
+
+      auth.clearToken();
+
+      expect(auth.meLoaded).toBe(false);
+      expect(auth.permissions).toEqual([]);
+      expect(auth.hasPermission("iam:manage")).toBe(false);
     });
   });
 });

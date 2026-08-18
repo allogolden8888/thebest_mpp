@@ -14,9 +14,10 @@ mod redis_sync;
 mod redis_url;
 mod request;
 mod segmentation;
+mod vault_auth;
 
 use admission::AlwaysAdmit;
-use auth::EnvAuthVerifier;
+use auth::{AuthVerifier, EnvAuthVerifier};
 use health::HealthState;
 use partner_config::{Partner, PartnerSnapshot};
 use rate_limit::RateLimiter;
@@ -24,6 +25,53 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use vault_auth::{VaultAuthVerifier, VaultClient};
+
+/// `AUTH_VERIFIER_MODE` — `"vault"` (дефолт) использует `VaultAuthVerifier`
+/// (реальный Vault read с TTL-кешем, см. `vault_auth.rs`); `"env"` явно
+/// откатывается на `EnvAuthVerifier` (bootstrap/break-glass — старый
+/// статический `PARTNER_CRED_*` механизм, НЕ удалён, остаётся доступным).
+/// Неизвестное значение — предупреждение в лог + дефолт на `vault` (более
+/// безопасное направление: явная опечатка в конфиге не должна тихо откатить
+/// сервис на менее живую проверку credentials).
+fn build_auth_verifier(health_state: &Arc<HealthState>) -> Box<dyn AuthVerifier> {
+    let mode = std::env::var("AUTH_VERIFIER_MODE").unwrap_or_else(|_| "vault".to_string());
+    match mode.as_str() {
+        "env" => {
+            tracing::warn!("AUTH_VERIFIER_MODE=env — используется EnvAuthVerifier (bootstrap/break-glass), не VaultAuthVerifier");
+            Box::new(EnvAuthVerifier)
+        }
+        other => {
+            if other != "vault" {
+                tracing::warn!("AUTH_VERIFIER_MODE={other:?} не распознан — используется дефолт vault (VaultAuthVerifier)");
+            }
+            let vault_client = VaultClient::from_env();
+
+            // Периодический health-poll на ТОМ ЖЕ клиенте/token source, что
+            // реально используется на пути аутентификации — не отдельно
+            // сконфигурированный клиент. /readyz должен отражать реальную
+            // достижимость Vault, не статический флаг, выставленный один раз
+            // при старте (см. health.rs).
+            {
+                let health_state = health_state.clone();
+                let ping_client = vault_client.clone();
+                tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(Duration::from_secs(15));
+                    loop {
+                        interval.tick().await;
+                        let healthy = ping_client.ping().await.is_ok();
+                        if !healthy {
+                            tracing::error!("Vault health-check (/v1/sys/health) не прошёл — /readyz теперь отражает недоступность");
+                        }
+                        health_state.vault_healthy.store(healthy, Ordering::Relaxed);
+                    }
+                });
+            }
+
+            Box::new(VaultAuthVerifier::new(vault_client))
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -69,9 +117,11 @@ async fn main() {
 
     let rate_limiter = RateLimiter::default();
 
+    let auth_verifier = build_auth_verifier(&health_state);
+
     let state = Arc::new(http::AppState {
         partner_snapshot,
-        auth_verifier: Box::new(EnvAuthVerifier),
+        auth_verifier,
         admission_gate: Box::new(AlwaysAdmit),
         rate_limiter,
         producer,

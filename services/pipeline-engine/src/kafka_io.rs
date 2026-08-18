@@ -155,8 +155,15 @@ pub fn handle_incoming(incoming: &IncomingMessage, pipeline: &PipelineDefinition
         .as_ref()
         .map(|t| t.seconds * 1000 + (t.nanos as i64) / 1_000_000)
         .unwrap_or(i64::MAX); // отсутствующий TTL — не считаем сообщение истёкшим никогда
-    let mut state =
-        ExecutionState::new_from_incoming(incoming.message_id.clone(), pipeline, segment_count, incoming.priority_flag, message_ttl_ms);
+    let mut state = ExecutionState::new_from_incoming(
+        incoming.message_id.clone(),
+        pipeline,
+        segment_count,
+        incoming.priority_flag,
+        message_ttl_ms,
+        incoming.partner_id.clone(),
+        incoming.sandbox,
+    );
     let entry = pipeline.entry_node();
     let stage_execution_id = Uuid::new_v4().to_string();
     state.awaiting_stage_execution_id = Some(stage_execution_id.clone());
@@ -766,6 +773,7 @@ mod tests {
             channel: 0,
             partner_id: "click_uz".into(),
             application_id: "app1".into(),
+            sandbox: false,
             received_at: None,
             message_ttl: None,
             priority_flag: 2,
@@ -786,6 +794,8 @@ mod tests {
         let (state, destination_address, command) = handle_incoming(&incoming, &pipeline).unwrap();
         assert_eq!(state.current_node_id, "n1_destination_resolution");
         assert_eq!(state.segment_count, 2);
+        assert_eq!(state.partner_id, "click_uz", "partner_id обязан попасть в состояние из IncomingMessage (Фаза 5a)");
+        assert!(!state.sandbox, "дефолтный incoming_sms() не sandbox");
         assert_eq!(destination_address, "998901331835");
         assert!(state.awaiting_stage_execution_id.is_some(), "должны ждать конкретный stage_execution_id, не любое событие");
         match command.stage_extension {
@@ -794,6 +804,21 @@ mod tests {
             }
             other => panic!("ожидали DestinationResolutionExtension, получили {other:?}"),
         }
+    }
+
+    /// Фаза 11 плана закрытия API-пробелов: sandbox обязан доехать от
+    /// IncomingMessage.sandbox до StageExecuteCommand.sandbox уже на самой
+    /// первой стадии (DestinationResolution), не только для Billing/Delivery,
+    /// которые реально меняют по нему поведение — верхнеуровневое поле, не
+    /// per-extension.
+    #[test]
+    fn handle_incoming_propagates_sandbox_flag_to_state_and_command() {
+        let pipeline = pipeline();
+        let mut incoming = incoming_sms("m1", "998901331835", 1);
+        incoming.sandbox = true;
+        let (state, _destination_address, command) = handle_incoming(&incoming, &pipeline).unwrap();
+        assert!(state.sandbox, "sandbox=true в IncomingMessage обязан попасть в ExecutionState");
+        assert!(command.sandbox, "sandbox обязан попасть в StageExecuteCommand независимо от того, какая стадия строится");
     }
 
     #[test]
@@ -829,7 +854,7 @@ mod tests {
         let event = StageCompletedEvent {
             event_id: "e2".into(), message_id: "m1".into(), stage_execution_id: dispatched_id, attempt: 1,
             stage_name: StageName::DestinationResolution as i32, outcome: Outcome::Succeeded as i32, reason_code: String::new(), retryable: false,
-            retry_after: None, traceparent: "tp1".into(), completed_at: None,
+            retry_after: None, traceparent: "tp1".into(), completed_at: None, sandbox: false,
             stage_result: Some(StageResult::DestinationResolution(DestinationResolutionResult { resolved_operator_id: "beeline".into() })),
         };
 
@@ -849,7 +874,7 @@ mod tests {
     #[test]
     fn advance_at_terminal_node_returns_terminal() {
         let pipeline = pipeline();
-        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX);
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "acme".into(), false);
         state.current_node_id = "n_billing_blocked".into();
         state.category = Some("BLOCKED".into());
         state.awaiting_stage_execution_id = Some("se1".into());
@@ -857,7 +882,7 @@ mod tests {
         let event = StageCompletedEvent {
             event_id: "e1".into(), message_id: "m1".into(), stage_execution_id: "se1".into(), attempt: 1,
             stage_name: StageName::Billing as i32, outcome: Outcome::Succeeded as i32, reason_code: String::new(), retryable: false,
-            retry_after: None, traceparent: "tp1".into(), completed_at: None, stage_result: None,
+            retry_after: None, traceparent: "tp1".into(), completed_at: None, sandbox: false, stage_result: None,
         };
         assert_eq!(advance(&mut state, &pipeline, &event, "998901331835", 0).unwrap(), AdvanceOutcome::Terminal);
     }
@@ -867,13 +892,13 @@ mod tests {
         // Найдено кодревью: устаревшее событие не должно ни продвигать, ни
         // завершать пайплайн — Ignored отличим от Terminal именно поэтому.
         let pipeline = pipeline();
-        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX);
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "acme".into(), false);
         state.awaiting_stage_execution_id = Some("se-real".into());
 
         let stale_event = StageCompletedEvent {
             event_id: "e-stale".into(), message_id: "m1".into(), stage_execution_id: "se-old".into(), attempt: 1,
             stage_name: StageName::DestinationResolution as i32, outcome: Outcome::Succeeded as i32, reason_code: String::new(), retryable: false,
-            retry_after: None, traceparent: "tp1".into(), completed_at: None, stage_result: None,
+            retry_after: None, traceparent: "tp1".into(), completed_at: None, sandbox: false, stage_result: None,
         };
         assert_eq!(advance(&mut state, &pipeline, &stale_event, "998901331835", 0).unwrap(), AdvanceOutcome::Ignored);
         assert_eq!(state.current_node_id, "n1_destination_resolution", "состояние не должно было измениться");

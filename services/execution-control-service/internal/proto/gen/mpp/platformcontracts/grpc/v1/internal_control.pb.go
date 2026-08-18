@@ -416,7 +416,15 @@ type ApplyOverrideRequest struct {
 	Reason        string                   `protobuf:"bytes,5,opt,name=reason,proto3" json:"reason,omitempty"`
 	RequestedBy   string                   `protobuf:"bytes,6,opt,name=requested_by,json=requestedBy,proto3" json:"requested_by,omitempty"`
 	// Пусто — override действует до явного ClearOverride.
-	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	ExpiresAt *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	// Опционально линкует этот override к инциденту (luminous-hugging-charm.md
+	// Ф7, incident-service, incident.incidents.id — migrations/V028__incident.sql).
+	// 0 (proto3 default) = "без инцидента" — безопасно, incident.incidents.id
+	// это BIGSERIAL, начинается с 1, реальный id никогда не 0. Пишется в
+	// control.execution_control_audit.incident_id (nullable, без FK через
+	// границу схем — см. V028 и incident-service/README.md) для последующего
+	// чтения таймлайна incident-service'ом (TimelineForIncident).
+	IncidentId    int64 `protobuf:"varint,8,opt,name=incident_id,json=incidentId,proto3" json:"incident_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -498,6 +506,13 @@ func (x *ApplyOverrideRequest) GetExpiresAt() *timestamppb.Timestamp {
 		return x.ExpiresAt
 	}
 	return nil
+}
+
+func (x *ApplyOverrideRequest) GetIncidentId() int64 {
+	if x != nil {
+		return x.IncidentId
+	}
+	return 0
 }
 
 type ApplyOverrideResponse struct {
@@ -756,7 +771,7 @@ const file_grpc_internal_control_proto_rawDesc = "" +
 	"entityType\x12\x1b\n" +
 	"\tentity_id\x18\x02 \x01(\tR\bentityId\x12\x18\n" +
 	"\aversion\x18\x03 \x01(\x03R\aversion\x12!\n" +
-	"\frequested_by\x18\x04 \x01(\tR\vrequestedBy\"\xc6\x02\n" +
+	"\frequested_by\x18\x04 \x01(\tR\vrequestedBy\"\xe7\x02\n" +
 	"\x14ApplyOverrideRequest\x12:\n" +
 	"\x05scope\x18\x01 \x01(\x0e2$.mpp.common.v1.ExecutionControlScopeR\x05scope\x12\x19\n" +
 	"\bscope_id\x18\x02 \x01(\tR\ascopeId\x12:\n" +
@@ -765,7 +780,9 @@ const file_grpc_internal_control_proto_rawDesc = "" +
 	"\x06reason\x18\x05 \x01(\tR\x06reason\x12!\n" +
 	"\frequested_by\x18\x06 \x01(\tR\vrequestedBy\x129\n" +
 	"\n" +
-	"expires_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"l\n" +
+	"expires_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12\x1f\n" +
+	"\vincident_id\x18\b \x01(\x03R\n" +
+	"incidentId\"l\n" +
 	"\x15ApplyOverrideResponse\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\x03R\aversion\x129\n" +
 	"\n" +

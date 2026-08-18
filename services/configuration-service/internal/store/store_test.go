@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"testing"
@@ -11,6 +12,25 @@ import (
 
 	"mpp/configuration-service/internal/validate"
 )
+
+// jsonEqual — payload column is JSONB: Postgres re-serializes on storage
+// (e.g. `{"n":1}` comes back as `{"n": 1}`, a space after the colon) —
+// compare structurally, not by exact byte string.
+func jsonEqual(t *testing.T, got []byte, want string) {
+	t.Helper()
+	var gotVal, wantVal any
+	if err := json.Unmarshal(got, &gotVal); err != nil {
+		t.Fatalf("got is not valid JSON: %v (%s)", err, got)
+	}
+	if err := json.Unmarshal([]byte(want), &wantVal); err != nil {
+		t.Fatalf("want is not valid JSON: %v", err)
+	}
+	gotNorm, _ := json.Marshal(gotVal)
+	wantNorm, _ := json.Marshal(wantVal)
+	if string(gotNorm) != string(wantNorm) {
+		t.Fatalf("payload mismatch: got %s, want %s", got, want)
+	}
+}
 
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
@@ -207,5 +227,89 @@ func TestListVersionsReturnsAllCreatedVersions(t *testing.T) {
 	}
 	if len(versions) != 3 {
 		t.Fatalf("ожидали 3 версии, получили %d", len(versions))
+	}
+}
+// TestGetVersionByNumberReturnsExactVersionPayload — luminous-hugging-charm.md
+// Ф10 (DiffVersions). Two versions of one entity, real Postgres —
+// confirms GetVersionByNumber fetches the SPECIFIC version asked for, not
+// just the currently active one (GetActiveVersion would only ever see the
+// second write here).
+func TestGetVersionByNumberReturnsExactVersionPayload(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	s := New(pool)
+	ctx := context.Background()
+	entityID := uniqueEntityID("acme")
+
+	if _, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(`{"n":1}`), "tester"); err != nil {
+		t.Fatalf("create v1 failed: %v", err)
+	}
+	if _, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(`{"n":2}`), "tester"); err != nil {
+		t.Fatalf("create v2 failed: %v", err)
+	}
+
+	v1, err := s.GetVersionByNumber(ctx, validate.EntityPartner, entityID, 1)
+	if err != nil {
+		t.Fatalf("GetVersionByNumber(1) failed: %v", err)
+	}
+	jsonEqual(t, v1, `{"n":1}`)
+
+	v2, err := s.GetVersionByNumber(ctx, validate.EntityPartner, entityID, 2)
+	if err != nil {
+		t.Fatalf("GetVersionByNumber(2) failed: %v", err)
+	}
+	jsonEqual(t, v2, `{"n":2}`)
+}
+
+func TestGetVersionByNumberUnknownVersionReturnsError(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	s := New(pool)
+	ctx := context.Background()
+	entityID := uniqueEntityID("acme")
+
+	if _, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(`{}`), "tester"); err != nil {
+		t.Fatalf("create v1 failed: %v", err)
+	}
+
+	if _, err := s.GetVersionByNumber(ctx, validate.EntityPartner, entityID, 99); err == nil {
+		t.Fatalf("ожидали ошибку для несуществующей версии 99")
+	}
+}
+
+// TestGetActiveVersionReturnsPayloadFromRealRow — найдено при реализации
+// partner-self-service-api (Фаза 3 плана): до добавления payload в SELECT
+// GetActiveVersion читал только метаданные строки config.config_versions,
+// само содержимое документа было недостижимо ни для одного клиента
+// ConfigService. Проверяем реальный round-trip через Postgres, не через
+// fakeStore (тот у grpcserver-пакета).
+func TestGetActiveVersionReturnsPayloadFromRealRow(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	s := New(pool)
+	ctx := context.Background()
+	entityID := uniqueEntityID("acme")
+
+	wantPayload := []byte(`{"partner_id":"acme","applications":[]}`)
+	if _, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, wantPayload, "tester"); err != nil {
+		t.Fatalf("CreateImmutableVersionAndOutbox failed: %v", err)
+	}
+
+	v, err := s.GetActiveVersion(ctx, validate.EntityPartner, entityID)
+	if err != nil {
+		t.Fatalf("GetActiveVersion failed: %v", err)
+	}
+
+	// JSONB нормализует пробелы при чтении обратно — сравниваем
+	// распарсенное содержимое, не байты.
+	var got, want map[string]any
+	if err := json.Unmarshal(v.Payload, &got); err != nil {
+		t.Fatalf("payload из БД не распарсился как JSON: %v (%q)", err, v.Payload)
+	}
+	if err := json.Unmarshal(wantPayload, &want); err != nil {
+		t.Fatalf("тестовый payload не распарсился как JSON: %v", err)
+	}
+	if got["partner_id"] != want["partner_id"] {
+		t.Fatalf("payload не пробросился из реальной строки: получили %v, ожидали %v", got, want)
 	}
 }

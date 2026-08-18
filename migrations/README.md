@@ -29,6 +29,12 @@ V020__config_outbox_claim_and_retry.sql
 V021__billing_reconciliation_audit.sql
 V022__policy_template_demo_seed.sql
 V023__number_range_operator_id_uz_suffix.sql
+V024__policy_template_sender_id.sql
+V025__iam.sql
+V026__iam_manage_permission.sql
+V027__credentials.sql
+V028__incident.sql
+V029__message_read_model_sandbox.sql
 ```
 
 Применить локально:
@@ -37,9 +43,20 @@ V023__number_range_operator_id_uz_suffix.sql
 for f in V*.sql; do psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"; done
 ```
 
+**V024 и V029 — присоединены слиянием subagent-2 -> subagent-1 (обе ветки
+`luminous-hugging-charm.md`, 12-фазный план закрытия API-пробелов).** V024
+(sender_id в policy_template, Фаза 2) и исходно-V028-переименованная-в-V029
+(sandbox-колонка message_read_model, Фаза 11) были написаны в ветке
+subagent-2 параллельно с V025-V028 в этой ветке (subagent-1) — subagent-2
+изначально тоже занял номер V028 под свою миграцию (для другой таблицы),
+что при слиянии дало коллизию имён; переименована в V029 (subagent-1's
+V028__incident.sql оставлен как есть — оба существовали в исходных ветках
+независимо, порядок между ними произволен, коллизия была только в номере
+файла, не в содержании).
+
 ## Что реально проверено (не только «написано и похоже на правду»)
 
-1. **Все 17 миграций применяются с нуля без ошибок** на чистой PostgreSQL 17.
+1. **Все 19 миграций применяются с нуля без ошибок** на чистой PostgreSQL 17.
 2. **Все 9 реальных номеров из чата** (`998901331835` и остальные) корректно резолвятся в правильного оператора через `routing.number_range` — `SELECT ... WHERE msisdn BETWEEN range_start AND range_end`, 9/9 совпадений.
 3. **CHECK-ограничения реально блокируют некорректные данные**, не только написаны: compensating billing-запись без `source_charge_id` — отклонена; шаблон с зарезервированной категорией `BLOCKED` — отклонён.
 4. **Идемпотентность billing_ledger** — повторная вставка с тем же `charge_id` через `ON CONFLICT DO NOTHING` реально не создаёт вторую строку.
@@ -58,6 +75,26 @@ for f in V*.sql; do psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"; done
 ## V023 — development_plan.md 5.5, operator_id cross-artifact mismatch
 
 Найдено при работе над "реальными connection-профилями операторов": `routing.number_range` (V011) сеялась с `operator_id` без суффикса (`beeline`/`ucell`/`uzmobile`), но `config_schemas/examples/{operator,routing_table,number_range}.valid.json` и дефолтный `OPERATOR_ID` обоих connector-сервисов (`operator-smpp-session-manager`, `operator-http-gateway`) используют суффикс `_uz` (`beeline_uz` и т.д.) — 5 мест против 2. `routing-service` резолвит route по точному совпадению `operator_id` (`RouteTableSnapshot::for_operator`, `HashMap`-lookup, не fuzzy) — реальное сообщение с `resolved_operator_id='beeline'` от destination-resolution-service не находило бы маршрут в `routing_table.valid.json` (ключ `'beeline_uz'`): `RoutingError::UnknownOperator` на каждом сообщении, для всех трёх операторов, не гипотетический edge case. V023 нормализует на `_uz` (UPDATE, не переписывание V011 задним числом — та же дисциплина, что у остальных миграций этой сессии). `services/destination-resolution-service/data/number_range_snapshot.json` (тот же контент, что и V011, продублированный для локального теста без Postgres) обновлён тем же коммитом.
+
+## V024 — luminous-hugging-charm.md Ф2, sender_id в policy_template
+
+`policy.policy_template` (V013) скоупилась на `partner_id` (+опц. `operator_id`), но не на `sender_id` — хотя `senders[]` уже существует как данные внутри `partner.schema.json` (у партнёра может быть несколько alphaname/short-number отправителей), не было способа завести шаблон, специфичный для одного sender'а — он безусловно применялся ко всем. `sender_id` — nullable, по той же схеме, что уже существующий `operator_id` (`NULL` = применяется ко всем отправителям партнёра). Ссылочная целостность (sender_id реально принадлежит partner_id) — не FK на Postgres-таблицу (реестра отправителей как отдельной таблицы сознательно нет — второй источник истины к `partner.schema.json`), проверяется в `policy-service` через Redis-проекцию `sender_id -> partner_id` от `config-cache-projector`. Разблокирует sender-scoped `template-management-service` (Фаза 4).
+
+## V025/V026 — luminous-hugging-charm.md Ф0, Identity/RBAC/Audit
+
+`iam.*` — прямая замена заглушки `V017__backoffice_stub.sql` (`backoffice.users`, никем не читалась в коде). Роли/права/назначения для backoffice-персонала + пустой заранее заведённый заготовок под партнёрский портал (`iam.partner_portal_users`/`partner_portal_role_assignments`, Фаза 3). Полный разбор — `services/iam-service/README.md`.
+
+## V027 — luminous-hugging-charm.md Ф1, живой выпуск/ротация partner credentials
+
+`credentials.issued_secrets`/`credentials.rotation_audit` — история того, что реально было записано в Vault (сам секрет — только в Vault, никогда в Postgres). До этой фазы `partners/*` Vault-пути, на которые уже ссылались `credential_ref` в `partner.schema.json`, не содержали в реальном Vault вообще никакого значения — Terraform (`infra/terraform/vault-secrets.tf`) сеет только пять платформенных секретов (postgresql/redis×3/clickhouse), не `partners/*`. Полный разбор, включая порядок операций (Vault пишется ДО Postgres) — `services/credential-issuer-service/README.md`.
+
+## V028 — luminous-hugging-charm.md Ф7, инцидент-менеджмент
+
+`incident.incidents`/`incident.incident_notes` — группировка связанных `control.execution_control_audit` override-записей (V016) в именованный, отслеживаемый инцидент с таймлайном и постмортемом; до этой фазы override-и писались как сырые строки без концепции группировки вообще. `control.execution_control_audit` получает nullable `incident_id` (плюс частичный индекс `WHERE incident_id IS NOT NULL` под таймлайн-запрос) — **намеренно без FK через границу схем**: `incident.incidents` принадлежит новому `incident-service`, `control.execution_control_audit` — `execution-control-service`, это две независимо разворачиваемые схемы с разными владельцами, тот же контраст, что уже виден в кодовой базе между `iam.staff_role_assignments.role_id` (FK на `iam.roles.id` — тот же владелец схемы) и `billing.reconciliation_audit`/`messaging.replay_audit` (ни то ни другое не несёт FK за пределы собственной таблицы). Постмортем обязателен при закрытии инцидента — валидируется в `incident-service` (`codes.InvalidArgument` при пустом `postmortem_notes`), не CHECK-ограничением, симметрично тому, как `execution-control-service` валидирует `admission_rate` в коде до того, как запрос доходит до БД. Полный разбор — `services/incident-service/README.md`.
+
+## V029 — luminous-hugging-charm.md Ф11, sandbox mode
+
+`messaging.message_read_model` получает `sandbox BOOLEAN NOT NULL DEFAULT false`. Без неё sandbox-сообщения (dry-run отправка через `X-Sandbox: true`, не тарифицируется, не уходит реальному оператору) в backoffice-ui/partner-api-отчётах и ClickHouse неотличимы от настоящего трафика — "почему за это сообщение никто не списал денег и не было реальной отправки" превращается в загадку при разборе инцидента. `lifecycle-writer` заполняет колонку напрямую из `IncomingMessage.sandbox` (единственный источник этого флага — устанавливается один раз на входе в pipeline, `partner-rest-receiver`) при создании строки read model из `incoming.messages` — не через `message.lifecycle`/`message-state-resolver`: тот флаг уже известен на этом, более раннем шаге, не меняется дальше по ходу пайплайна, и `incoming.messages` в любом случае приходит раньше первого `stage.completed`.
 
 ## Найдено только на этапе реального DDL (не было видно на уровне концептуальной спеки)
 

@@ -4,11 +4,17 @@
 //
 //	config:current:{entity_type}:{entity_id}          STRING  номер активной версии
 //	config:version:{entity_type}:{entity_id}:{version} STRING  сериализованный payload
+//	config:sender:{sender_id}                          STRING  partner_id владельца отправителя
+//	                                                            (только entity_type=partner, см.
+//	                                                            "Реестр отправителей" в luminous-
+//	                                                            hugging-charm.md, Фаза 2)
 package projector
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
 
 	"github.com/redis/go-redis/v9"
 
@@ -72,6 +78,67 @@ func versionKey(entityType, entityID string, version int64) string {
 	return fmt.Sprintf("config:version:%s:%s:%d", entityType, entityID, version)
 }
 
+func senderOwnerKey(senderID string) string {
+	return fmt.Sprintf("config:sender:%s", senderID)
+}
+
+// parseSenderOwners — best-effort разбор senders[] из partner-payload
+// (config_schemas/partner.schema.json) для проекции
+// config:sender:{sender_id} -> partner_id.
+//
+// partner_id берётся из самого payload (top-level поле, обязательное по
+// схеме), а НЕ из event.GetEntityId(): проверено —
+// configuration-service/internal/grpcserver/server.go (CreateVersion) и
+// internal/validate/semantic.go нигде не сверяют entity_id с
+// payload["partner_id"]; semanticChecks вообще не регистрирует проверку
+// для EntityPartner. Полагаться на entity_id как на partner_id было бы
+// недокументированным допущением, которое ничего в этом сервисе не
+// гарантирует — payload несёт свой собственный partner_id, он и есть
+// источник истины для владения sender_id.
+//
+// Намеренно не возвращает ошибку наверх: если payload_json не парсится
+// как JSON, или senders отсутствует/пуст, WriteProjection всё равно
+// обязан записать config:current/config:version для самого partner-
+// объекта — здесь только логируется и пропускается sender-проекция.
+//
+// Фаза 2 плана (luminous-hugging-charm.md, "Реестр отправителей") —
+// осознанное упрощение: если sender_id убран из senders[] в более новой
+// версии, либо его status стал archived, старая запись
+// config:sender:{id} НЕ удаляется/не помечается. Владение (какому
+// партнёру принадлежит sender_id) не меняется при архивации — меняется
+// только его активность; настоящий remove потребовал бы диффа старого и
+// нового payload, что осознанно оставлено вне скоупа этого прохода.
+func parseSenderOwners(payloadJSON []byte, entityID string) map[string]string {
+	var payload struct {
+		PartnerID string `json:"partner_id"`
+		Senders   []struct {
+			SenderID string `json:"sender_id"`
+		} `json:"senders"`
+	}
+	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
+		log.Printf("write_projection: payload_json не парсится как JSON для sender-реестра (entity_id=%s): %v — config:sender:* пропущен, config:current/config:version не затронуты", entityID, err)
+		return nil
+	}
+	if len(payload.Senders) == 0 {
+		return nil
+	}
+	if payload.PartnerID == "" {
+		log.Printf("write_projection: senders[] непуст, но partner_id пуст в payload (entity_id=%s) — config:sender:* пропущен для этого события", entityID)
+		return nil
+	}
+	owners := make(map[string]string, len(payload.Senders))
+	for _, s := range payload.Senders {
+		if s.SenderID == "" {
+			continue
+		}
+		owners[s.SenderID] = payload.PartnerID
+	}
+	if len(owners) == 0 {
+		return nil
+	}
+	return owners
+}
+
 // WriteProjection — write_projection: всегда пишет config:version:... (для
 // истории/бутстрапа явно запрошенной версии), и обновляет config:current
 // только для status="active" — архивная версия не должна становиться
@@ -102,10 +169,25 @@ func (c *Client) WriteProjection(ctx context.Context, event *eventsv1.ConfigChan
 	entityID := event.GetEntityId()
 	version := event.GetVersion()
 
+	// Ф2 плана (luminous-hugging-charm.md, "Реестр отправителей"): для
+	// entity_type=partner + status=active (то же гейтирование, что и у
+	// config:current — архивная/superseded версия не должна затирать
+	// живой реестр отправителей устаревшими данными) дополнительно
+	// проецируем sender_id -> partner_id. Разбор payload вынесен ДО
+	// TxPipelined: ошибка парсинга не должна мешать основной транзакции
+	// записи config:current/config:version (см. parseSenderOwners).
+	var senderOwners map[string]string
+	if entityType == "partner" && event.GetStatus() == "active" {
+		senderOwners = parseSenderOwners(event.GetPayloadJson(), entityID)
+	}
+
 	_, err := c.rdb.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 		pipe.Set(ctx, versionKey(entityType, entityID, version), event.GetPayloadJson(), 0)
 		if event.GetStatus() == "active" {
 			pipe.Set(ctx, currentKey(entityType, entityID), version, 0)
+		}
+		for senderID, partnerID := range senderOwners {
+			pipe.Set(ctx, senderOwnerKey(senderID), partnerID, 0)
 		}
 		return nil
 	})

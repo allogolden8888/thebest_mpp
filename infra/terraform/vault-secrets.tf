@@ -54,6 +54,53 @@ resource "vault_kubernetes_auth_backend_role" "external_secrets" {
   token_ttl                        = 900
 }
 
+# luminous-hugging-charm.md Фаза 1 — живой выпуск/ротация partner
+# credentials (services/credential-issuer-service). read_mpp_secrets выше
+# (mpp/data/* read-only, роль external-secrets) слишком широк для writer'а
+# и не даёт write вообще — новые узкие policy/role, scoped на
+# mpp/data/partners/* (не на весь mpp/data/*, где живут
+# postgresql/redis/clickhouse — credential-issuer-service не должен мочь
+# даже ПРОЧИТАТЬ платформенные секреты, не то что писать в них).
+resource "vault_policy" "write_partner_credentials" {
+  name   = "mpp-write-partner-credentials"
+  policy = <<-EOT
+    path "mpp/data/partners/*" {
+      capabilities = ["create", "update", "read"]
+    }
+  EOT
+}
+
+resource "vault_kubernetes_auth_backend_role" "credential_issuer_service" {
+  backend                          = vault_auth_backend.kubernetes.path
+  role_name                        = "credential-issuer-service" # совпадает с VAULT_K8S_AUTH_ROLE default в cmd/credential-issuer-service/main.go
+  bound_service_account_names      = ["credential-issuer-service"]
+  bound_service_account_namespaces = ["mpp"]
+  token_policies                   = [vault_policy.write_partner_credentials.name]
+  token_ttl                        = 900
+}
+
+# Читающая сторона той же Фазы 1: partner-rest-receiver (VaultAuthVerifier)
+# и partner-smpp-gateway (аналог для SMPP_BIND) — только read, только
+# partners/*, один shared role/policy для обоих (идентичная потребность,
+# та же экономия, что один read_mpp_secrets role для ESO вместо пяти).
+resource "vault_policy" "read_partner_credentials" {
+  name   = "mpp-read-partner-credentials"
+  policy = <<-EOT
+    path "mpp/data/partners/*" {
+      capabilities = ["read"]
+    }
+  EOT
+}
+
+resource "vault_kubernetes_auth_backend_role" "partner_credential_readers" {
+  backend                          = vault_auth_backend.kubernetes.path
+  role_name                        = "partner-credential-readers"
+  bound_service_account_names      = ["partner-rest-receiver", "partner-smpp-gateway"]
+  bound_service_account_namespaces = ["mpp"]
+  token_policies                   = [vault_policy.read_partner_credentials.name]
+  token_ttl                        = 900
+}
+
 resource "vault_kv_secret_v2" "postgresql" {
   mount = vault_mount.mpp.path
   name  = "postgresql"

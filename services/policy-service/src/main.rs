@@ -49,6 +49,9 @@ async fn main() {
         template_id: template_raw["template_id"].as_str().unwrap().to_string(),
         pattern: template_raw["pattern"].as_str().unwrap().to_string(),
         category: template_raw["category"].as_str().unwrap().to_string(),
+        // Фаза 2 — `sender_id` не обязателен в policy_template.schema.json,
+        // отсутствие/null означает "все отправители партнёра" (см. Template::sender_id).
+        sender_id: template_raw["sender_id"].as_str().map(String::from),
     };
     // Статические файлы — только bootstrap-нулевая точка; живое состояние
     // дальше ведёт config_reload.rs (config.changes, entity_type=POLICY_RULESET

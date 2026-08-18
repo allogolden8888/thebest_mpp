@@ -101,6 +101,30 @@ func grpcConnCheck(conn *grpc.ClientConn) func(context.Context) error {
 	}
 }
 
+// httpPingCheck — /readyz dependency check для plain-HTTP зависимости
+// (ops-visibility-service, единственная такая в этом сервисе — см.
+// internal/httpapi/ops.go package doc, почему она не gRPC). В отличие от
+// grpcConnCheck (читает уже известное состояние соединения) — здесь
+// реальный GET на каждый readyz-тик, у plain http.Client нет аналога
+// gRPC-шного "текущее состояние канала" без сетевого запроса.
+func httpPingCheck(client *http.Client, url string) func(context.Context) error {
+	return func(ctx context.Context) error {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("ops-visibility-service healthz: статус %d", resp.StatusCode)
+		}
+		return nil
+	}
+}
+
 func dialGRPC(addr string) (*grpc.ClientConn, error) {
 	return grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 }
@@ -165,18 +189,62 @@ func main() {
 	}
 	defer replayConn.Close()
 
+	// iamConn — luminous-hugging-charm.md Фаза 0: auth.RequirePermission
+	// (internal/auth/permission.go) вызывает IamService.CheckPermission на
+	// каждый мутирующий запрос вместо разбора realm_access.roles на месте
+	// (см. package doc internal/auth/jwt.go). Тот же dialGRPC/grpcConnCheck
+	// паттерн, что и у трёх соединений выше.
+	iamConn, err := dialGRPC(env("IAM_SERVICE_ADDR", "iam-service.mpp.svc:9000"))
+	if err != nil {
+		log.Fatalf("не удалось подключиться к IAM Service: %v", err)
+	}
+	defer iamConn.Close()
+
+	// credentialIssuerConn — luminous-hugging-charm.md Ф1: "Rotate
+	// credential" (backoffice-ui, PARTNER config экран) проксируется в
+	// новый credential-issuer-service (см. internal/httpapi/credentials.go
+	// package doc). Тот же dialGRPC/grpcConnCheck паттерн, что и у
+	// остальных четырёх соединений выше.
+	credentialIssuerConn, err := dialGRPC(env("CREDENTIAL_ISSUER_SERVICE_ADDR", "credential-issuer-service.mpp.svc:9000"))
+	if err != nil {
+		log.Fatalf("не удалось подключиться к Credential Issuer Service: %v", err)
+	}
+	defer credentialIssuerConn.Close()
+
+	// incidentConn — luminous-hugging-charm.md Ф7: backoffice-ui "Incidents"
+	// проксируется в новый incident-service (internal/httpapi/incidents.go
+	// package doc). Тот же dialGRPC/grpcConnCheck паттерн, что и у
+	// остальных соединений выше.
+	incidentConn, err := dialGRPC(env("INCIDENT_SERVICE_ADDR", "incident-service.mpp.svc:9000"))
+	if err != nil {
+		log.Fatalf("не удалось подключиться к Incident Service: %v", err)
+	}
+	defer incidentConn.Close()
+
+	// opsVisibilityURL/opsHTTPClient — luminous-hugging-charm.md Ф8.
+	// ops-visibility-service не поднимает gRPC вообще (см.
+	// internal/httpapi/ops.go package doc) — плоский http.Client, не
+	// сгенерированный stub, как у остальных зависимостей выше.
+	opsVisibilityURL := "http://" + env("OPS_VISIBILITY_SERVICE_ADDR", "ops-visibility-service.mpp.svc:9090")
+	opsHTTPClient := &http.Client{Timeout: 10 * time.Second}
+
 	tp := telemetry.NewProvider(sdktrace.NewBatchSpanProcessor(noopExporter{}))
 	defer func() { _ = telemetry.Shutdown(context.Background(), tp) }()
 
 	router := httpapi.NewRouter(httpapi.Deps{
-		Validator:        validator,
-		Postgres:         pg,
-		ClickHouse:       ch,
-		Publisher:        publisher,
-		ConfigClient:     grpcv1.NewConfigServiceClient(configConn),
-		ExecutionControl: grpcv1.NewExecutionControlServiceClient(execControlConn),
-		Replay:           grpcv1.NewReplayServiceClient(replayConn),
-		TracerProvider:   tp,
+		Validator:              validator,
+		Postgres:               pg,
+		ClickHouse:             ch,
+		Publisher:              publisher,
+		ConfigClient:           grpcv1.NewConfigServiceClient(configConn),
+		ExecutionControl:       grpcv1.NewExecutionControlServiceClient(execControlConn),
+		Replay:                 grpcv1.NewReplayServiceClient(replayConn),
+		IamClient:              grpcv1.NewIamServiceClient(iamConn),
+		CredentialIssuerClient: grpcv1.NewCredentialIssuerServiceClient(credentialIssuerConn),
+		IncidentClient:         grpcv1.NewIncidentServiceClient(incidentConn),
+		HTTPClient:             opsHTTPClient,
+		OpsVisibilityURL:       opsVisibilityURL,
+		TracerProvider:         tp,
 	})
 
 	// CODE_REVIEW.md Low finding: без ReadTimeout/WriteTimeout/IdleTimeout
@@ -202,6 +270,10 @@ func main() {
 		"configuration-service":     grpcConnCheck(configConn),
 		"execution-control-service": grpcConnCheck(execControlConn),
 		"replay-service":            grpcConnCheck(replayConn),
+		"iam-service":               grpcConnCheck(iamConn),
+		"credential-issuer-service": grpcConnCheck(credentialIssuerConn),
+		"incident-service":          grpcConnCheck(incidentConn),
+		"ops-visibility-service":    httpPingCheck(opsHTTPClient, opsVisibilityURL+"/healthz"),
 	})
 	healthState.SetReady(true)
 	log.Println("backoffice-api готов")

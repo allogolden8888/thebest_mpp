@@ -49,10 +49,10 @@ func TestBuildConfigChangeEventAllKnownEntityTypesMap(t *testing.T) {
 	}
 	for _, et := range known {
 		payload := []byte(`{}`)
-		if et == "policy_template" {
-			// policy_template без config_versions строки резолвит status
-			// из payload_json (см. TestResolveStatus*) — для этого теста
-			// достаточно валидного payload, не сам факт резолвинга.
+		if et == "policy_template" || et == "subscriber_consent" {
+			// Оба резолвят status из payload_json, не из config_versions
+			// (см. TestResolveStatus*) — для этого теста достаточно
+			// валидного payload, не сам факт резолвинга.
 			payload = []byte(`{"status":"active"}`)
 		}
 		event, err := BuildConfigChangeEvent(outbox.Entry{EntityType: et, EntityID: "x", Payload: payload})
@@ -112,48 +112,66 @@ func TestResolveStatusRejectsMalformedPolicyTemplatePayload(t *testing.T) {
 	}
 }
 
-// TestResolveStatusSubscriberConsentDefaultsButFlagsUnresolved — CODE_REVIEW.md
-// Critical, compliance-sensitive: subscriber_consent payload_json (по схеме
-// config_schemas/subscriber_consent.schema.json) не содержит поля status —
-// revocation структурно невозможно закодировать через текущий контракт,
-// и ничто в репозитории сегодня не пишет outbox-строку, сигнализирующую
-// archived для этого entity_type (configuration-service.ArchiveVersion не
-// трогает config_outbox вообще, см. README). "active" — единственное
-// безопасное предположение без изобретения нового контракта — но
-// unresolved=true теперь делает это явным вызывающей стороне (main.go
-// логирует WARNING), а не тихим, как раньше.
-func TestResolveStatusSubscriberConsentDefaultsButFlagsUnresolved(t *testing.T) {
+// TestResolveStatusReadsSubscriberConsentStatusFromPayload — Фаза 6 плана
+// закрытия API-пробелов (compliance-api): раньше subscriber_consent
+// payload_json не содержал поля status (revocation была структурно
+// недостижима, см. package doc ResolveStatus), теперь схема требует его —
+// тот же фикс, что уже был сделан для policy_template.
+func TestResolveStatusReadsSubscriberConsentStatusFromPayload(t *testing.T) {
 	status, unresolved, err := ResolveStatus(outbox.Entry{
 		EntityType: "subscriber_consent",
 		Status:     "",
-		Payload:    []byte(`{"msisdn":"998901234567","scope_type":"CATEGORY","scope_value":"ADVERTISING","channel":"SMS"}`),
+		Payload:    []byte(`{"msisdn":"998901234567","scope_type":"CATEGORY","scope_value":"ADVERTISING","channel":"SMS","status":"archived"}`),
 	})
 	if err != nil {
 		t.Fatalf("ResolveStatus failed: %v", err)
 	}
-	if !unresolved {
-		t.Fatalf("subscriber_consent status структурно неизвестен — ожидали unresolved=true, чтобы вызывающая сторона громко залогировала предположение")
+	if unresolved {
+		t.Fatalf("subscriber_consent status теперь читается из payload_json — должен быть настоящим фиксом, unresolved=false")
 	}
-	if status != "active" {
-		t.Fatalf("ожидали дефолт status=active, получили %q", status)
+	if status != "archived" {
+		t.Fatalf("ожидали status=archived из payload_json, получили %q — старый баг: revocation была структурно недостижима", status)
 	}
 }
 
-func TestBuildConfigChangeEventPublishesSubscriberConsentAsActiveDespiteUnresolvedStatus(t *testing.T) {
-	// Документирует текущее (ограниченное scope этого сервиса) поведение:
-	// событие всё равно публикуется (не блокируется), потому что
-	// permanently отклонять subscriber_consent записи было бы хуже, чем
-	// публиковать их с известным предположением — но main.go обязан
-	// залогировать WARNING в этом случае (см. ResolveStatus doc-comment).
+func TestResolveStatusRejectsMalformedSubscriberConsentPayload(t *testing.T) {
+	_, _, err := ResolveStatus(outbox.Entry{
+		EntityType: "subscriber_consent",
+		Payload:    []byte(`{"msisdn":"998901234567","scope_type":"CATEGORY","scope_value":"ADVERTISING","channel":"SMS"}`), // без status
+	})
+	if err == nil {
+		t.Fatalf("ожидали ошибку для subscriber_consent payload без status")
+	}
+}
+
+func TestBuildConfigChangeEventPublishesSubscriberConsentStatusFromPayload(t *testing.T) {
+	// Фаза 6 (compliance-api): status теперь обязателен в payload_json
+	// (config_schemas/subscriber_consent.schema.json), больше не тихий
+	// дефолт "active" — событие несёт реальное намерение вызывающей
+	// стороны, archived реально публикуется как archived.
 	event, err := BuildConfigChangeEvent(outbox.Entry{
 		EntityType: "subscriber_consent",
 		EntityID:   "998901234567:CATEGORY:ADVERTISING:SMS",
-		Payload:    []byte(`{"msisdn":"998901234567","scope_type":"CATEGORY","scope_value":"ADVERTISING","channel":"SMS"}`),
+		Payload:    []byte(`{"msisdn":"998901234567","scope_type":"CATEGORY","scope_value":"ADVERTISING","channel":"SMS","status":"archived"}`),
 	})
 	if err != nil {
 		t.Fatalf("BuildConfigChangeEvent failed: %v", err)
 	}
-	if event.GetStatus() != "active" {
-		t.Fatalf("ожидали status=active (дефолт), получили %q", event.GetStatus())
+	if event.GetStatus() != "archived" {
+		t.Fatalf("ожидали status=archived из payload_json, получили %q", event.GetStatus())
+	}
+}
+
+func TestBuildConfigChangeEventRejectsSubscriberConsentWithoutStatus(t *testing.T) {
+	// Старое поведение (тихий дефолт "active" для payload без status)
+	// было ровно тем багом, который Фаза 6 закрывает — теперь payload без
+	// status обязан провалиться громко, не молча опубликоваться.
+	_, err := BuildConfigChangeEvent(outbox.Entry{
+		EntityType: "subscriber_consent",
+		EntityID:   "998901234567:CATEGORY:ADVERTISING:SMS",
+		Payload:    []byte(`{"msisdn":"998901234567","scope_type":"CATEGORY","scope_value":"ADVERTISING","channel":"SMS"}`),
+	})
+	if err == nil {
+		t.Fatalf("ожидали ошибку для subscriber_consent payload без status")
 	}
 }

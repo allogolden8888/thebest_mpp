@@ -23,6 +23,13 @@ type AuditEntry struct {
 	Reason        string
 	RequestedBy   string
 	ExpiresAt     *time.Time
+	// IncidentID — опциональная линковка к incident.incidents.id
+	// (luminous-hugging-charm.md Ф7, incident-service, migrations/V028__incident.sql).
+	// nil = не связано ни с одним инцидентом (обычный ручной override вне
+	// разбора). Пишется как NULL в control.execution_control_audit.incident_id
+	// — нет FK через границу схем (V028), поэтому здесь ничего не
+	// валидируется против incident.incidents, значение просто прокидывается.
+	IncidentID *int64
 }
 
 // ScopeName переводит hysteresis.Scope в TEXT-представление,
@@ -73,9 +80,9 @@ func NewAuditStore(pool *pgxpool.Pool) *AuditStore {
 func (s *AuditStore) PersistOverrideAudit(ctx context.Context, e AuditEntry) (id int64, createdAt time.Time, err error) {
 	err = s.pool.QueryRow(ctx, `
 		INSERT INTO control.execution_control_audit
-			(scope, scope_id, state, admission_rate, reason, requested_by, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+			(scope, scope_id, state, admission_rate, reason, requested_by, expires_at, incident_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id, created_at
-	`, e.Scope, e.ScopeID, e.State, e.AdmissionRate, e.Reason, e.RequestedBy, e.ExpiresAt).Scan(&id, &createdAt)
+	`, e.Scope, e.ScopeID, e.State, e.AdmissionRate, e.Reason, e.RequestedBy, e.ExpiresAt, e.IncidentID).Scan(&id, &createdAt)
 	return id, createdAt, err
 }

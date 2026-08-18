@@ -43,8 +43,10 @@ func TestSnapshotApplicationLooksUpByBothIds(t *testing.T) {
 	if !found {
 		t.Fatal("ожидали найденное приложение")
 	}
-	if app.RateLimitTPS != 300 {
-		t.Errorf("RateLimitTPS = %d, want 300", app.RateLimitTPS)
+	// 2000, не 300 — фикстура поднята веткой main (1500 TPS load-test push)
+	// для нагрузочного тестирования.
+	if app.RateLimitTPS != 2000 {
+		t.Errorf("RateLimitTPS = %d, want 2000", app.RateLimitTPS)
 	}
 }
 

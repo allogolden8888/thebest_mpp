@@ -32,6 +32,14 @@ type IncomingMessage struct {
 	Channel       v1.Channel             `protobuf:"varint,3,opt,name=channel,proto3,enum=mpp.common.v1.Channel" json:"channel,omitempty"`
 	PartnerId     string                 `protobuf:"bytes,4,opt,name=partner_id,json=partnerId,proto3" json:"partner_id,omitempty"`
 	ApplicationId string                 `protobuf:"bytes,5,opt,name=application_id,json=applicationId,proto3" json:"application_id,omitempty"`
+	// Фаза 11 плана закрытия API-пробелов: dry-run режим — не тарифицируется
+	// (billing-service), не отправляется реальному оператору
+	// (delivery-service), lifecycle всё равно проходит до DELIVERED через
+	// синтетический DeliveryStatusEvent. Прокидывается через Pipeline Engine
+	// ExecutionState в StageExecuteCommand.sandbox (общее поле верхнего
+	// уровня, не per-extension — нужно всем стадиям одинаково, см.
+	// stage_contract.proto).
+	Sandbox bool `protobuf:"varint,6,opt,name=sandbox,proto3" json:"sandbox,omitempty"`
 	// Types that are valid to be assigned to Body:
 	//
 	//	*IncomingMessage_Sms
@@ -109,6 +117,13 @@ func (x *IncomingMessage) GetApplicationId() string {
 		return x.ApplicationId
 	}
 	return ""
+}
+
+func (x *IncomingMessage) GetSandbox() bool {
+	if x != nil {
+		return x.Sandbox
+	}
+	return false
 }
 
 func (x *IncomingMessage) GetBody() isIncomingMessage_Body {
@@ -375,7 +390,7 @@ var File_events_message_events_proto protoreflect.FileDescriptor
 
 const file_events_message_events_proto_rawDesc = "" +
 	"\n" +
-	"\x1bevents/message_events.proto\x12\rmpp.events.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x12common/enums.proto\x1a\x12common/types.proto\"\xdb\x03\n" +
+	"\x1bevents/message_events.proto\x12\rmpp.events.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x12common/enums.proto\x1a\x12common/types.proto\"\xf5\x03\n" +
 	"\x0fIncomingMessage\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x01 \x01(\tR\tmessageId\x12\x19\n" +
@@ -383,7 +398,8 @@ const file_events_message_events_proto_rawDesc = "" +
 	"\achannel\x18\x03 \x01(\x0e2\x16.mpp.common.v1.ChannelR\achannel\x12\x1d\n" +
 	"\n" +
 	"partner_id\x18\x04 \x01(\tR\tpartnerId\x12%\n" +
-	"\x0eapplication_id\x18\x05 \x01(\tR\rapplicationId\x12-\n" +
+	"\x0eapplication_id\x18\x05 \x01(\tR\rapplicationId\x12\x18\n" +
+	"\asandbox\x18\x06 \x01(\bR\asandbox\x12-\n" +
 	"\x03sms\x18\n" +
 	" \x01(\v2\x19.mpp.common.v1.SmsPayloadH\x00R\x03sms\x123\n" +
 	"\x05email\x18\v \x01(\v2\x1b.mpp.common.v1.EmailPayloadH\x00R\x05email\x120\n" +

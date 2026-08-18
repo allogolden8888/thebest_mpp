@@ -135,4 +135,24 @@ class BillingServiceTest {
 
         assertThrows(IllegalArgumentException.class, () -> service.handleBillingExecute(command, account, account.epoch()));
     }
+
+    /**
+     * Фаза 11 плана закрытия API-пробелов: sandbox эхом переносится в
+     * событие независимо от outcome — succeeded И rejected обязаны нести
+     * тот же флаг, что был в команде (baseEventBuilder — общая точка).
+     */
+    @Test
+    void sandboxFlagIsEchoedFromCommandIntoEventRegardlessOfOutcome() {
+        BillingService service = new BillingService(realTariff());
+
+        StageExecuteCommand sandboxSucceeded = command("se-sandbox-ok", "SERVICE", 1).toBuilder().setSandbox(true).build();
+        Account account = Account.fresh(100_000);
+        BillingService.Result succeededResult = service.handleBillingExecute(sandboxSucceeded, account, account.epoch());
+        assertTrue(succeededResult.event().getSandbox(), "sandbox=true в команде обязан попасть в событие даже при успехе");
+
+        StageExecuteCommand sandboxRejected = command("se-sandbox-frozen", "SERVICE", 1).toBuilder().setSandbox(true).build();
+        Account frozen = BillingAccountState.freeze(Account.fresh(100_000));
+        BillingService.Result rejectedResult = service.handleBillingExecute(sandboxRejected, frozen, frozen.epoch());
+        assertTrue(rejectedResult.event().getSandbox(), "sandbox=true в команде обязан попасть в событие даже при отклонении");
+    }
 }

@@ -102,6 +102,10 @@
             <include>common/types.proto</include>
             <include>common/stage_contract.proto</include>
             <include>grpc/operator_gateway.proto</include>
+            <!-- Фаза 11 плана закрытия API-пробелов: DeliveryStatusEvent
+                 нужен для синтетического DLR в sandbox-режиме — публикуется
+                 напрямую на delivery.status, в обход dlr-manager. -->
+            <include>events/message_events.proto</include>
           </includes>
           <pluginId>grpc-java</pluginId>
           <pluginArtifact>io.grpc:protoc-gen-grpc-java:${grpc.version}:exe:${grpc.plugin.classifier}</pluginArtifact>

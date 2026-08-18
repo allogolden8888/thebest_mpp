@@ -4,26 +4,22 @@
 // аудируемой мутирующей операции (config CRUD, execution control override,
 // force scheduler command, replay request — HLD §9.1/§20).
 //
-// **RBAC** (CODE_REVIEW.md CRITICAL finding): `migrations/V017__backoffice_stub.sql`
-// оставляет полную RBAC-модель (роли/права/SSO-интеграция, привязанные к
-// backoffice.users) отдельному будущему LLD Backoffice API — этого документа
-// в репозитории нет. До прошлого прохода ревью middleware проверял только
-// подлинность токена (кто вызывает), не авторизацию (что вызывающему
-// разрешено): любой валидный токен любого пользователя realm'а — включая
-// read-only support-аккаунт — мог поставить платформу на паузу через
-// execution-control override. hld.md §25 явно требует "RBAC в Backoffice";
-// полную ролевую модель без LLD изобретать нельзя, но состояние "вообще без
-// проверки прав" для сервиса, который может остановить обработку всего
-// трафика платформы, недопустимо само по себе. Минимальный, не
-// изобретающий лишнего барьер: разбор стандартного Keycloak-claim
-// `realm_access.roles` (JWT спецификацией не описан, но это стандартная
-// структура токенов Keycloak, единственного описанного здесь IdP,
-// services_specifictaion.md §8.3) и требование роли `backoffice-admin` для
-// всех деструктивных операций (config CRUD/archive, execution-control
-// override/clear, force-scheduler-command, replay); read-only browse/report
-// эндпоинты по-прежнему доступны любому валидному токену realm'а. Полная
-// модель (гранулярные permission, привязка к backoffice.users, UI ролей) —
-// по-прежнему отдельная задача, ждущая LLD.
+// **RBAC** (CODE_REVIEW.md CRITICAL finding, luminous-hugging-charm.md
+// Фаза 0): до Фазы 0 middleware проверял только подлинность токена (кто
+// вызывает), не авторизацию (что вызывающему разрешено) — любой валидный
+// токен любого пользователя realm'а, включая read-only support-аккаунт, мог
+// поставить платформу на паузу через execution-control override.
+// Промежуточный барьер (единственная бинарная роль `backoffice-admin` из
+// `realm_access.roles`, `RequireRole`/`AdminRole`) закрывал это "вообще без
+// проверки прав" состояние, но не давал гранулярности — Фаза 0 добавила
+// `iam-service` (реальная RBAC-модель, `migrations/V025__iam.sql`) и
+// `RequirePermission` (`permission.go`), проверяющий КОНКРЕТНОЕ право через
+// `IamService.CheckPermission` на каждый мутирующий запрос вместо разбора
+// claim'а на месте. `RequireRole`/`AdminRole` удалены как мёртвый код после
+// того, как router.go перешёл на `RequirePermission` — обратная
+// совместимость с токенами `backoffice-admin` обеспечена на уровне
+// `iam.roles` (суперроль с полным набором прав, см. iam-service/README.md),
+// не здесь.
 package auth
 
 import (
@@ -36,29 +32,18 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// AdminRole — единственная роль, которую этот срез умеет проверять;
-// требуется для любого HTTP-маршрута, вызывающего деструктивную операцию
-// (см. package doc). Имя согласовано с той же ролью в других сервисах
-// Backoffice-контура (backoffice-ui читает её из того же токена).
-const AdminRole = "backoffice-admin"
-
 type realmAccess struct {
 	Roles []string `json:"roles"`
 }
 
+// RealmAccess — сохранён на Claims для обратной совместимости разбора
+// токена (Keycloak всегда несёт этот claim), но больше не используется для
+// авторизационных решений здесь — см. package doc: гранулярные права теперь
+// проверяются через IamService.CheckPermission (permission.go), не разбором
+// realm_access.roles на месте.
 type Claims struct {
 	jwt.RegisteredClaims
 	RealmAccess realmAccess `json:"realm_access"`
-}
-
-// HasRole — true, если токен несёт указанную Keycloak realm-роль.
-func (c *Claims) HasRole(role string) bool {
-	for _, r := range c.RealmAccess.Roles {
-		if r == role {
-			return true
-		}
-	}
-	return false
 }
 
 type Validator struct {
@@ -114,26 +99,4 @@ func (v *Validator) Middleware(next http.Handler) http.Handler {
 		ctx := contextWithClaims(r.Context(), claims)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
-}
-
-// RequireRole — mux-уровневый gate поверх Middleware: 403, если аутентифи-
-// цированный вызывающий не несёт указанную realm-роль. Должен монтироваться
-// только на маршруты, уже прошедшие Middleware (полагается на claims в
-// контексте — 500, если её там нет, что означает ошибку монтирования
-// роутера, а не рантайм-состояние вызывающего).
-func RequireRole(role string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			claims, ok := ClaimsFromContext(r.Context())
-			if !ok {
-				http.Error(w, "нет claims в контексте (RequireRole смонтирован до Middleware?)", http.StatusInternalServerError)
-				return
-			}
-			if !claims.HasRole(role) {
-				http.Error(w, fmt.Sprintf("требуется роль %q", role), http.StatusForbidden)
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
 }

@@ -1,0 +1,98 @@
+syntax = "proto3";
+
+package mpp.grpc.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "mpp/platformcontracts/grpc/v1;grpcv1";
+option java_package = "uz.mpp.platformcontracts.grpc.v1";
+option java_multiple_files = true;
+
+// Фаза 0 плана закрытия API-пробелов (IAM/RBAC/Audit, фундамент) —
+// заменяет заглушку backoffice.users (V017__backoffice_stub.sql).
+// Backoffice API (и позже Partner Self-Service API, Фаза 3) → IAM Service:
+// синхронная проверка прав на каждый мутирующий запрос, ровно тот же
+// паттерн синхронного gRPC-вызова, что уже есть у ExecutionControlService
+// (internal_control.proto) — не пере-изобретаем стиль.
+service IamService {
+  // Вызывается middleware'ом вызывающего сервиса на КАЖДЫЙ мутирующий
+  // запрос — простой request/response, без кеширования на этом шаге (тот
+  // же принцип минимализма, что у ApplyOverride). Fail-closed: недоступность
+  // IAM Service должна трактоваться вызывающим как запрет, не как молчаливое
+  // разрешение — сервис, способный поставить на паузу весь трафик платформы,
+  // не может по умолчанию проваливаться в "открыто" (см. history
+  // services/backoffice-api/internal/auth/jwt.go RequireRole docstring —
+  // тот же CRITICAL класс находки, который эта фаза закрывает целиком).
+  rpc CheckPermission(CheckPermissionRequest) returns (CheckPermissionResponse);
+
+  rpc ListRoles(ListRolesRequest) returns (ListRolesResponse);
+  rpc ListStaffAssignments(ListStaffAssignmentsRequest) returns (ListStaffAssignmentsResponse);
+  rpc AssignStaffRole(AssignStaffRoleRequest) returns (AssignStaffRoleResponse);
+  rpc RevokeStaffRole(RevokeStaffRoleRequest) returns (RevokeStaffRoleResponse);
+}
+
+message CheckPermissionRequest {
+  string external_id = 1; // Keycloak `sub` из JWT вызывающего человека.
+  string permission = 2;  // например "audit:read", "credentials:issue", "incident:manage".
+}
+
+message CheckPermissionResponse {
+  bool allowed = 1;
+  // Роли, через которые допуск был получен (пусто, если allowed=false) —
+  // для аудита/отладки на стороне вызывающего, не для повторного
+  // авторизационного решения там.
+  repeated string roles = 2;
+}
+
+message Role {
+  int64 id = 1;
+  string name = 2;
+  string description = 3;
+  repeated string permissions = 4;
+}
+
+message ListRolesRequest {}
+
+message ListRolesResponse {
+  repeated Role roles = 1;
+}
+
+message StaffAssignment {
+  int64 id = 1;
+  string external_id = 2;
+  string role = 3;
+  string granted_by = 4;
+  google.protobuf.Timestamp granted_at = 5;
+}
+
+message ListStaffAssignmentsRequest {
+  // Пусто — все активные назначения; заполнено — фильтр по конкретному
+  // пользователю (backoffice-ui "у кого какой доступ").
+  string external_id = 1;
+}
+
+message ListStaffAssignmentsResponse {
+  repeated StaffAssignment assignments = 1;
+}
+
+message AssignStaffRoleRequest {
+  string external_id = 1;
+  string role = 2;
+  // sub вызывающего админа — уходит и в granted_by, и актёром в
+  // iam.identity_audit.
+  string granted_by = 3;
+}
+
+message AssignStaffRoleResponse {
+  StaffAssignment assignment = 1;
+}
+
+message RevokeStaffRoleRequest {
+  string external_id = 1;
+  string role = 2;
+  string revoked_by = 3;
+}
+
+message RevokeStaffRoleResponse {
+  bool revoked = 1;
+}

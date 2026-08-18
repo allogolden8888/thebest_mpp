@@ -22,6 +22,7 @@ import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.TopicPartition;
@@ -29,13 +30,16 @@ import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
+import java.time.Instant;
 import uz.mpp.delivery.DeliveryService.SubmitOutcome;
 import uz.mpp.delivery.GatewayRegistry.GatewayEndpoint;
 import uz.mpp.delivery.MessageContextStore.MessageContext;
 import uz.mpp.delivery.SegmentMessage.Segment;
 import uz.mpp.platformcontracts.common.v1.DeliveryExtension;
+import uz.mpp.platformcontracts.common.v1.Outcome;
 import uz.mpp.platformcontracts.common.v1.StageCompletedEvent;
 import uz.mpp.platformcontracts.common.v1.StageExecuteCommand;
+import uz.mpp.platformcontracts.events.v1.DeliveryStatusEvent;
 import uz.mpp.platformcontracts.grpc.v1.SubmitRequest;
 import uz.mpp.platformcontracts.grpc.v1.SubmitResponse;
 
@@ -62,6 +66,11 @@ public final class KafkaIo {
     private static final Logger LOG = Logger.getLogger(KafkaIo.class.getName());
     public static final String INPUT_TOPIC = "stage.delivery";
     public static final String OUTPUT_TOPIC = "stage.completed";
+    // Фаза 11 плана закрытия API-пробелов: тот же топик, что использует
+    // dlr-manager для настоящих DLR (см. services/dlr-manager/internal/kafkaio,
+    // TopicDeliveryStatus) — message-state-resolver не отличает синтетику
+    // от реального DLR, читает оба одинаково.
+    public static final String DELIVERY_STATUS_TOPIC = "delivery.status";
     private static final Duration PRODUCER_SEND_TIMEOUT = Duration.ofSeconds(10);
 
     public static KafkaConsumer<String, byte[]> buildConsumer(String bootstrapServers, String groupId) {
@@ -216,14 +225,22 @@ public final class KafkaIo {
         }
     }
 
-    private static void processRecord(
+    /**
+     * package-private (не private) — тот же принцип, что
+     * {@code billing-service/KafkaIo.processRecord}: напрямую тестируется
+     * {@code KafkaIoProcessRecordTest} без живого {@link KafkaConsumer}.
+     * {@code Producer<String, byte[]>}, не конкретный {@link KafkaProducer} —
+     * позволяет подставить {@link org.apache.kafka.clients.producer.MockProducer}
+     * в тестах, {@link #run} по-прежнему передаёт сюда настоящий {@link KafkaProducer}.
+     */
+    static void processRecord(
         ConsumerRecord<String, byte[]> record,
         MessageContextStore contextStore,
         GatewayRegistry gatewayRegistry,
         ControlSnapshot controlSnapshot,
         OperatorSubmitClient submitClient,
         SubmitIdempotencyStore idempotencyStore,
-        KafkaProducer<String, byte[]> producer
+        Producer<String, byte[]> producer
     ) throws Exception {
         StageExecuteCommand command = StageExecuteCommand.parseFrom(record.value());
         DeliveryExtension extension = command.getDelivery();
@@ -243,6 +260,24 @@ public final class KafkaIo {
         // ломал. См. SubmitIdempotencyStore.
         String stageExecutionId = command.getStageExecutionId();
         String deterministicQueueMsgId = "dlv-" + stageExecutionId;
+
+        // Фаза 11 плана закрытия API-пробелов: sandbox — до gatewayRegistry.resolve,
+        // ни contextStore.fetch (не нужен, submit не строится), ни
+        // idempotencyStore.claim, ни submitClient.submit не вызываются — оба
+        // операторских шлюза структурно недостижимы для sandbox-трафика.
+        // Синтетический успех + синтетический DLR публикуются тут же, одним
+        // branch'ем (см. DeliveryService.buildSandboxDeliveryStatusEvent).
+        if (command.getSandbox()) {
+            SubmitOutcome sandboxOutcome = new SubmitOutcome(Outcome.OUTCOME_SUCCEEDED, "", "SANDBOX-" + deterministicQueueMsgId);
+            StageCompletedEvent event = DeliveryService.buildEvent(command, deterministicQueueMsgId, sandboxOutcome);
+            producer.send(new ProducerRecord<>(OUTPUT_TOPIC, event.getMessageId(), event.toByteArray()))
+                .get(PRODUCER_SEND_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+
+            DeliveryStatusEvent dlrEvent = DeliveryService.buildSandboxDeliveryStatusEvent(command, extension, Instant.now());
+            producer.send(new ProducerRecord<>(DELIVERY_STATUS_TOPIC, dlrEvent.getMessageId(), dlrEvent.toByteArray()))
+                .get(PRODUCER_SEND_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            return;
+        }
 
         MessageContext context = contextStore.fetch(command.getMessageId());
         if (context == null) {
@@ -317,7 +352,7 @@ public final class KafkaIo {
      * Общий helper для обоих мест публикации {@code stage.completed} в
      * {@link #processRecord} (путь MESSAGE_CONTEXT_NOT_FOUND и обычный путь).
      */
-    private static void sendCompletedEvent(KafkaProducer<String, byte[]> producer, StageCompletedEvent event) throws Exception {
+    private static void sendCompletedEvent(Producer<String, byte[]> producer, StageCompletedEvent event) throws Exception {
         producer.send(new ProducerRecord<>(OUTPUT_TOPIC, event.getMessageId(), event.toByteArray()))
             .get(PRODUCER_SEND_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
     }

@@ -6,6 +6,7 @@ import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.TopicPartition;
@@ -122,7 +123,7 @@ public final class KafkaIo {
         KafkaProducer<String, byte[]> producer,
         BillingAccountStore accountStore,
         BillingService billingService,
-        String accountId,
+        TariffCache tariffCache,
         AtomicBoolean running
     ) {
         consumer.subscribe(List.of(INPUT_TOPIC));
@@ -173,7 +174,7 @@ public final class KafkaIo {
                     byPartition.computeIfAbsent(new TopicPartition(record.topic(), record.partition()), k -> new ArrayList<>()).add(record);
                     futures.put(record, pool.submit(() -> {
                         try {
-                            processRecord(record, accountStore, billingService, accountId, producer);
+                            processRecord(record, accountStore, billingService, tariffCache, producer);
                             return true;
                         } catch (Exception e) {
                             LOG.log(Level.SEVERE, "не удалось обработать stage.billing запись partition=" + record.partition()
@@ -255,18 +256,42 @@ public final class KafkaIo {
         }
     }
 
-    private static void processRecord(
+    /**
+     * package-private (не private) — прямо протестировано {@code KafkaIoTest}
+     * против реального Billing Redis + {@link org.apache.kafka.clients.producer.MockProducer}
+     * (Фаза 5a: доказательство, что разные {@code partner_id} списываются с
+     * разных account_id, не одного общего).
+     */
+    static void processRecord(
         ConsumerRecord<String, byte[]> record,
         BillingAccountStore accountStore,
         BillingService billingService,
-        String accountId,
-        KafkaProducer<String, byte[]> producer
+        TariffCache tariffCache,
+        Producer<String, byte[]> producer
     ) throws Exception {
         StageExecuteCommand command = StageExecuteCommand.parseFrom(record.value());
         BillingExtension ext = command.getBilling();
 
-        TariffResolver.Tariff tariff = billingService.resolveTariff(ext); // бросает IllegalArgumentException на отрицательный segment_count
-        ChargeResult chargeResult = accountStore.applyChargeAtomically(accountId, command.getStageExecutionId(), tariff.amountMinorUnits(), accountStore.peekEpoch(accountId));
+        // account_id = partner_id (Фаза 5a: 1:1, простейшее сопоставление —
+        // billing.billing_ledger уже хранит оба столбца отдельно, но ничто до
+        // этой фазы их не различало).
+        String accountId = ext.getPartnerId();
+        TariffResolver resolver = tariffCache.resolve(accountId);
+        TariffResolver.Tariff tariff = billingService.resolveTariff(resolver, ext); // бросает IllegalArgumentException на отрицательный segment_count
+
+        // Фаза 11 плана закрытия API-пробелов: sandbox — ни одного обращения
+        // к Billing Redis (ни applyChargeAtomically, ни даже peek/peekEpoch),
+        // не "спишем и тут же отменим" — реального списания не существует
+        // вообще ни на миг. buildEvent свитчит только по chargeResult.outcome(),
+        // Account-поля не читает (см. javadoc BillingService.buildEvent) —
+        // синтетика с APPLIED собирается штатным путём, без нового кода там.
+        // accountStore.peekEpoch(accountId), не peek(accountId).epoch() —
+        // 1500 TPS push: точечный HGET одного поля вместо HGETALL +
+        // пересборки всей истории processed_charge_ids ради одного числа
+        // (см. javadoc BillingAccountStore.peekEpoch).
+        ChargeResult chargeResult = command.getSandbox()
+            ? new ChargeResult(BillingAccountState.Account.fresh(0), BillingAccountState.ChargeOutcome.APPLIED)
+            : accountStore.applyChargeAtomically(accountId, command.getStageExecutionId(), tariff.amountMinorUnits(), accountStore.peekEpoch(accountId));
         StageCompletedEvent event = billingService.buildEvent(command, ext.getCategory(), tariff, chargeResult);
 
         producer.send(new ProducerRecord<>(OUTPUT_TOPIC, event.getMessageId(), event.toByteArray()))

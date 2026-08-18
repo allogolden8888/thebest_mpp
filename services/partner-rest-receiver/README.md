@@ -2,7 +2,7 @@
 
 **Основание:** `development_plan.md` Фаза 2.1, шестой сервис "ходового скелета" (Главный агент) — единственная точка входа сообщений в систему для REST-партнёров (`hld.md` §2, `services_specifictaion.md` §2.1). Первый сервис в этой серии, публикующий `incoming.messages` (не потребляющий `stage.*`), и первый с настоящим внешним HTTP API поверх бизнес-логики (не только `/healthz`).
 
-**Статус:** реально компилируется и тестируется — `cargo build && cargo test`, **80/80 тестов проходят** (число тестов росло по мере находок кодревью и локального docker-compose прогона, см. разделы ниже), компилирует настоящие `platform-contracts/{common,events}/*.proto` (тот же паттерн двух package с cross-package ссылками, что у `pipeline-engine`).
+**Статус:** реально компилируется и тестируется — `cargo build && cargo test`, **102/102 тестов проходят** (было 80 — +22 по итогам `VaultAuthVerifier` ниже, число тестов и до этого росло по мере находок кодревью и локального docker-compose прогона, см. разделы ниже), компилирует настоящие `platform-contracts/{common,events}/*.proto` (тот же паттерн двух package с cross-package ссылками, что у `pipeline-engine`).
 
 **Исправлено (найдено при реализации `dlr-manager`, полный разбор — его README, "Реальная находка (систематическая...)"):** `main.rs` раньше читал единственную `REDIS_RUNTIME_URL`, которую k8s никогда не установит — реальный секрет инжектится дискретными `REDIS_RUNTIME_HOST`/`PORT`/`PASSWORD` (`envFrom: secretRef`). `redis_url::build_redis_runtime_url()` теперь собирает connection string из них, `REDIS_RUNTIME_URL` оставлена как явный override для локальной разработки/тестов. 3 новых теста.
 
@@ -59,9 +59,15 @@ Content-Type: application/json
 
 13 тестов покрывают границы (160/161, 306/307, escape-символ, кириллица, суррогатная пара) — не просто happy path.
 
-## Аутентификация — реальный выбор вместо изобретённого решения
+## Аутентификация — `VaultAuthVerifier` (luminous-hugging-charm.md Ф1), `EnvAuthVerifier` — bootstrap/break-glass
 
-`partner.schema.json` хранит только `credential_ref` (ссылку на Vault path), не сам секрет ("конфиг не хранит credential в открытом виде") — реального Vault-клиента в этом срезе нет. `auth.rs::EnvAuthVerifier` читает ожидаемый ключ из переменной окружения, детерминированно построенной из `credential_ref` (`vault://partners/click_uz/main/api_key` → `PARTNER_CRED_VAULT___PARTNERS_CLICK_UZ_MAIN_API_KEY`) — не выдумано с нуля: это ровно тот способ, каким уже реально устроены 5 платформенных секретов в этом репозитории (`k8s/generate_manifests.py SECRET_DEPENDENCIES` → `envFrom` → переменные окружения). Сравнение — через ручной constant-time compare (защита от самого дешёвого класса timing-атаки — побайтового `==`, останавливающегося на первом несовпадении; не претендует на полную защиту от timing side-channel в общем случае, сеть/GC/JIT добавляют куда больший шум).
+`partner.schema.json` хранит только `credential_ref` (ссылку на Vault path), не сам секрет ("конфиг не хранит credential в открытом виде"). До Фазы 1 реального Vault-клиента не было вообще — `EnvAuthVerifier` читал ожидаемый ключ из переменной окружения, детерминированно построенной из `credential_ref` (`vault://partners/click_uz/main/api_key` → `PARTNER_CRED_VAULT___PARTNERS_CLICK_UZ_MAIN_API_KEY`), инжектированной статически на деплое (`k8s/generate_manifests.py SECRET_DEPENDENCIES` → `envFrom`).
+
+**`vault_auth.rs::VaultAuthVerifier` — теперь дефолт** (`AUTH_VERIFIER_MODE=vault`, дефолтное значение). Читает секрет напрямую из Vault по `credential_ref` (KV v2, тот же путь/деривация, что `credential-issuer-service` пишет при `RotateCredential` — см. `services/credential-issuer-service/README.md` за полным разбором HTTP-контракта; `partner-smpp-gateway`'s `VaultAuthenticator` — третья независимая реализация того же протокола, Java), с in-process TTL-кешем (по умолчанию 30с — реальный сетевой read на КАЖДЫЙ входящий REST-запрос добавил бы латентность на самый горячий путь платформы; ротация credential становится эффективной без передеплоя в пределах этого TTL, не мгновенно). **Fail-closed**: холодный кеш + недоступный Vault → отказ, не default-open (тот же принцип, что `iam-service`'s `CheckPermission` — сервис, аутентифицирующий входящий трафик, не может по умолчанию проваливаться в "открыто" на недоступности своей зависимости); TTL истёк, но Vault временно недоступен, а раньше УЖЕ был успешный read → протухший кеш обслуживает запрос, не рвёт живого партнёра из-за transient-проблемы инфраструктуры.
+
+`AUTH_VERIFIER_MODE=env` — явный bootstrap/break-glass откат на старый `EnvAuthVerifier` (план прямо требует не удалять старый статический путь). Оба разделяют `AuthVerifier` trait, ставший `async fn verify` (был синхронным — секрет теперь требует реального сетевого I/O, `EnvAuthVerifier`'s реализация тривиально `async` без реального ожидания).
+
+Сравнение plaintext-значений в обоих верификаторах — через ручной constant-time compare (защита от самого дешёвого класса timing-атаки — побайтового `==`, останавливающегося на первом несовпадении; не претендует на полную защиту от timing side-channel в общем случае, сеть/GC/JIT добавляют куда больший шум).
 
 ## Проверено кодревью (2026-07-27, PART 2): ingress был мёртв как задеплоенный — исправлено
 
@@ -98,7 +104,7 @@ Content-Type: application/json
 
 ## Тесты — что доказано
 
-78 тестов, по модулям:
+102 теста, по модулям (было 78 до `vault_auth.rs`):
 * `segmentation.rs` (12) — GSM-7/UCS-2 определение и подсчёт сегментов на границах.
 * `request.rs` (16) — валидация схемы: отсутствующие заголовки, невалидный JSON, невалидный msisdn, лимит длины тела на границе, + новое: `sender_id` длина/символы (граница 21, control char, non-ASCII, дефис/пробел, numeric — 7 тестов).
 * `auth.rs` (5) — построение имени переменной окружения, верный/неверный ключ, отсутствующая переменная (не паникует).
@@ -106,13 +112,14 @@ Content-Type: application/json
 * `rate_limit.rs` (7) — token bucket: исчерпание, рефилл со временем, независимость bucket'ов по паре, `drain_consumed` (для Redis-синхронизации), защита от переполнения capacity долгим простоем, + новое: `auth_attempt_buckets` независимость от message bucket, legitimate-трафик никогда не задевает auth-attempt bucket.
 * `build_incoming.rs` (4) — построение `IncomingMessage`, `message_ttl`, кодировка по телу.
 * `idempotency.rs` (5, 2 — **реально против локального Redis**) — encode/decode round-trip, scoping по паре, повторный claim с тем же ключом переиспользует ids, независимость разных ключей.
-* `redis_url.rs` (3), `admission.rs` (1), `health.rs` (2), `partner_config.rs` (3) — снапшот-загрузка на реальном `config_schemas/examples/partner.valid.json` (та же кросс-артефактная сверка, что у остальных сервисов).
+* `redis_url.rs` (3), `admission.rs` (1), `health.rs` (4, +2 для Vault readiness — см. "Аутентификация"), `partner_config.rs` (3) — снапшот-загрузка на реальном `config_schemas/examples/partner.valid.json` (та же кросс-артефактная сверка, что у остальных сервисов).
+* `vault_auth.rs` (20) — `credential_ref` парсинг (границы: несколько сегментов пути, отсутствие `vault://`, отсутствие `/`, пустой property после trailing slash), реальный round-trip чтения/кеша/TTL против `vault server -dev` (успешный read, cache-hit не зовёт сеть повторно, TTL истёк — зовёт снова, отсутствующий path/property — fail closed, недоступный Vault на холодном/протухшем кеше), Kubernetes-login flow против фейкового HTTP-сервера (кеширование токена, релогин после истечения, отсутствующий JWT-файл, отклонённый login).
 * `http.rs` (13) — `authorize_and_admit`: полный порядок проверок из `service_internal_methods.md` §1.1 (auth-attempt rate limit → auth → IP/канал → admission → rate limit), включая **неизвестный партнёр отклоняется тем же кодом ошибки, что неверный API-ключ** (`AuthFailed`, не отдельным "партнёр не найден") — не даёт внешнему атакующему через код ошибки определить, существует ли `partner_id`; + новое: brute-force против известной пары в итоге throttle'ится, легитимный трафик по своему tps никогда не видит `AuthRateLimited`.
 
 ## Что НЕ реализовано на этом шаге (честно, не спрятано)
 
 * **`check_admission` — `AlwaysAdmit`, пустой снапшот `execution.control`, fail-open по всем scope.** Тот же паттерн, что уже задокументирован в `routing-service/src/routing.rs` (`ControlState` для отсутствующих записей) — ни один сервис в этой сессии не реализует реальное потребление `execution.control` (Execution Control Service, владелец Субагент 1, сам ещё не публикует его для всех scope — см. `CODE_REVIEW.md`). Путь обработки `AdmissionDecision::Reject` (429/503 + `Retry-After`) уже построен и протестирован — включение реального consumer'а не потребует трогать `http.rs`.
-* **`sync_rate_limit_counters`/`EnvAuthVerifier` — реальный `redis` API, ни разу не запущены против живого Runtime Redis.** Тот же класс оговорки, что у `RedisMessageContextStore` в policy-service.
+* **`sync_rate_limit_counters` — реальный `redis` API, ни разу не запущен против живого Runtime Redis.** Тот же класс оговорки, что у `RedisMessageContextStore` в policy-service. (`VaultAuthVerifier`, в отличие от этого пункта, реально протестирован против живого локального Vault — см. "Аутентификация" выше.)
 * **ОБНОВЛЕНО 2026-08-06:** `docker build` реально прогнан и провалидирован для этого сервиса (найдены и исправлены реальные баги по пути, где применимо — см. `development_plan.md` "Координация" п.5 и `infra/docker/README.md`). Формулировка ниже — из более раннего состояния сессии, оставлена для истории.
 * **`docker build` не выполнялся** — недоступен Docker daemon в этом окружении (см. `services/destination-resolution-service/README.md`).
 * **Партнёрский снапшот грузится один раз из статического файла**, не из `config.changes` (entity_type=PARTNER) — тот же паттерн упрощения, что у Routing/Policy (Фаза 2.2, один тестовый партнёр).

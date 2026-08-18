@@ -23,6 +23,14 @@
 -- ARGV[14] = old_stage_execution_id для ZREM из deadlines ("" если нечего удалять — первый диспетч)
 -- ARGV[15] = new priority_flag (SMPP 0-3, партнёрское поле, не меняется по ходу пайплайна)
 -- ARGV[16] = new message_ttl_ms (unix ms, i64::MAX если TTL не задан)
+-- ARGV[17] = new partner_id (Фаза 5a плана закрытия API-пробелов: multi-tenancy
+--            в Billing Service — накоплен с handle_incoming, нужен BillingExtension.partner_id)
+-- ARGV[18] = new sandbox, "0"/"1" (Фаза 11: dry-run режим — верхнеуровневое
+--            поле StageExecuteCommand, нужно всем стадиям одинаково)
+-- Слияние веток main (priority_flag/message_ttl_ms, "1500 TPS push") и
+-- subagent-2 (partner_id/sandbox, Ф5a/Ф11) — обе стороны независимо заняли
+-- ARGV[15]/[16] под разные поля; здесь перенумеровано без коллизий на
+-- 15-18, порядок согласован с redis_cas.rs::cas_advance ниже.
 --
 -- Возврат: {"OK"} при успехе, {"CONFLICT", <реальный awaiting_stage_execution_id>} при гонке.
 --
@@ -67,7 +75,9 @@ redis.call('HSET', exec_key,
     'destination_address', ARGV[12],
     'deadline_ms', ARGV[13],
     'priority_flag', ARGV[15],
-    'message_ttl_ms', ARGV[16])
+    'message_ttl_ms', ARGV[16],
+    'partner_id', ARGV[17],
+    'sandbox', ARGV[18])
 
 local new_stage_execution_id = ARGV[5]
 if new_stage_execution_id ~= '' then

@@ -106,6 +106,8 @@ pub fn handle_command(snapshot: &Snapshot, command: &StageExecuteCommand) -> Sta
             retry_after: None,
             traceparent: command.traceparent.clone(),
             completed_at: None,
+            // Фаза 11 плана закрытия API-пробелов: эхо command.sandbox.
+            sandbox: command.sandbox,
             stage_result: Some(StageResult::DestinationResolution(DestinationResolutionResult {
                 resolved_operator_id: operator_id,
             })),
@@ -127,6 +129,7 @@ fn build_rejected(command: &StageExecuteCommand, reason_code: &str) -> StageComp
         retry_after: None,
         traceparent: command.traceparent.clone(),
         completed_at: None,
+        sandbox: command.sandbox,
         stage_result: None,
     }
 }
@@ -243,6 +246,7 @@ mod tests {
             config_versions: Default::default(),
             traceparent: "tp1".into(),
             payload_ref: None,
+            sandbox: false,
             stage_extension: Some(StageExtension::DestinationResolution(
                 crate::proto::DestinationResolutionExtension {
                     destination_address: destination_address.to_string(),
@@ -267,6 +271,22 @@ mod tests {
         assert_eq!(event.outcome, Outcome::Rejected as i32);
         assert_eq!(event.reason_code, "OPERATOR_NOT_FOUND");
         assert!(event.stage_result.is_none());
+    }
+
+    /// Фаза 11 плана закрытия API-пробелов: sandbox эхом переносится в
+    /// событие для ОБОИХ путей (resolved и rejected) — build_rejected тоже
+    /// проверяется, не только happy path.
+    #[test]
+    fn sandbox_flag_is_echoed_on_both_resolved_and_rejected_paths() {
+        let mut resolved_command = command_with_destination("998901331835");
+        resolved_command.sandbox = true;
+        let event = handle_command(&snapshot(), &resolved_command);
+        assert!(event.sandbox, "sandbox=true обязан попасть в событие на resolved-пути");
+
+        let mut rejected_command = command_with_destination("998770000000");
+        rejected_command.sandbox = true;
+        let event = handle_command(&snapshot(), &rejected_command);
+        assert!(event.sandbox, "sandbox=true обязан попасть в событие на rejected-пути (build_rejected)");
     }
 
     #[test]

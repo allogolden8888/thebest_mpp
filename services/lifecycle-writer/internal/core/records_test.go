@@ -30,6 +30,26 @@ func TestFromIncomingMessageMapsFields(t *testing.T) {
 	if !row.Timestamp.Equal(now) {
 		t.Fatalf("timestamp не совпадает: %v", row.Timestamp)
 	}
+	if row.Sandbox {
+		t.Fatalf("IncomingMessage без Sandbox=true не должен дать sandbox-строку")
+	}
+}
+
+// Фаза 11 плана закрытия API-пробелов: IncomingMessage.Sandbox — единственный
+// источник messaging.message_read_model.sandbox (устанавливается один раз на
+// входе в pipeline, partner-rest-receiver X-Sandbox заголовок), читается
+// напрямую здесь, не через message.lifecycle.
+func TestFromIncomingMessageCarriesSandboxFlag(t *testing.T) {
+	msg := &eventsv1.IncomingMessage{
+		MessageId: "msg-sandbox-1",
+		PartnerId: "acme",
+		Sandbox:   true,
+	}
+
+	row := FromIncomingMessage(msg)
+	if !row.Sandbox {
+		t.Fatalf("Sandbox=true в IncomingMessage обязан попасть в ReadModelRow")
+	}
 }
 
 func TestFromLifecycleEventBuildsUpdateAndHistory(t *testing.T) {

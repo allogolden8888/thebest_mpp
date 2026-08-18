@@ -235,6 +235,9 @@ fn build_event(command: &StageExecuteCommand, outcome: PolicyOutcome) -> StageCo
         retry_after: None,
         traceparent: command.traceparent.clone(),
         completed_at: None,
+        // Фаза 11 плана закрытия API-пробелов: эхо command.sandbox, не
+        // пересчитывается — тот же принцип, что остальные поля здесь.
+        sandbox: command.sandbox,
         // category всегда заполнена — и на SUCCEEDED (шаблон/UNTEMPLATED), и на REJECTED (BLOCKED),
         // Billing получает непустую category в обоих случаях (service_internal_methods.md §1.5).
         stage_result: Some(StageResult::Policy(PolicyResult { category: outcome.category })),
@@ -389,6 +392,7 @@ mod tests {
             config_versions: Default::default(),
             traceparent: "tp1".into(),
             payload_ref: None,
+            sandbox: false,
             stage_extension: Some(StageExtension::Policy(crate::proto::PolicyExtension {
                 resolved_operator_id: "beeline".into(),
             })),
@@ -403,6 +407,7 @@ mod tests {
             template_id: "tpl-contract-payment".into(),
             pattern: "%w shartnoma bo'yicha %d{1,6} so'm to'lovni bugun amalga oshiring".into(),
             category: "TRANSACTION".into(),
+            sender_id: None,
         };
         let templates = CompiledRuleset::new(vec![template]);
         let banwords = BanwordChecker::new(&ruleset.banwords);
@@ -424,6 +429,22 @@ mod tests {
             other => panic!("ожидали PolicyResult, получили {other:?}"),
         }
         assert_eq!(event.reason_code, "");
+    }
+
+    /// Фаза 11 плана закрытия API-пробелов: StageCompletedEvent.sandbox —
+    /// эхо command.sandbox, не пересчитывается заново.
+    #[test]
+    fn sandbox_flag_is_echoed_from_command_into_event() {
+        let (ruleset, templates, banwords, mut runtime) = env();
+        let ctx = MessageContext {
+            msisdn: "998901331835".into(),
+            sender_id: "Click".into(),
+            body: "Hello1238!@* shartnoma bo'yicha 123456 so'm to'lovni bugun amalga oshiring".into(),
+        };
+        let mut sandbox_command = command("m1");
+        sandbox_command.sandbox = true;
+        let event = handle_command(&sandbox_command, &ctx, &ruleset, &templates, &banwords, &mut runtime, test_now());
+        assert!(event.sandbox, "sandbox=true в команде обязан попасть в событие");
     }
 
     #[test]

@@ -23,6 +23,8 @@ const (
 	ConfigService_GetActiveVersion_FullMethodName = "/mpp.grpc.v1.ConfigService/GetActiveVersion"
 	ConfigService_ListVersions_FullMethodName     = "/mpp.grpc.v1.ConfigService/ListVersions"
 	ConfigService_ArchiveVersion_FullMethodName   = "/mpp.grpc.v1.ConfigService/ArchiveVersion"
+	ConfigService_ValidateVersion_FullMethodName  = "/mpp.grpc.v1.ConfigService/ValidateVersion"
+	ConfigService_DiffVersions_FullMethodName     = "/mpp.grpc.v1.ConfigService/DiffVersions"
 )
 
 // ConfigServiceClient is the client API for ConfigService service.
@@ -35,6 +37,19 @@ type ConfigServiceClient interface {
 	GetActiveVersion(ctx context.Context, in *GetActiveVersionRequest, opts ...grpc.CallOption) (*ConfigVersionResponse, error)
 	ListVersions(ctx context.Context, in *ListVersionsRequest, opts ...grpc.CallOption) (*ListVersionsResponse, error)
 	ArchiveVersion(ctx context.Context, in *ArchiveVersionRequest, opts ...grpc.CallOption) (*ConfigVersionResponse, error)
+	// luminous-hugging-charm.md Фаза 10 — validate_config_change БЕЗ
+	// create_immutable_version/write_config_and_outbox: тот же Validator,
+	// что CreateVersion уже вызывает первым шагом
+	// (internal/validate/validate.go), здесь он единственный шаг — ничего не
+	// пишется, ни в config_versions, ни в config_outbox. Позволяет
+	// backoffice-ui показать ошибки схемы/семантики ДО публикации, не после.
+	ValidateVersion(ctx context.Context, in *ValidateVersionRequest, opts ...grpc.CallOption) (*ValidateVersionResponse, error)
+	// Возвращает payload_json двух конкретных версий одной сущности как
+	// есть — вычисление самого diff (построчного/структурного) сознательно
+	// оставлено вызывающей стороне (backoffice-ui): этот сервис владеет
+	// storage/validation, не рендерингом diff, и не должен обрастать
+	// диффинг-библиотекой ради одного экрана другого сервиса.
+	DiffVersions(ctx context.Context, in *DiffVersionsRequest, opts ...grpc.CallOption) (*DiffVersionsResponse, error)
 }
 
 type configServiceClient struct {
@@ -85,6 +100,26 @@ func (c *configServiceClient) ArchiveVersion(ctx context.Context, in *ArchiveVer
 	return out, nil
 }
 
+func (c *configServiceClient) ValidateVersion(ctx context.Context, in *ValidateVersionRequest, opts ...grpc.CallOption) (*ValidateVersionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ValidateVersionResponse)
+	err := c.cc.Invoke(ctx, ConfigService_ValidateVersion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *configServiceClient) DiffVersions(ctx context.Context, in *DiffVersionsRequest, opts ...grpc.CallOption) (*DiffVersionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DiffVersionsResponse)
+	err := c.cc.Invoke(ctx, ConfigService_DiffVersions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ConfigServiceServer is the server API for ConfigService service.
 // All implementations must embed UnimplementedConfigServiceServer
 // for forward compatibility.
@@ -95,6 +130,19 @@ type ConfigServiceServer interface {
 	GetActiveVersion(context.Context, *GetActiveVersionRequest) (*ConfigVersionResponse, error)
 	ListVersions(context.Context, *ListVersionsRequest) (*ListVersionsResponse, error)
 	ArchiveVersion(context.Context, *ArchiveVersionRequest) (*ConfigVersionResponse, error)
+	// luminous-hugging-charm.md Фаза 10 — validate_config_change БЕЗ
+	// create_immutable_version/write_config_and_outbox: тот же Validator,
+	// что CreateVersion уже вызывает первым шагом
+	// (internal/validate/validate.go), здесь он единственный шаг — ничего не
+	// пишется, ни в config_versions, ни в config_outbox. Позволяет
+	// backoffice-ui показать ошибки схемы/семантики ДО публикации, не после.
+	ValidateVersion(context.Context, *ValidateVersionRequest) (*ValidateVersionResponse, error)
+	// Возвращает payload_json двух конкретных версий одной сущности как
+	// есть — вычисление самого diff (построчного/структурного) сознательно
+	// оставлено вызывающей стороне (backoffice-ui): этот сервис владеет
+	// storage/validation, не рендерингом diff, и не должен обрастать
+	// диффинг-библиотекой ради одного экрана другого сервиса.
+	DiffVersions(context.Context, *DiffVersionsRequest) (*DiffVersionsResponse, error)
 	mustEmbedUnimplementedConfigServiceServer()
 }
 
@@ -116,6 +164,12 @@ func (UnimplementedConfigServiceServer) ListVersions(context.Context, *ListVersi
 }
 func (UnimplementedConfigServiceServer) ArchiveVersion(context.Context, *ArchiveVersionRequest) (*ConfigVersionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ArchiveVersion not implemented")
+}
+func (UnimplementedConfigServiceServer) ValidateVersion(context.Context, *ValidateVersionRequest) (*ValidateVersionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ValidateVersion not implemented")
+}
+func (UnimplementedConfigServiceServer) DiffVersions(context.Context, *DiffVersionsRequest) (*DiffVersionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DiffVersions not implemented")
 }
 func (UnimplementedConfigServiceServer) mustEmbedUnimplementedConfigServiceServer() {}
 func (UnimplementedConfigServiceServer) testEmbeddedByValue()                       {}
@@ -210,6 +264,42 @@ func _ConfigService_ArchiveVersion_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ConfigService_ValidateVersion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ValidateVersionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ConfigServiceServer).ValidateVersion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ConfigService_ValidateVersion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ConfigServiceServer).ValidateVersion(ctx, req.(*ValidateVersionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ConfigService_DiffVersions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DiffVersionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ConfigServiceServer).DiffVersions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ConfigService_DiffVersions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ConfigServiceServer).DiffVersions(ctx, req.(*DiffVersionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ConfigService_ServiceDesc is the grpc.ServiceDesc for ConfigService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -232,6 +322,14 @@ var ConfigService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ArchiveVersion",
 			Handler:    _ConfigService_ArchiveVersion_Handler,
+		},
+		{
+			MethodName: "ValidateVersion",
+			Handler:    _ConfigService_ValidateVersion_Handler,
+		},
+		{
+			MethodName: "DiffVersions",
+			Handler:    _ConfigService_DiffVersions_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

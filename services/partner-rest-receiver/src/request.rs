@@ -19,6 +19,14 @@ pub struct RawRequest {
     pub body_json: String,
     /// `X-Idempotency-Key` — опциональный, партнёр сам генерирует. См. `idempotency.rs`.
     pub idempotency_key: Option<String>,
+    /// `X-Sandbox: true` (Фаза 11 плана закрытия API-пробелов) — dry-run
+    /// отправка: не тарифицируется, не уходит реальному оператору, lifecycle
+    /// всё равно доходит до DELIVERED через синтетический DLR
+    /// (delivery-service). Уже bool на этом уровне (не Option<String>, как
+    /// idempotency_key) — здесь нечего валидировать: любое отсутствующее/
+    /// не-"true" значение однозначно означает false, отдельного
+    /// ValidationError не требуется.
+    pub sandbox: bool,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -45,6 +53,7 @@ pub struct ValidatedRequest {
     /// SMPP priority_flag (0-3), `None` если партнёр не указал — вызывающая
     /// сторона (`build_incoming.rs`) применяет `DEFAULT_PRIORITY_FLAG`.
     pub priority: Option<u8>,
+    pub sandbox: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +154,7 @@ pub fn validate_request_schema(raw: &RawRequest) -> Result<ValidatedRequest, Val
         body: parsed.body,
         idempotency_key,
         priority: parsed.priority,
+        sandbox: raw.sandbox,
     })
 }
 
@@ -174,6 +184,7 @@ mod tests {
             remote_ip: Some("185.65.212.55".parse().unwrap()),
             body_json: r#"{"msisdn":"998901331835","sender_id":"Click","body":"Your OTP is 123456"}"#.into(),
             idempotency_key: None,
+            sandbox: false,
         }
     }
 
@@ -318,5 +329,22 @@ mod tests {
         let mut raw = valid_raw();
         raw.body_json = r#"{"msisdn":"998901331835","sender_id":"Click","body":"text","priority":4}"#.into();
         assert_eq!(validate_request_schema(&raw), Err(ValidationError::InvalidPriority));
+    }
+
+    /// Фаза 11 плана закрытия API-пробелов: sandbox проходит через валидацию
+    /// как есть — не влияет ни на одну другую проверку, ничего не может
+    /// отклонить.
+    #[test]
+    fn sandbox_flag_passes_through_validation_unchanged() {
+        let mut raw = valid_raw();
+        raw.sandbox = true;
+        let result = validate_request_schema(&raw).unwrap();
+        assert!(result.sandbox);
+    }
+
+    #[test]
+    fn sandbox_defaults_to_false() {
+        let result = validate_request_schema(&valid_raw()).unwrap();
+        assert!(!result.sandbox);
     }
 }

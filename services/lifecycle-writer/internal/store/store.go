@@ -28,11 +28,11 @@ func New(pool *pgxpool.Pool) *Store {
 func (s *Store) InsertReadModel(ctx context.Context, row core.ReadModelRow) error {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO messaging.message_read_model
-			(message_id, partner_id, application_id, trace_id, pipeline_id, pipeline_version, current_status, terminal, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+			(message_id, partner_id, application_id, trace_id, pipeline_id, pipeline_version, current_status, terminal, created_at, updated_at, sandbox)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10)
 		ON CONFLICT (message_id) DO NOTHING
 	`, row.MessageID, row.PartnerID, row.ApplicationID, row.TraceID, row.PipelineID, row.PipelineVersion,
-		row.CurrentStatus, row.Terminal, row.Timestamp)
+		row.CurrentStatus, row.Terminal, row.Timestamp, row.Sandbox)
 	if err != nil {
 		return fmt.Errorf("insert message_read_model: %w", err)
 	}
@@ -51,11 +51,11 @@ func (s *Store) BatchInsertReadModel(ctx context.Context, rows []core.ReadModelR
 	for _, row := range rows {
 		batch.Queue(`
 			INSERT INTO messaging.message_read_model
-				(message_id, partner_id, application_id, trace_id, pipeline_id, pipeline_version, current_status, terminal, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+				(message_id, partner_id, application_id, trace_id, pipeline_id, pipeline_version, current_status, terminal, created_at, updated_at, sandbox)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10)
 			ON CONFLICT (message_id) DO NOTHING
 		`, row.MessageID, row.PartnerID, row.ApplicationID, row.TraceID, row.PipelineID, row.PipelineVersion,
-			row.CurrentStatus, row.Terminal, row.Timestamp)
+			row.CurrentStatus, row.Terminal, row.Timestamp, row.Sandbox)
 	}
 	br := s.pool.SendBatch(ctx, batch)
 	defer br.Close()

@@ -223,3 +223,59 @@ func TestBatchInsertDlq(t *testing.T) {
 		t.Fatalf("неверный reason_code: %s", reasonCode)
 	}
 }
+
+// Фаза 11 плана закрытия API-пробелов (migrations/V028): sandbox
+// зафиксирован на INSERT из IncomingMessage.Sandbox и обязан пережить
+// последующий UpdateReadModel (которое его вообще не трогает — SET
+// current_status/terminal/updated_at/lifecycle_version, не sandbox).
+func TestInsertReadModelPersistsSandboxThroughUpdate(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	s := New(pool)
+	ctx := context.Background()
+	messageID := uniqueMessageID(t)
+
+	if err := s.InsertReadModel(ctx, core.ReadModelRow{
+		MessageID: messageID, PartnerID: "acme", ApplicationID: "acme_main", TraceID: uniqueMessageID(t),
+		CurrentStatus: "RECEIVED", Timestamp: time.Now(), Sandbox: true,
+	}); err != nil {
+		t.Fatalf("InsertReadModel failed: %v", err)
+	}
+
+	if err := s.UpdateReadModel(ctx, core.ReadModelUpdate{
+		MessageID: messageID, CurrentStatus: "DELIVERED", Terminal: true, UpdatedAt: time.Now(), LifecycleVersion: 1,
+	}); err != nil {
+		t.Fatalf("UpdateReadModel failed: %v", err)
+	}
+
+	var sandbox bool
+	if err := pool.QueryRow(ctx, `SELECT sandbox FROM messaging.message_read_model WHERE message_id = $1`, messageID).Scan(&sandbox); err != nil {
+		t.Fatalf("readback failed: %v", err)
+	}
+	if !sandbox {
+		t.Fatalf("sandbox=true на INSERT обязан пережить последующий UpdateReadModel")
+	}
+}
+
+func TestInsertReadModelDefaultsSandboxToFalse(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	s := New(pool)
+	ctx := context.Background()
+	messageID := uniqueMessageID(t)
+
+	if err := s.InsertReadModel(ctx, core.ReadModelRow{
+		MessageID: messageID, PartnerID: "acme", ApplicationID: "acme_main", TraceID: uniqueMessageID(t),
+		CurrentStatus: "RECEIVED", Timestamp: time.Now(),
+	}); err != nil {
+		t.Fatalf("InsertReadModel failed: %v", err)
+	}
+
+	var sandbox bool
+	if err := pool.QueryRow(ctx, `SELECT sandbox FROM messaging.message_read_model WHERE message_id = $1`, messageID).Scan(&sandbox); err != nil {
+		t.Fatalf("readback failed: %v", err)
+	}
+	if sandbox {
+		t.Fatalf("обычное сообщение не должно получить sandbox=true")
+	}
+}

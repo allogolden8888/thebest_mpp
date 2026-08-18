@@ -24,13 +24,20 @@ func skipsConfigVersionsTable(e validate.EntityType) bool {
 }
 
 type ConfigVersion struct {
-	ID        int64
+	ID         int64
 	EntityType validate.EntityType
-	EntityID  string
-	Version   int32
-	Status    string
-	CreatedAt time.Time
-	CreatedBy string
+	EntityID   string
+	Version    int32
+	Status     string
+	CreatedAt  time.Time
+	CreatedBy  string
+	// Payload — найдено при реализации partner-self-service-api (Фаза 3
+	// плана): до этого поля ни один читающий метод не возвращал содержимое
+	// документа, что делало read-modify-write невозможным ни для одного
+	// клиента ConfigService. См. platform-contracts/grpc/internal_control.proto
+	// ConfigVersionResponse.payload_json за тем же обоснованием на уровне
+	// контракта.
+	Payload []byte
 }
 
 type Store struct {
@@ -60,7 +67,7 @@ func (s *Store) CreateImmutableVersionAndOutbox(ctx context.Context, entityType 
 			if err != nil {
 				return fmt.Errorf("insert outbox (no config_versions row): %w", err)
 			}
-			result = ConfigVersion{EntityType: entityType, EntityID: entityID, Status: "active", CreatedBy: createdBy}
+			result = ConfigVersion{EntityType: entityType, EntityID: entityID, Status: "active", CreatedBy: createdBy, Payload: payloadJSON}
 			return nil
 		}
 
@@ -107,7 +114,7 @@ func (s *Store) CreateImmutableVersionAndOutbox(ctx context.Context, entityType 
 
 		result = ConfigVersion{
 			ID: id, EntityType: entityType, EntityID: entityID, Version: nextVersion,
-			Status: "active", CreatedAt: createdAt, CreatedBy: createdBy,
+			Status: "active", CreatedAt: createdAt, CreatedBy: createdBy, Payload: payloadJSON,
 		}
 		return nil
 	})
@@ -121,11 +128,11 @@ func (s *Store) CreateImmutableVersionAndOutbox(ctx context.Context, entityType 
 func (s *Store) GetActiveVersion(ctx context.Context, entityType validate.EntityType, entityID string) (ConfigVersion, error) {
 	var v ConfigVersion
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, entity_type, entity_id, version, status, created_at, created_by
+		SELECT id, entity_type, entity_id, version, status, created_at, created_by, payload
 		FROM config.config_versions
 		WHERE entity_type = $1 AND entity_id = $2 AND status = 'active'
 		ORDER BY version DESC LIMIT 1
-	`, string(entityType), entityID).Scan(&v.ID, &v.EntityType, &v.EntityID, &v.Version, &v.Status, &v.CreatedAt, &v.CreatedBy)
+	`, string(entityType), entityID).Scan(&v.ID, &v.EntityType, &v.EntityID, &v.Version, &v.Status, &v.CreatedAt, &v.CreatedBy, &v.Payload)
 	if err != nil {
 		return ConfigVersion{}, fmt.Errorf("get active version: %w", err)
 	}
@@ -146,7 +153,7 @@ func (s *Store) ListVersions(ctx context.Context, entityType validate.EntityType
 	}
 
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, entity_type, entity_id, version, status, created_at, created_by
+		SELECT id, entity_type, entity_id, version, status, created_at, created_by, payload
 		FROM config.config_versions
 		WHERE entity_type = $1 AND entity_id = $2 AND id > $3
 		ORDER BY id ASC LIMIT $4
@@ -159,7 +166,7 @@ func (s *Store) ListVersions(ctx context.Context, entityType validate.EntityType
 	var out []ConfigVersion
 	for rows.Next() {
 		var v ConfigVersion
-		if err := rows.Scan(&v.ID, &v.EntityType, &v.EntityID, &v.Version, &v.Status, &v.CreatedAt, &v.CreatedBy); err != nil {
+		if err := rows.Scan(&v.ID, &v.EntityType, &v.EntityID, &v.Version, &v.Status, &v.CreatedAt, &v.CreatedBy, &v.Payload); err != nil {
 			return nil, "", fmt.Errorf("scan version row: %w", err)
 		}
 		out = append(out, v)
@@ -172,6 +179,27 @@ func (s *Store) ListVersions(ctx context.Context, entityType validate.EntityType
 	return out, nextToken, rows.Err()
 }
 
+// GetVersionByNumber — luminous-hugging-charm.md Фаза 10 (DiffVersions).
+// В отличие от GetActiveVersion, здесь конкретный номер версии, не только
+// текущая активная — diff по определению сравнивает ДВЕ версии, обычно
+// хотя бы одна из них уже archived. Возвращает payload — единственный
+// store-метод в этом файле, который это делает (остальные RPC
+// сознательно не несут payload_json в ответе, см.
+// services/backoffice-api/README.md "Rotate credential" за тем же
+// наблюдением о ConfigVersionResponse — здесь это МЕНЯЕТСЯ намеренно,
+// DiffVersions ради самого diff обязан вернуть содержимое).
+func (s *Store) GetVersionByNumber(ctx context.Context, entityType validate.EntityType, entityID string, version int32) ([]byte, error) {
+	var payload []byte
+	err := s.pool.QueryRow(ctx, `
+		SELECT payload FROM config.config_versions
+		WHERE entity_type = $1 AND entity_id = $2 AND version = $3
+	`, string(entityType), entityID, version).Scan(&payload)
+	if err != nil {
+		return nil, fmt.Errorf("get version %d: %w", version, err)
+	}
+	return payload, nil
+}
+
 // ArchiveVersion — handle_crud_request (ArchiveVersion RPC). Hard delete не
 // выполняется (HLD §16.1, migrations/V002 комментарий) — только
 // status=archived.
@@ -181,8 +209,8 @@ func (s *Store) ArchiveVersion(ctx context.Context, entityType validate.EntityTy
 		UPDATE config.config_versions
 		SET status = 'archived'
 		WHERE entity_type = $1 AND entity_id = $2 AND version = $3
-		RETURNING id, entity_type, entity_id, version, status, created_at, created_by
-	`, string(entityType), entityID, version).Scan(&v.ID, &v.EntityType, &v.EntityID, &v.Version, &v.Status, &v.CreatedAt, &v.CreatedBy)
+		RETURNING id, entity_type, entity_id, version, status, created_at, created_by, payload
+	`, string(entityType), entityID, version).Scan(&v.ID, &v.EntityType, &v.EntityID, &v.Version, &v.Status, &v.CreatedAt, &v.CreatedBy, &v.Payload)
 	if err != nil {
 		return ConfigVersion{}, fmt.Errorf("archive version: %w", err)
 	}

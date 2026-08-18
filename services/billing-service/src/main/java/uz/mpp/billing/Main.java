@@ -20,8 +20,15 @@ public final class Main {
     public static void main(String[] args) throws Exception {
         String tariffPath = System.getenv().getOrDefault("BILLING_TARIFF_PATH",
             "../../config_schemas/examples/billing_tariff.valid.json");
-        TariffResolver tariffResolver = TariffResolver.fromFile(Path.of(tariffPath));
-        BillingService billingService = new BillingService(tariffResolver);
+        TariffResolver defaultTariffResolver = TariffResolver.fromFile(Path.of(tariffPath));
+        BillingService billingService = new BillingService(defaultTariffResolver);
+
+        // TariffCache — Фаза 5a плана закрытия API-пробелов (multi-tenancy в
+        // Billing Service): per-partner тариф из Configuration Redis, с
+        // graceful fallback на defaultTariffResolver для партнёров, для
+        // которых BILLING_TARIFF ещё не опубликован через configuration-service
+        // (см. TariffCache javadoc).
+        TariffCache tariffCache = new TariffCache(RedisUrl.buildConfigurationUrl(), defaultTariffResolver);
 
         HealthServer health = new HealthServer(9090);
         health.start();
@@ -39,19 +46,24 @@ public final class Main {
         // readiness-проверка (например Redis PING) не реализована в этом срезе.
         health.ready.set(true);
 
-        String accountId = System.getenv().getOrDefault("BILLING_ACCOUNT_ID", "test-partner");
-
         // development_plan.md 5.4 — recurring billing (alphaname/short number
         // monthly fee + service SMS package), см. RecurringBillingJob javadoc.
         // Опционально: без PARTNER_CONFIG_PATH или без recurring_charges в
         // тарифе job просто ничего не планирует на каждом тике (RecurringCharges.plan
         // возвращает пустой список), не падает.
+        //
+        // Явно НЕ multi-partner в этом проходе (Фаза 5a документирует это как
+        // отдельную, не обязательную для разблокировки Ф5 работу — итерация
+        // по ВСЕМ партнёрам, не resolve-по-требованию): один статический
+        // PARTNER_CONFIG_PATH, account_id = partnerId (Фаза 5a: 1:1 —
+        // BILLING_ACCOUNT_ID больше не существует как отдельный, рассинхронизируемый
+        // с partner_id env var).
         String partnerConfigPath = System.getenv().getOrDefault("PARTNER_CONFIG_PATH",
             "../../config_schemas/examples/partner.valid.json");
         PartnerSendersResolver.PartnerSenders partnerSenders = PartnerSendersResolver.fromFile(Path.of(partnerConfigPath));
         RecurringBillingJob recurringBillingJob = new RecurringBillingJob(
-            accountStore, accountId, partnerSenders.partnerId(), partnerSenders.senders(),
-            tariffResolver.alphanameMonthlyFee(), tariffResolver.servicePackage(), Clock.systemUTC());
+            accountStore, partnerSenders.partnerId(), partnerSenders.partnerId(), partnerSenders.senders(),
+            defaultTariffResolver.alphanameMonthlyFee(), defaultTariffResolver.servicePackage(), Clock.systemUTC());
         // Идемпотентно (charge_id-дедуп) — ежедневный тик, не точный
         // "1-го числа каждого месяца" cron; проще и надёжнее восстанавливается
         // после простоя/рестарта пода (следующий тик подхватит пропущенные
@@ -88,6 +100,7 @@ public final class Main {
             health.stop();
             recurringScheduler.shutdownNow();
             accountStore.close();
+            tariffCache.close();
         }, "billing-service-shutdown"));
 
         // Реальная находка (нагрузочный прогон, 1000 msg/s): раньше
@@ -106,7 +119,7 @@ public final class Main {
         // библиотеки создают; restart-policy в docker-compose.yml поднимет
         // контейнер заново после этого.
         try {
-            KafkaIo.run(consumer, producer, accountStore, billingService, accountId, running);
+            KafkaIo.run(consumer, producer, accountStore, billingService, tariffCache, running);
             consumer.close();
             producer.close();
         } catch (Throwable t) {

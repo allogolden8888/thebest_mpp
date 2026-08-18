@@ -11,7 +11,7 @@ import (
 	eventsv1 "mpp/platformcontracts/events/v1"
 )
 
-// ReadModelRow — messaging.message_read_model (migrations/V004).
+// ReadModelRow — messaging.message_read_model (migrations/V004, V028).
 type ReadModelRow struct {
 	MessageID       string
 	PartnerID       string
@@ -22,6 +22,16 @@ type ReadModelRow struct {
 	CurrentStatus   string
 	Terminal        bool
 	Timestamp       time.Time
+	// Sandbox — Фаза 11 плана закрытия API-пробелов (migrations/V028): без
+	// этой колонки sandbox-сообщения в backoffice-ui/partner-api-отчётах
+	// неотличимы от настоящего трафика. IncomingMessage уже несёт этот флаг
+	// (единственный, устанавливаемый один раз на входе в pipeline —
+	// partner-rest-receiver, X-Sandbox заголовок) — читается напрямую
+	// здесь, а не через message.lifecycle: значение не меняется в течение
+	// жизни сообщения, и incoming.messages в любом случае приходит раньше
+	// первого stage.completed, так что нет причины гонять его через
+	// дополнительный echo-путь.
+	Sandbox bool
 }
 
 // LifecycleHistoryRow — messaging.message_lifecycle_history (migrations/V005).
@@ -66,6 +76,7 @@ func FromIncomingMessage(msg *eventsv1.IncomingMessage) ReadModelRow {
 		CurrentStatus:   "RECEIVED",
 		Terminal:        false,
 		Timestamp:       msg.GetReceivedAt().AsTime(),
+		Sandbox:         msg.GetSandbox(),
 	}
 }
 
