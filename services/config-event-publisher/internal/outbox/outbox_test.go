@@ -34,12 +34,28 @@ func uniqueEntityID(prefix string) string {
 	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
 }
 
+// insertUnpublishedOutboxRow — реальная находка: postgres://localhost:5432/mpp
+// (дефолтный DSN этих тестов) не изолированная тестовая БД, а тот же общий
+// локальный dev-инстанс, что используют другие сервисы/тесты и постоянный
+// демо-сид (migrations/README.md, V022: ~6300 строк policy_template,
+// намеренно оставлены unpublished). PollOutbox — ORDER BY created_at ASC
+// LIMIT N — корректное поведение для реального продюсера очереди (старые
+// записи первыми, ограниченный батч), не баг: только что вставленная строка
+// хронологически САМАЯ НОВАЯ, поэтому никогда не попадает в top-N среди
+// тысяч более старых строк общей таблицы. Тест не должен предполагать, что
+// владеет позицией в неограниченной общей таблице — и не должен трогать/
+// удалять чужие данные, которые нужны другим тестам. Фикс: явно проставляем
+// created_at далеко в прошлом (не текущим now() по умолчанию), так что
+// тестовая строка гарантированно сортируется раньше любых реальных/демо-
+// данных, при этом сдвиг на константу сохраняет ОТНОСИТЕЛЬНЫЙ порядок между
+// несколькими строками, вставленными одним тестом (см.
+// TestPollOutboxOrdersByCreatedAtAscending).
 func insertUnpublishedOutboxRow(t *testing.T, pool *pgxpool.Pool, entityType, entityID string, payload []byte) int64 {
 	t.Helper()
 	var id int64
 	err := pool.QueryRow(context.Background(), `
-		INSERT INTO config.config_outbox (config_version_id, entity_type, entity_id, payload)
-		VALUES (NULL, $1, $2, $3)
+		INSERT INTO config.config_outbox (config_version_id, entity_type, entity_id, payload, created_at)
+		VALUES (NULL, $1, $2, $3, now() - interval '100 years')
 		RETURNING id
 	`, entityType, entityID, payload).Scan(&id)
 	if err != nil {
