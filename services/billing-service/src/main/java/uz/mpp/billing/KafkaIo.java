@@ -68,6 +68,17 @@ public final class KafkaIo {
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
+        // NEXT_STEPS_1500TPS.md 1.2 подняло fetch.min.bytes=32768. 2026-08-18
+        // — реальное измерение (rate sweep 50/100/200/300 TPS на этой
+        // машине) показало: этот "верхний предел 500мс, чтобы не залипать"
+        // как раз и стал доминирующей задержкой — при текущем объёме
+        // (маленький партнёр, некрупные payload'ы) партиция физически не
+        // набирает 32КБ быстро НИ НА ОДНОМ из протестированных rate, так
+        // что poll() почти всегда упирался в фиксированные fetch.max.wait.ms
+        // (500мс) НА КАЖДЫЙ poll — то есть latency перестала зависеть от
+        // rate вообще (50 TPS показал p95 почти как 300 TPS), что и выдало
+        // проблему. Возвращаем к дефолту (1 байт).
+        props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 1000);
         return new KafkaConsumer<>(props);
     }
 
@@ -97,6 +108,10 @@ public final class KafkaIo {
         // молча зависает на минуту.
         props.put(ProducerConfig.BUFFER_MEMORY_CONFIG, 67_108_864L); // 64MB (было 32MB по умолчанию)
         props.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, PRODUCER_SEND_TIMEOUT.toMillis()); // 10s (было 60s по умолчанию)
+        // NEXT_STEPS_1500TPS.md 1.1: linger.ms=0 по умолчанию — каждый send()
+        // уходит брокеру отдельным запросом. 5мс даёт клиенту собрать пачку
+        // без заметного вклада в p50/p95 (бюджет — сотни мс).
+        props.put(ProducerConfig.LINGER_MS_CONFIG, 5);
         return new KafkaProducer<>(props);
     }
 

@@ -23,6 +23,8 @@
 -- ARGV[14] = old_stage_execution_id для ZREM из deadlines ("" если нечего удалять — первый диспетч)
 -- ARGV[15] = new priority_flag (SMPP 0-3, партнёрское поле, не меняется по ходу пайплайна)
 -- ARGV[16] = new message_ttl_ms (unix ms, i64::MAX если TTL не задан)
+-- ARGV[17] = expire_at_ms (unix ms, PEXPIREAT для exec_key — backstop на случай, если
+--            сообщение никогда не финализируется; см. redis_cas.rs::EXEC_STATE_TTL_GRACE_MS)
 --
 -- Возврат: {"OK"} при успехе, {"CONFLICT", <реальный awaiting_stage_execution_id>} при гонке.
 --
@@ -68,6 +70,7 @@ redis.call('HSET', exec_key,
     'deadline_ms', ARGV[13],
     'priority_flag', ARGV[15],
     'message_ttl_ms', ARGV[16])
+redis.call('PEXPIREAT', exec_key, ARGV[17])
 
 local new_stage_execution_id = ARGV[5]
 if new_stage_execution_id ~= '' then

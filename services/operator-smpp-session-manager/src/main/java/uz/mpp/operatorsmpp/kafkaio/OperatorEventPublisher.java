@@ -33,6 +33,9 @@ public final class OperatorEventPublisher {
         props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
         props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
         props.put(ProducerConfig.ACKS_CONFIG, "all");
+        // NEXT_STEPS_1500TPS.md 1.1: linger.ms=0 по умолчанию — 5мс даёт
+        // клиенту собрать пачку без заметного вклада в p50/p95.
+        props.put(ProducerConfig.LINGER_MS_CONFIG, 5);
         this.producer = new KafkaProducer<>(props);
     }
 

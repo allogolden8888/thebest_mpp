@@ -71,6 +71,19 @@ public final class KafkaIo {
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
+        // NEXT_STEPS_1500TPS.md 1.2 подняло fetch.min.bytes=32768, рассчитывая
+        // сэкономить round trip'ы под высоким throughput. 2026-08-18 —
+        // реальное измерение (rate sweep 50/100/200/300 TPS на этой машине,
+        // 8 CPU/7.75GB) показало latency НЕ падает на низких rate — p95 на
+        // 50 TPS (1760мс) почти как на 300 TPS — то есть узкое место не в
+        // пропускной способности, а в фиксированной стоимости на хоп. При
+        // текущем объёме сообщений (маленький партнёр, некрупные payload'ы)
+        // партиция физически не набирает 32КБ быстро, и консьюмер почти
+        // всегда упирается в fetch.max.wait.ms (дефолт 500мс) — то есть эта
+        // "оптимизация" добавляет фиксированный налог ~500мс НА ХОП вместо
+        // экономии round trip'ов. Возвращаем к дефолту (1 байт — не ждать
+        // накопления вообще), измерили эффект отдельно.
+        props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 1000);
         return new KafkaConsumer<>(props);
     }
 
@@ -99,6 +112,10 @@ public final class KafkaIo {
         // (at-least-once переподхватит), а не зависает на минуту молча.
         props.put(ProducerConfig.BUFFER_MEMORY_CONFIG, 67_108_864L); // 64MB (было 32MB по умолчанию)
         props.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, PRODUCER_SEND_TIMEOUT.toMillis()); // 10s (было 60s по умолчанию)
+        // NEXT_STEPS_1500TPS.md 1.1: linger.ms=0 по умолчанию — каждый send()
+        // уходит брокеру отдельным запросом. 5мс даёт клиенту собрать пачку
+        // без заметного вклада в p50/p95 (бюджет — сотни мс).
+        props.put(ProducerConfig.LINGER_MS_CONFIG, 5);
         return new KafkaProducer<>(props);
     }
 

@@ -180,6 +180,12 @@ pub fn build_producer(bootstrap_servers: &str) -> FutureProducer {
         .set("message.timeout.ms", "5000")
         .set("queue.buffering.max.messages", "1000000")
         .set("queue.buffering.max.kbytes", "2097151")
+        // NEXT_STEPS_1500TPS.md 1.1: не трогали linger.ms/batch.size раньше —
+        // дефолт librdkafka linger.ms=0 значит каждый produce() уходит на
+        // брокер отдельным запросом вместо накопления в пачки. 5мс — почти
+        // незаметно на p50/p95 (бюджет — сотни мс), но разгружает брокер под
+        // высоким throughput.
+        .set("linger.ms", "5")
         .create()
         .expect("не удалось создать Kafka producer")
 }

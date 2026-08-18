@@ -14,6 +14,10 @@ pub fn build_producer(bootstrap_servers: &str) -> FutureProducer {
     ClientConfig::new()
         .set("bootstrap.servers", bootstrap_servers)
         .set("message.timeout.ms", "5000")
+        // NEXT_STEPS_1500TPS.md 1.1 — тот же линг, что у остальных Rust-
+        // сервисов; здесь особенно уместно смотреть на latency-бюджет, т.к.
+        // это первый хоп (партнёр ждёт ACK) — 5мс далеко в пределах бюджета.
+        .set("linger.ms", "5")
         .create()
         .expect("не удалось создать Kafka producer")
 }

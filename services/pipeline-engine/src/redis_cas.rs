@@ -23,6 +23,30 @@ use tokio::sync::OnceCell;
 
 pub const DEADLINE_BUCKETS: u64 = 16;
 
+// NEXT_STEPS_1500TPS.md 2.1: реальная находка нагрузочного теста (1500 TPS,
+// AMD-сессия) — `exec:{message_id}` не имел TTL вообще. В штатном пути
+// `finalize` удаляет ключ явно, но если сообщение НИКОГДА не финализируется
+// (застряло, ретраится дольше своего TTL без успешного redispatch, баг в
+// вызывающей стороне) — ключ живёт вечно. За одну тестовую сессию накопилось
+// 344 918 таких ключей (вычищено вручную Lua UNLINK-скриптом, не фиксом).
+// `message_ttl_ms` — уже абсолютный unix-ms дедлайн сообщения (когда
+// retry-until-expiry должен остановиться, см. execution_state.rs), поэтому
+// PEXPIREAT с этим значением + запас — естественный backstop, не отдельная
+// TTL-политика: ключ переживает штатную финализацию (никогда не должен
+// реально истечь по TTL в happy path), но не живёт вечно, если она не
+// случилась. Запас (не point-in-time дедлайн ровно) — чтобы не удалить ключ
+// прямо во время последней попытки обработки на границе TTL.
+const EXEC_STATE_TTL_GRACE_MS: i64 = 3_600_000; // 1 час
+// `message_ttl_ms == i64::MAX` — санитарный дефолт в execution_state.rs,
+// когда IncomingMessage.message_ttl отсутствовал (не должно происходить в
+// норме — partner-rest-receiver всегда проставляет message_ttl, см.
+// build_incoming.rs::DEFAULT_MESSAGE_TTL, — но pipeline-engine не должен
+// полагаться на эту гарантию вслепую). PEXPIREAT с i64::MAX некорректен для
+// Redis — вместо этого используем щедрый, но конечный fallback (вдвое
+// больше DEFAULT_MESSAGE_TTL, т.к. это защитный backstop, не основной
+// механизм корректности).
+const EXEC_STATE_FALLBACK_TTL_MS: i64 = 48 * 3_600_000; // 48 часов
+
 const CAS_TRANSITION_SCRIPT: &str = include_str!("../lua/cas_transition.lua");
 const FINALIZE_SCRIPT: &str = include_str!("../lua/finalize.lua");
 
@@ -122,6 +146,10 @@ impl RedisStateStore {
         let new_stage_execution_id = new_state.awaiting_stage_execution_id.clone().unwrap_or_default();
         let bucket = bucket_for(&new_stage_execution_id, DEADLINE_BUCKETS);
         let deadlines_key = format!("deadlines:{bucket}");
+        let expire_at_ms = match new_state.message_ttl_ms.checked_add(EXEC_STATE_TTL_GRACE_MS) {
+            Some(ms) => ms,
+            None => crate::kafka_io::now_ms() + EXEC_STATE_FALLBACK_TTL_MS,
+        };
 
         let result: Vec<String> = redis::Script::new(CAS_TRANSITION_SCRIPT)
             .key(&exec_key)
@@ -142,6 +170,7 @@ impl RedisStateStore {
             .arg(old_stage_execution_id_to_remove.unwrap_or(""))
             .arg(new_state.priority_flag)
             .arg(new_state.message_ttl_ms)
+            .arg(expire_at_ms)
             .invoke_async(&mut conn)
             .await
             .map_err(|e| format!("EVAL cas_transition: {e}"))?;
@@ -236,6 +265,46 @@ mod tests {
         assert_eq!(loaded.current_node_id, "n1_destination_resolution");
         assert_eq!(loaded.awaiting_stage_execution_id.as_deref(), Some("se1"));
         assert_eq!(loaded.destination_address, "998901331835");
+
+        store.finalize(&message_id, "se1").await.unwrap();
+    }
+
+    /// NEXT_STEPS_1500TPS.md 2.1 — реальная находка: `exec:{message_id}`
+    /// раньше не имел TTL вообще (344 918 зависших ключей за одну тестовую
+    /// сессию). Проверяем PTTL напрямую, не полагаясь на побочные признаки.
+    #[tokio::test]
+    async fn cas_advance_sets_ttl_on_exec_key_from_message_ttl() {
+        let store = RedisStateStore::new(&redis_url()).unwrap();
+        let message_id = format!("test-msg-{}", uuid::Uuid::new_v4());
+        let mut state = sample_state(&message_id, "se1");
+        state.message_ttl_ms = crate::kafka_io::now_ms() + 10_000; // TTL через 10с
+
+        store.cas_advance(None, None, &state).await.unwrap();
+
+        let mut conn = store.connection().await.unwrap();
+        let pttl: i64 = redis::AsyncCommands::pttl(&mut conn, format!("exec:{message_id}")).await.unwrap();
+        // Ожидаем ~10с + EXEC_STATE_TTL_GRACE_MS (1ч) = ~3610с. Не точное
+        // равенство (реальное время между cas_advance и PTTL-чтением) —
+        // допуск в разумных границах.
+        assert!(pttl > 3_600_000 && pttl <= 3_610_000, "pttl={pttl}мс, ожидали ~3600000-3610000");
+
+        store.finalize(&message_id, "se1").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cas_advance_falls_back_to_finite_ttl_when_message_ttl_is_max() {
+        let store = RedisStateStore::new(&redis_url()).unwrap();
+        let message_id = format!("test-msg-{}", uuid::Uuid::new_v4());
+        let state = sample_state(&message_id, "se1"); // sample_state уже даёт message_ttl_ms: i64::MAX
+
+        store.cas_advance(None, None, &state).await.unwrap();
+
+        let mut conn = store.connection().await.unwrap();
+        let pttl: i64 = redis::AsyncCommands::pttl(&mut conn, format!("exec:{message_id}")).await.unwrap();
+        // i64::MAX должен упасть в fallback (48ч), не остаться без TTL
+        // (-1 у Redis PTTL означает "ключ существует, TTL не установлен").
+        assert!(pttl > 0, "pttl={pttl} — ожидали конечный TTL (fallback), не -1 (без TTL) и не -2 (ключ не найден)");
+        assert!(pttl <= 48 * 3_600_000, "pttl={pttl}мс превышает ожидаемый fallback-потолок 48ч");
 
         store.finalize(&message_id, "se1").await.unwrap();
     }

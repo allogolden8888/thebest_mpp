@@ -57,4 +57,42 @@ class OperatorRouteRegistryTest {
         registry.unregister("beeline_uz", "route-1");
         assertTrue(registry.lookup("beeline_uz", "route-1").isEmpty());
     }
+
+    /** Реальная находка (дважды воспроизведена вживую) — см. javadoc-комментарий
+     * над UNREGISTER_IF_OWNER_SCRIPT в OperatorRouteRegistry: старый (уходящий)
+     * инстанс не должен иметь возможности снести свежую регистрацию нового. */
+    @Test
+    void unregisterFromDifferentInstanceIsNoOp() {
+        registry.register("beeline_uz", "route-1", 1L, "10.0.0.9:2775");
+
+        try (OperatorRouteRegistry otherInstance = new OperatorRouteRegistry(
+                System.getenv().getOrDefault("OPERATOR_SMPP_SESSION_MANAGER_TEST_REDIS_URI", "redis://localhost:6379"),
+                "operator-smpp-session-manager-OTHER-instance", Duration.ofSeconds(5))) {
+            otherInstance.unregister("beeline_uz", "route-1");
+        }
+
+        Map<String, String> fields = registry.lookup("beeline_uz", "route-1");
+        assertEquals("10.0.0.9:2775", fields.get("endpoint"), "чужой unregister() не должен был снести регистрацию");
+    }
+
+    @Test
+    void heartbeatFromDifferentInstanceDoesNotRecreateOrTouchKey() {
+        try (OperatorRouteRegistry otherInstance = new OperatorRouteRegistry(
+                System.getenv().getOrDefault("OPERATOR_SMPP_SESSION_MANAGER_TEST_REDIS_URI", "redis://localhost:6379"),
+                "operator-smpp-session-manager-OTHER-instance", Duration.ofSeconds(5))) {
+            // Ключ ещё не существует вообще — heartbeat от кого угодно не должен
+            // его создавать "голым" (только с полем heartbeat, без endpoint и т.д.).
+            otherInstance.heartbeat("beeline_uz", "route-1");
+        }
+        assertTrue(registry.lookup("beeline_uz", "route-1").isEmpty(), "heartbeat не должен создавать голый ключ на пустом месте");
+
+        registry.register("beeline_uz", "route-1", 1L, "10.0.0.9:2775");
+        try (OperatorRouteRegistry otherInstance = new OperatorRouteRegistry(
+                System.getenv().getOrDefault("OPERATOR_SMPP_SESSION_MANAGER_TEST_REDIS_URI", "redis://localhost:6379"),
+                "operator-smpp-session-manager-OTHER-instance", Duration.ofSeconds(5))) {
+            otherInstance.heartbeat("beeline_uz", "route-1");
+        }
+        Map<String, String> fields = registry.lookup("beeline_uz", "route-1");
+        assertEquals("10.0.0.9:2775", fields.get("endpoint"), "чужой heartbeat() не должен трогать запись другого владельца");
+    }
 }

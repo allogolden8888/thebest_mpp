@@ -79,6 +79,8 @@ pub fn build_producer(bootstrap_servers: &str) -> FutureProducer {
         // тест этого не показал. Подняли явно, с запасом.
         .set("queue.buffering.max.messages", "1000000")
         .set("queue.buffering.max.kbytes", "2097151")
+        // NEXT_STEPS_1500TPS.md 1.1: тот же линг, что у остальных Rust-сервисов.
+        .set("linger.ms", "5")
         .create()
         .expect("не удалось создать Kafka producer")
 }

@@ -81,7 +81,7 @@ pub const COMPLETED_TOPIC: &str = "stage.completed";
 /// как считать стадию зависшей.
 const DEFAULT_STAGE_TIMEOUT_MS: i64 = 30_000;
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
@@ -128,6 +128,11 @@ pub fn build_producer(bootstrap_servers: &str) -> FutureProducer {
         // измерены отдельно и быстрые). Подняли явно, с запасом.
         .set("queue.buffering.max.messages", "1000000")
         .set("queue.buffering.max.kbytes", "2097151")
+        // NEXT_STEPS_1500TPS.md 1.1: linger.ms=0 (librdkafka default) значит
+        // каждый produce() — отдельный запрос брокеру, даже под высокой
+        // конкурентностью, где несколько вызовов реально готовы уйти вместе.
+        // 5мс даёт брокеру собирать пачки без заметного вклада в p50/p95.
+        .set("linger.ms", "5")
         .create()
         .expect("не удалось создать Kafka producer")
 }
@@ -308,7 +313,7 @@ pub async fn run_incoming_loop(
                 };
                 let payload = payload.to_vec(); // владеемые байты — переживают конец этой итерации в spawned-задаче
 
-                let permit = semaphore.clone().acquire_owned().await.expect("semaphore не должен закрываться");
+                                let permit = semaphore.clone().acquire_owned().await.expect("semaphore не должен закрываться");
                 let consumer_task = consumer.clone();
                 let producer_task = producer.clone();
                 // Один снапшот на сообщение — все обращения к графу внутри
@@ -499,7 +504,7 @@ pub async fn run_completed_loop(
                 };
                 let payload = payload.to_vec();
 
-                let permit = semaphore.clone().acquire_owned().await.expect("semaphore не должен закрываться");
+                                let permit = semaphore.clone().acquire_owned().await.expect("semaphore не должен закрываться");
                 let consumer_task = consumer.clone();
                 let producer_task = producer.clone();
                 let pipeline_snapshot = pipeline.load_full();
@@ -711,7 +716,7 @@ pub async fn run_retry_trigger_loop(
                 };
                 let payload = payload.to_vec();
 
-                let permit = semaphore.clone().acquire_owned().await.expect("semaphore не должен закрываться");
+                                let permit = semaphore.clone().acquire_owned().await.expect("semaphore не должен закрываться");
                 let consumer_task = consumer.clone();
                 let producer_task = producer.clone();
                 let pipeline_snapshot = pipeline.load_full();

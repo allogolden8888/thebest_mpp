@@ -104,11 +104,17 @@ services:
       # 2026-08-13 1500 TPS push (12-core/15GB host): при 300 TPS Kafka
       # держалась на ~5 ядрах из 12 доступных Docker'у — не cgroup-лимит
       # (контейнер ничем не ограничен), а внутренние thread pool'ы брокера.
-      # Подняли network+IO threads и heap, чтобы КПД реально мог использовать
-      # оставшийся запас ядер на более высокой нагрузке.
-      KAFKA_NUM_NETWORK_THREADS: "12"
-      KAFKA_NUM_IO_THREADS: "16"
-      KAFKA_BACKGROUND_THREADS: "16"
+      # 12/16/16 (44 потока суммарно) было откалибровано на AMD-сессии (12
+      # CPU) — на этой машине (8 CPU) это, судя по всему, не разгружает
+      # брокер, а создаёт ЛИШНИЙ scheduling-контеншен: живое измерение
+      # (docker stats во время 300 TPS прогона) показало Kafka на 150-260%
+      # CPU устойчиво, что напрямую коррелировало с ростом produce_ms в
+      # pipeline-engine (p50=171/p95=641/p99=1095/max=1457мс — при том, что
+      # Redis load/cas у того же сервиса оставались <60мс даже на p99).
+      # Вернули к значениям, уже провалидированным на ЭТОЙ машине
+      # (num.network.threads=6 из первой сессии) плюс дефолт образа для
+      # num.io.threads/background.threads (не задаём явно).
+      KAFKA_NUM_NETWORK_THREADS: "6"
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       CLUSTER_ID: "mpp-local-dev-cluster-1"
@@ -118,10 +124,14 @@ services:
       # это было диагностировано как реальная причина многосекундной
       # задержки НА КАЖДОМ хопе пайплайна равномерно (не конкретно
       # ROUTING->DELIVERY) — см. dynamic-seeking-russell.md investigation.
-      # Поднято 2G->4G для 1500 TPS push — 15GB Docker VM легко несёт это
-      # вместе с остальными сервисами (пиковый суммарный RSS всех контейнеров
-      # на 300 TPS был <3GB).
-      KAFKA_HEAP_OPTS: "-Xmx4G -Xms4G"
+      # 4G было откалибровано на AMD-сессии (12 CPU/15GB Docker VM) для 1500
+      # TPS push — на исходной машине (8 CPU/7.75GB, общий с двумя другими
+      # проектами) это привело к реальному OOMKilled=true у самой Kafka
+      # (docker inspect подтвердил) после нескольких дней непрерывной работы.
+      # 2G — значение, уже провалидированное на ЭТОЙ машине в исходном
+      # LATENCY_INVESTIGATION.md. Если снова тестируете на большой машине —
+      # поднимайте обратно осознанно, не бездумно объединяя оба среза.
+      KAFKA_HEAP_OPTS: "-Xmx2G -Xms2G"
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
       interval: 10s
@@ -268,11 +278,36 @@ services:
       # плавная деградация (Little's Law: запас на всплески трафика, не сама
       # по себе величина concurrency). 450 — по другую сторону порога:
       # p50=112ms/p95=254ms (не хуже 512), ~490 потоков вместо 552.
-      BILLING_CONCURRENCY: "450"
-    # 2026-08-13 1500 TPS push — Dockerfile's ENTRYPOINT hardcodes
-    # -Xms512m -Xmx1g; overridden here (no rebuild needed) since billing-service
-    # was already the heaviest JVM footprint (~500MB RSS) at 300 TPS.
-    entrypoint: ["java", "-Xms1g", "-Xmx3g", "-XX:StartFlightRecording=filename=/tmp/billing.jfr,duration=150s,dumponexit=true,settings=profile", "-jar", "/app/billing-service.jar"]
+      # 450 — калиброванный JFR+binary-search оптимум AMD-сессии (12 CPU/15GB,
+      # см. LATENCY_INVESTIGATION_1500TPS.md Часть 3): их же данные показали
+      # РЕЗКИЙ порог, не плавную деградацию (200 потоков -> p95=1811мс vs
+      # 450 -> p95=254мс) — то есть оптимум специфичен для числа ядер, его
+      # нельзя пропорционально пересчитать без повторной калибровки.
+      #
+      # 2026-08-18, эта машина (8 CPU/7.75GB): и billing, и delivery стояли
+      # на 450 одновременно -> p50=5758мс/p95=9690мс. A/B с изоляцией
+      # переменной (по одному сервису за раз, оба свежепересозданы —
+      # holdout мешает сравнению, если не рестартовать оба):
+      #   billing=128, delivery=128 (контроль)  -> p50=869мс  p95=2621мс
+      #   billing=128, delivery=450 (один)      -> p50=567мс  p95=1157мс (!)
+      #   billing=450, delivery=128 (один)      -> p50=778мс  p95=3778мс,
+      #     ПРИЧЁМ провал ушёл не в billing's own стадию (policy->billing
+      #     p95=734мс, нормально), а в НЕСВЯЗАННЫЙ routing->delivery хоп
+      #     (p95=2248мс) — т.е. один сервис с раздутым пулом потоков душит
+      #     ЧУЖОЙ, корректно настроенный сервис через общий CPU хоста
+      #     (Docker не изолирует CPU между контейнерами без cpus-лимитов).
+      # Вывод: порог — это не "concurrency каждого сервиса по отдельности
+      # <= X", а суммарный бюджет ОС-тредов ВСЕХ совместно размещённых
+      # сервисов относительно физических ядер хоста. 128/128 — safe default,
+      # уже проверенный на этой машине раньше в этой же сессии.
+      BILLING_CONCURRENCY: "128"
+    # 2026-08-13 1500 TPS push (AMD, 12 CPU/15GB) — Dockerfile's ENTRYPOINT
+    # hardcodes -Xms512m -Xmx1g; bumped to 3g there for 450-thread headroom.
+    # 2026-08-17: 3g contributed to Kafka's OOMKilled=true on THIS machine
+    # (8 CPU/7.75GB, shared with two other running projects) — right-sized
+    # to 1.5g, still above the image default for the 450-thread stack
+    # overhead, well short of starving the rest of the stack.
+    entrypoint: ["java", "-Xms1g", "-Xmx1500m", "-XX:StartFlightRecording=filename=/tmp/billing.jfr,duration=150s,dumponexit=true,settings=profile", "-jar", "/app/billing-service.jar"]
     # Реальная находка (нагрузочный прогон): Main.java теперь принудительно
     # System.exit(1) на фатальной ошибке consumer-цикла (иначе HealthServer
     # держит процесс "живым" не-daemon потоком с /healthz=200 у мёртвого
@@ -312,8 +347,16 @@ services:
       REDIS_RUNTIME_HOST: redis-runtime
       REDIS_RUNTIME_PORT: "6379"
       REDIS_RUNTIME_PASSWORD: mpp_local_dev
-      # 2026-08-13 1500 TPS push — та же калибровка, что у billing-service выше.
-      DELIVERY_CONCURRENCY: "450"
+      # 2026-08-18 A/B-протестировано на этой машине (8 CPU/7.75GB) —
+      # см. подробный комментарий у BILLING_CONCURRENCY выше. Изолированный
+      # тест (DELIVERY_CONCURRENCY=450 один, BILLING_CONCURRENCY=128) НЕ
+      # воспроизвёл провал сам по себе (p50=567мс) — вывод: проблема не
+      # "эта служба сама себя душит своим пулом", а совокупный бюджет ОС-
+      # тредов ВСЕХ совместно размещённых сервисов на общем пуле ядер хоста
+      # (Docker не изолирует CPU между контейнерами без явных cpus-лимитов).
+      # 128 — безопасное значение до AMD-тюнинга (12 CPU/15GB), под которое
+      # калибровка 450 не переносится 1:1.
+      DELIVERY_CONCURRENCY: "128"
     depends_on:
       kafka:
         condition: service_healthy
@@ -355,15 +398,20 @@ services:
       # оба лимита; в реальном деплое TPS_LIMIT должен отражать реальный
       # контракт оператора, не сниматься бездумно.
       TPS_LIMIT: "3000"
-      # 2026-08-13 1500 TPS push, седьмой раунд — тот же паттерн, что у
-      # billing/delivery: Executors.newFixedThreadPool(maxConcurrentSubmits, ...)
-      # в Main.java — 500 реальных ОС-потоков JVM (видно в docker stats как
-      # ~546 PID), не откалиброван при исходной находке (только TPS_LIMIT
-      # был поднят). Пробуем 300 — путь к оператору в этом стенде короче
-      # (один локальный gRPC + один локальный smsc-simulator, не 2 внешних
-      # Redis round-trip'а, как у billing), латентность на submit должна
-      # быть заметно ниже, чем то, что требовало 450 у billing/delivery.
-      MAX_CONCURRENT_SUBMITS: "300"
+      # 2026-08-18, эта машина (8 CPU/7.75GB): тот же паттерн ещё раз, но
+      # хуже — Executors.newFixedThreadPool(maxConcurrentSubmits) в Main.java
+      # создаёт 300 реальных ОС-потоков ("operator-smpp-pacer-worker",
+      # видно в /proc/1/task). Обнаружено при 100% SUBMIT_TIMEOUT на реальном
+      # SMPP submit (OperatorSubmitServer.dispatchOne) даже на тривиальной
+      # нагрузке (10 TPS) — /proc/net/tcp внутри контейнера показал ноль
+      # активных соединений к 172.30.19.206:8275, т.е. SMPP-сессия мертва, а
+      # SmppConnectionSupervisor её не поднимает. Правдоподобный механизм:
+      # 300 воркер-потоков вытесняют CPU у Netty I/O event loop, который
+      # держит соединение и обрабатывает reconnect — тот же класс проблемы,
+      # что и у BILLING_CONCURRENCY/DELIVERY_CONCURRENCY выше, только тут
+      # цена не "просто медленно", а полная потеря сессии. Возвращаем к 100
+      # (дефолт до AMD-тюнинга) для проверки.
+      MAX_CONCURRENT_SUBMITS: "100"
       SMPP_SYSTEM_ID: ${SMPP_SYSTEM_ID:-mpp_esme}
       SMPP_PASSWORD: ${SMPP_PASSWORD:-demo_password}
     depends_on:

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Создаёт все 29 топиков платформы в локальном docker-compose Kafka с теми
+# Создаёт все 31 топиков платформы в локальном docker-compose Kafka с теми
 # же partitions/cleanup.policy/retention.ms, что реально сгенерированы для
 # продакшена (infra/kafka/rendered/kafka-topics.yaml,
 # infra/kafka/generate_kafka_topics.py) — replication factor=1 (локально
@@ -56,6 +56,8 @@ create_topic stage.billing.dlq 3 delete 604800000
 create_topic stage.routing.dlq 3 delete 604800000
 create_topic stage.delivery.dlq 3 delete 604800000
 create_topic operator.dlr.dlq 3 delete 604800000
+create_topic notification.archived 3 delete 604800000
+create_topic pipeline.retry.triggers 26 delete 86400000
 create_topic message-state.changelog 26 delete ""
 create_topic scheduler.standard.state.changelog 3 delete ""
 create_topic scheduler.background.state.changelog 3 delete ""
