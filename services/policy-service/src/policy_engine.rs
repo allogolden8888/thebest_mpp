@@ -201,7 +201,7 @@ pub fn evaluate_policy(
     }
 
     // Требование 1 — match_template / resolve_unmatched_behavior
-    let category = match templates.find_match(&ctx.body) {
+    let category = match templates.find_match(&ctx.body, &ctx.sender_id) {
         Some(matched) => matched.category,
         None => match ruleset.unmatched_template_behavior {
             UnmatchedTemplateBehavior::Reject => {
@@ -261,6 +261,7 @@ mod tests {
             template_id: "tpl-contract-payment".to_string(),
             pattern: "%w shartnoma bo'yicha %d{1,6} so'm to'lovni bugun amalga oshiring".to_string(),
             category: "TRANSACTION".to_string(),
+            sender_id: None,
         }
     }
 
@@ -337,7 +338,7 @@ mod tests {
     #[test]
     fn outside_time_window() {
         let (ruleset, _, banwords, mut runtime) = fresh_env();
-        let ad_template = Template { template_id: "tpl-ads".into(), pattern: "%w reklama".into(), category: "ADVERTISING".into() };
+        let ad_template = Template { template_id: "tpl-ads".into(), pattern: "%w reklama".into(), category: "ADVERTISING".into(), sender_id: None };
         let templates_with_ads = CompiledRuleset::new(vec![real_template(), ad_template]);
         let advert_ctx = ctx("Click", "SuperSale reklama");
 

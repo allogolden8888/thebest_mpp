@@ -56,46 +56,41 @@ func entityTypeToProto(s string) commonv1.ConfigEntityType {
 // "active", и subscriber_consent revocation (status=archived) не мог
 // опубликоваться как archived НИКОГДА.
 //
-// Разрешено по-разному для двух entity_type без config_versions строки:
+// Оба entity_type без config_versions строки теперь разрешаются одинаково —
+// status читается из самого payload_json:
 //
 //   - policy_template: config_schemas/policy_template.schema.json требует
-//     поле "status" прямо в payload_json — читаем оттуда. Это настоящий
-//     фикс: policy_template archival теперь реально доходит до
-//     потребителей config.changes.
-//   - subscriber_consent: config_schemas/subscriber_consent.schema.json
-//     НЕ содержит поля status ("append/delete по PRIMARY KEY, не
-//     version-based" — этот payload физически не может закодировать
-//     revocation), и ничто в репозитории сегодня не создаёт для этого
-//     entity_type outbox-строку, сигнализирующую archived —
-//     configuration-service.ArchiveVersion (internal/store/store.go) не
-//     пишет в config_outbox вообще ни для одного entity_type, только
-//     CreateImmutableVersionAndOutbox — вне scope этого сервиса,
-//     подтверждено чтением кода, не только предположением ревьюера.
-//     Технически неразрешимо в config-event-publisher в одиночку без
-//     придумывания нового контракта, которым этот сервис не владеет — см.
-//     README "Что НЕ реализовано". "active" — единственное безопасное
-//     предположение, не изобретающее архитектуру, но unresolved=true
-//     теперь явно сообщает вызывающей стороне, что это предположение
-//     (было тихо, теперь громко логируется — см. cmd/.../main.go).
+//     поле "status" прямо в payload_json — читаем оттуда.
+//   - subscriber_consent: ДОБАВЛЕНО (Фаза 6 плана закрытия API-пробелов,
+//     compliance-api) — config_schemas/subscriber_consent.schema.json
+//     теперь тоже требует "status". Раньше это поле отсутствовало
+//     намеренно ("append/delete... payload физически не может закодировать
+//     revocation"), из-за чего revocation был структурно недостижим через
+//     весь пайплайн — это и был "новый контракт", которого раньше не было
+//     ни у одного вызывающего (ничто в репозитории не писало
+//     subscriber_consent outbox-строки в принципе); compliance-api —
+//     первый реальный производитель этих строк, и он этот контракт
+//     соблюдает.
 func ResolveStatus(e outbox.Entry) (status string, unresolved bool, err error) {
 	if e.Status != "" {
 		return e.Status, false, nil
 	}
 	switch e.EntityType {
-	case "policy_template":
+	case "policy_template", "subscriber_consent":
 		var p struct {
 			Status string `json:"status"`
 		}
 		if unmarshalErr := json.Unmarshal(e.Payload, &p); unmarshalErr != nil {
-			return "", false, fmt.Errorf("policy_template outbox id=%d: payload_json не парсится: %w", e.ID, unmarshalErr)
+			return "", false, fmt.Errorf("%s outbox id=%d: payload_json не парсится: %w", e.EntityType, e.ID, unmarshalErr)
 		}
 		if p.Status != "active" && p.Status != "archived" {
-			return "", false, fmt.Errorf("policy_template outbox id=%d: payload_json.status=%q — ожидали active/archived", e.ID, p.Status)
+			return "", false, fmt.Errorf("%s outbox id=%d: payload_json.status=%q — ожидали active/archived", e.EntityType, e.ID, p.Status)
 		}
 		return p.Status, false, nil
 	default:
-		// subscriber_consent (и любой будущий entity_type без
-		// config_versions-строки и без status в payload_json).
+		// Любой будущий entity_type без config_versions-строки и без
+		// status в payload_json — тот же fail-open-в-active-но-громко
+		// паттерн, что раньше применялся к обоим случаям выше.
 		return "active", true, nil
 	}
 }

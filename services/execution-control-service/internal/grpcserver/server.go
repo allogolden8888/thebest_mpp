@@ -118,6 +118,16 @@ func (s *Server) ApplyOverride(ctx context.Context, req *grpcv1.ApplyOverrideReq
 		expiresAt = &t
 	}
 
+	// incident_id=0 (proto3 default) означает "без инцидента" —
+	// incident.incidents.id это BIGSERIAL, начинается с 1, реальный id
+	// никогда не 0 (luminous-hugging-charm.md Ф7, incident-service). Только
+	// ненулевое значение прокидывается в аудит, иначе каждая обычная
+	// override-запись без инцидента получила бы incident_id=0 вместо NULL.
+	var incidentID *int64
+	if id := req.GetIncidentId(); id != 0 {
+		incidentID = &id
+	}
+
 	if s.audit != nil {
 		if _, _, err := s.audit.PersistOverrideAudit(ctx, store.AuditEntry{
 			Scope:         store.ScopeName(scope),
@@ -127,6 +137,7 @@ func (s *Server) ApplyOverride(ctx context.Context, req *grpcv1.ApplyOverrideReq
 			Reason:        req.GetReason(),
 			RequestedBy:   req.GetRequestedBy(),
 			ExpiresAt:     expiresAt,
+			IncidentID:    incidentID,
 		}); err != nil {
 			return nil, fmt.Errorf("persist_override_audit: %w", err)
 		}

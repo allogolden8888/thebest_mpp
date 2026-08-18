@@ -5,6 +5,9 @@ import (
 	"net/http"
 	"strconv"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	commonv1 "mpp/platformcontracts/common/v1"
 	grpcv1 "mpp/platformcontracts/grpc/v1"
 
@@ -190,4 +193,105 @@ func toConfigVersionResponse(v *grpcv1.ConfigVersionResponse) configVersionRespo
 func writeConfigVersionResponse(w http.ResponseWriter, v *grpcv1.ConfigVersionResponse) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(toConfigVersionResponse(v))
+}
+
+type validateVersionRequestBody struct {
+	EntityType  string          `json:"entity_type"`
+	PayloadJSON json.RawMessage `json:"payload_json"`
+}
+
+// handleConfigValidateVersion — luminous-hugging-charm.md Ф10, POST
+// /v1/config/versions/validate. Без gate прав — тот же класс, что
+// read-only browse маршрутов (не мутирует ничего, ConfigService.
+// ValidateVersion не пишет ни в config_versions, ни в config_outbox).
+// Invalid payload — НЕ 400: valid=false с errors в теле 200-ответа, тот
+// же принцип, что gRPC-уровне (см. package doc ValidateVersion в
+// internal_control.proto) — "покажи, что не так" ожидаемый исход
+// успешного запроса, не ошибка запроса как такового.
+func handleConfigValidateVersion(client grpcv1.ConfigServiceClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body validateVersionRequestBody
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "неверное тело запроса: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		entityType, ok := parseEntityType(body.EntityType)
+		if !ok {
+			http.Error(w, "неизвестный entity_type: "+body.EntityType, http.StatusBadRequest)
+			return
+		}
+
+		resp, err := client.ValidateVersion(r.Context(), &grpcv1.ValidateVersionRequest{
+			EntityType:  entityType,
+			PayloadJson: body.PayloadJSON,
+		})
+		if err != nil {
+			internalError(w, http.StatusBadGateway, "config_validate_version: gRPC-вызов Configuration Service не удался", err)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(struct {
+			Valid  bool     `json:"valid"`
+			Errors []string `json:"errors"`
+		}{Valid: resp.GetValid(), Errors: resp.GetErrors()})
+	}
+}
+
+// handleConfigDiffVersions — luminous-hugging-charm.md Ф10, GET
+// /v1/config/versions/diff?entity_type=&entity_id=&from=&to=. Возвращает
+// оба payload_json как есть — вычисление самого diff остаётся на стороне
+// backoffice-ui (см. package doc DiffVersions в internal_control.proto).
+func handleConfigDiffVersions(client grpcv1.ConfigServiceClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		entityType, ok := parseEntityType(q.Get("entity_type"))
+		if !ok {
+			http.Error(w, "неизвестный entity_type", http.StatusBadRequest)
+			return
+		}
+		entityID := q.Get("entity_id")
+		if entityID == "" {
+			http.Error(w, "требуется entity_id", http.StatusBadRequest)
+			return
+		}
+		fromVersion, err := strconv.ParseInt(q.Get("from"), 10, 64)
+		if err != nil || fromVersion <= 0 {
+			http.Error(w, "неверный from: ожидалось положительное целое", http.StatusBadRequest)
+			return
+		}
+		toVersion, err := strconv.ParseInt(q.Get("to"), 10, 64)
+		if err != nil || toVersion <= 0 {
+			http.Error(w, "неверный to: ожидалось положительное целое", http.StatusBadRequest)
+			return
+		}
+
+		resp, callErr := client.DiffVersions(r.Context(), &grpcv1.DiffVersionsRequest{
+			EntityType:  entityType,
+			EntityId:    entityID,
+			FromVersion: fromVersion,
+			ToVersion:   toVersion,
+		})
+		if callErr != nil {
+			if status.Code(callErr) == codes.NotFound {
+				http.Error(w, callErr.Error(), http.StatusNotFound)
+				return
+			}
+			internalError(w, http.StatusBadGateway, "config_diff_versions: gRPC-вызов Configuration Service не удался", callErr)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(struct {
+			FromVersion     int64           `json:"from_version"`
+			FromPayloadJSON json.RawMessage `json:"from_payload_json"`
+			ToVersion       int64           `json:"to_version"`
+			ToPayloadJSON   json.RawMessage `json:"to_payload_json"`
+		}{
+			FromVersion:     resp.GetFromVersion(),
+			FromPayloadJSON: resp.GetFromPayloadJson(),
+			ToVersion:       resp.GetToVersion(),
+			ToPayloadJSON:   resp.GetToPayloadJson(),
+		})
+	}
 }

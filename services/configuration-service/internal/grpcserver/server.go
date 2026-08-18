@@ -6,6 +6,7 @@ package grpcserver
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"google.golang.org/grpc/codes"
@@ -25,6 +26,7 @@ type Store interface {
 	GetActiveVersion(ctx context.Context, entityType validate.EntityType, entityID string) (store.ConfigVersion, error)
 	ListVersions(ctx context.Context, entityType validate.EntityType, entityID string, pageSize int32, pageToken string) ([]store.ConfigVersion, string, error)
 	ArchiveVersion(ctx context.Context, entityType validate.EntityType, entityID string, version int32) (store.ConfigVersion, error)
+	GetVersionByNumber(ctx context.Context, entityType validate.EntityType, entityID string, version int32) ([]byte, error)
 }
 
 // Validator — минимальный интерфейс от validate.Validator.
@@ -95,10 +97,11 @@ func entityTypeToProto(e validate.EntityType) commonv1.ConfigEntityType {
 
 func toResponse(v store.ConfigVersion) *grpcv1.ConfigVersionResponse {
 	resp := &grpcv1.ConfigVersionResponse{
-		EntityType: entityTypeToProto(v.EntityType),
-		EntityId:   v.EntityID,
-		Version:    int64(v.Version),
-		Status:     v.Status,
+		EntityType:  entityTypeToProto(v.EntityType),
+		EntityId:    v.EntityID,
+		Version:     int64(v.Version),
+		Status:      v.Status,
+		PayloadJson: v.Payload,
 	}
 	if !v.CreatedAt.IsZero() {
 		resp.CreatedAt = timestamppb.New(v.CreatedAt)
@@ -172,6 +175,67 @@ func (s *Server) ListVersions(ctx context.Context, req *grpcv1.ListVersionsReque
 		resp.Versions = append(resp.Versions, toResponse(v))
 	}
 	return resp, nil
+}
+
+// ValidateVersion — luminous-hugging-charm.md Фаза 10: тот же
+// s.validator.Validate, что CreateVersion вызывает первым шагом, но здесь
+// он единственный шаг — store не трогается вообще. Ошибка валидации не
+// маппится в gRPC error (в отличие от CreateVersion, где ValidationError
+// -> codes.InvalidArgument) — валидация здесь ОЖИДАЕМЫЙ, частый исход
+// ("покажи мне, что не так"), не исключительная ситуация вызывающего;
+// ValidateVersionResponse.valid=false с errors — нормальный успешный RPC
+// ответ, не gRPC-уровня ошибка.
+func (s *Server) ValidateVersion(_ context.Context, req *grpcv1.ValidateVersionRequest) (*grpcv1.ValidateVersionResponse, error) {
+	entityType := entityTypeFromProto(req.GetEntityType())
+	if entityType == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "неизвестный entity_type: %v", req.GetEntityType())
+	}
+
+	err := s.validator.Validate(entityType, req.GetPayloadJson())
+	if err == nil {
+		return &grpcv1.ValidateVersionResponse{Valid: true}, nil
+	}
+
+	var valErr *validate.ValidationError
+	if errors.As(err, &valErr) {
+		return &grpcv1.ValidateVersionResponse{Valid: false, Errors: valErr.Errors}, nil
+	}
+	// Ошибка не от Validator (например паника внутри jsonschema-библиотеки,
+	// обёрнутая по пути) — это уже реальная внутренняя проблема сервиса, не
+	// "невалидный payload", остаётся gRPC-уровня ошибкой.
+	return nil, status.Error(codes.Internal, err.Error())
+}
+
+// DiffVersions — luminous-hugging-charm.md Фаза 10: две независимые
+// выборки store.GetVersionByNumber, не транзакция (обе — read-only
+// immutable-версии, между двумя SELECT не может возникнуть
+// рассогласование, которое имело бы значение — config_versions строки
+// никогда не изменяются после вставки, только помечаются archived, что не
+// трогает сам payload).
+func (s *Server) DiffVersions(ctx context.Context, req *grpcv1.DiffVersionsRequest) (*grpcv1.DiffVersionsResponse, error) {
+	entityType := entityTypeFromProto(req.GetEntityType())
+	if entityType == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "неизвестный entity_type: %v", req.GetEntityType())
+	}
+	if req.GetFromVersion() <= 0 || req.GetToVersion() <= 0 {
+		return nil, status.Error(codes.InvalidArgument, "from_version и to_version обязаны быть положительными")
+	}
+
+	fromPayload, err := s.store.GetVersionByNumber(ctx, entityType, req.GetEntityId(), int32(req.GetFromVersion()))
+	if err != nil {
+		return nil, storeErrToStatus(fmt.Errorf("from_version=%d: %w", req.GetFromVersion(), err))
+	}
+	toPayload, err := s.store.GetVersionByNumber(ctx, entityType, req.GetEntityId(), int32(req.GetToVersion()))
+	if err != nil {
+		return nil, storeErrToStatus(fmt.Errorf("to_version=%d: %w", req.GetToVersion(), err))
+	}
+
+	return &grpcv1.DiffVersionsResponse{
+		FromVersion:     req.GetFromVersion(),
+		FromPayloadJson: fromPayload,
+		ToVersion:       req.GetToVersion(),
+		ToPayloadJson:   toPayload,
+	}, nil
 }
 
 func (s *Server) ArchiveVersion(ctx context.Context, req *grpcv1.ArchiveVersionRequest) (*grpcv1.ConfigVersionResponse, error) {

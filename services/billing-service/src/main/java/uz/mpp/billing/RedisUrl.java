@@ -27,13 +27,33 @@ public final class RedisUrl {
     }
 
     static String buildBillingUrl(Function<String, String> env) {
-        String override = env.apply("REDIS_BILLING_URL");
+        return build(env, "REDIS_BILLING_URL", "REDIS_BILLING_HOST", "REDIS_BILLING_PORT", "REDIS_BILLING_PASSWORD", "redis-billing.mpp.svc");
+    }
+
+    /**
+     * Configuration Redis (третий Redis-инстанс платформы, {@code redis-configuration}
+     * в {@code infra/docker/docker-compose.yml}) — до Фазы 5a (multi-tenancy в
+     * Billing Service) billing-service к нему вообще не подключался, только к
+     * Billing Redis. Читает {@code config:current:billing_tariff:{partner_id}}/
+     * {@code config:version:billing_tariff:{partner_id}:{version}} — те же ключи,
+     * что уже пишет {@code config-cache-projector} (см. {@link TariffCache}).
+     */
+    public static String buildConfigurationUrl() {
+        return buildConfigurationUrl(System::getenv);
+    }
+
+    static String buildConfigurationUrl(Function<String, String> env) {
+        return build(env, "REDIS_CONFIGURATION_URL", "REDIS_CONFIGURATION_HOST", "REDIS_CONFIGURATION_PORT", "REDIS_CONFIGURATION_PASSWORD", "redis-configuration.mpp.svc");
+    }
+
+    private static String build(Function<String, String> env, String urlVar, String hostVar, String portVar, String passwordVar, String defaultHost) {
+        String override = env.apply(urlVar);
         if (override != null && !override.isEmpty()) {
             return override;
         }
-        String host = orDefault(env.apply("REDIS_BILLING_HOST"), "redis-billing.mpp.svc");
-        String port = orDefault(env.apply("REDIS_BILLING_PORT"), "6379");
-        String password = env.apply("REDIS_BILLING_PASSWORD");
+        String host = orDefault(env.apply(hostVar), defaultHost);
+        String port = orDefault(env.apply(portVar), "6379");
+        String password = env.apply(passwordVar);
         if (password == null || password.isEmpty()) {
             return "redis://" + host + ":" + port + "/0";
         }

@@ -101,7 +101,10 @@ mod tests {
         let snapshot = PartnerSnapshot::from_partners(vec![real_partner()]);
         let (partner, app) = snapshot.application("click_uz", "click_uz_main").expect("должно найтись");
         assert_eq!(partner.partner_id, "click_uz");
-        assert_eq!(app.rate_limit_tps, 300);
+        // 2000, не 300 — фикстура поднята веткой main (1500 TPS load-test push)
+        // для нагрузочного тестирования, слияние веток сохранило это значение
+        // как актуальное (subagent-1 эту строку вообще не трогал).
+        assert_eq!(app.rate_limit_tps, 2000);
     }
 
     #[test]

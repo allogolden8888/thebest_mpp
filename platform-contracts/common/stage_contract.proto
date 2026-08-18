@@ -38,6 +38,15 @@ message StageExecuteCommand {
   // W3C Trace Context.
   string traceparent = 13;
   StagePayloadRef payload_ref = 14;
+  // Фаза 11 плана закрытия API-пробелов: dry-run режим. Общее поле
+  // верхнего уровня, не per-extension (как BillingExtension.partner_id в
+  // Фазе 5a) — нужно ВСЕМ стадиям одинаково (Billing/Delivery меняют
+  // поведение, остальные просто эхом переносят в свой StageCompletedEvent),
+  // размножать его по каждому *Extension было бы избыточно. Прокинуто
+  // Pipeline Engine из IncomingMessage.sandbox (message_events.proto),
+  // накоплено в ExecutionState с handle_incoming, присваивается один раз
+  // при сборке команды для любой стадии.
+  bool sandbox = 15;
 
   oneof stage_extension {
     DestinationResolutionExtension destination_resolution = 20;
@@ -73,6 +82,17 @@ message BillingExtension {
   // по category, не принимает решение о том, продолжать ли pipeline —
   // это решает граф Pipeline Engine (см. открытый вопрос ниже).
   string category = 3;
+  // Найдено при закрытии multi-tenancy-пробела в Billing Service (Фаза 5a
+  // плана закрытия API-пробелов): раньше Billing работал с одним
+  // хардкоженным account_id и одним глобальным тарифом на весь сервис —
+  // partner_id, нужный для per-partner account/tariff resolve, нигде не
+  // доезжал до этой стадии. Заполняется Pipeline Engine из
+  // IncomingMessage.partner_id (тот же принцип, что и
+  // DeliveryExtension.resolved_operator_id = 4 — накоплено в
+  // ExecutionState с самого начала пайплайна, не перечитывается из msgctx:
+  // Billing намеренно не читает Runtime Redis per-message ради throughput
+  // на пике 20 000 msg/s, см. capacity_model.md).
+  string partner_id = 4;
 }
 
 message RoutingExtension {
@@ -122,6 +142,13 @@ message StageCompletedEvent {
   google.protobuf.Timestamp retry_after = 9;
   string traceparent = 10;
   google.protobuf.Timestamp completed_at = 11;
+  // Фаза 11 — эхо StageExecuteCommand.sandbox (см. doc-комментарий там):
+  // каждый сервис, строящий это событие, копирует значение из команды,
+  // которую он обрабатывал, не пересчитывает заново. Нужно downstream
+  // (message-state-resolver → messaging.message_read_model.sandbox), чтобы
+  // sandbox-сообщения были видимо отличимы от настоящего трафика в
+  // отчётах/ClickHouse, а не просто "тихо не списались".
+  bool sandbox = 12;
 
   oneof stage_result {
     DestinationResolutionResult destination_resolution = 20;

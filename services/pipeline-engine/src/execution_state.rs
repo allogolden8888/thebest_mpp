@@ -17,6 +17,21 @@ pub struct ExecutionState {
     pub attempt: i32,
     pub config_versions: HashMap<String, i64>,
 
+    /// Накоплено с `handle_incoming` (`IncomingMessage.partner_id`) —
+    /// нужен `BillingExtension.partner_id` (Фаза 5a плана закрытия
+    /// API-пробелов: multi-tenancy в Billing Service). Тот же принцип, что
+    /// `resolved_operator_id`/`route_id` — считается один раз, копится в
+    /// состоянии, а не перечитывается стадией, которой понадобился.
+    pub partner_id: String,
+
+    /// Накоплено с `handle_incoming` (`IncomingMessage.sandbox`) — Фаза 11
+    /// плана закрытия API-пробелов (dry-run отправка). Копируется один раз
+    /// на верхний уровень `StageExecuteCommand.sandbox` при сборке команды
+    /// для ЛЮБОЙ стадии (build_stage_execute.rs), не размножается по
+    /// каждому `*Extension` — в отличие от `partner_id`, эта величина не
+    /// стадие-специфична.
+    pub sandbox: bool,
+
     /// `stage_execution_id`, реально диспетчеризованный для `current_node_id` —
     /// найдено кодревью: без этого поля `handle_stage_completed` не может
     /// отличить событие, относящееся к текущей попытке, от устаревшего/
@@ -75,6 +90,8 @@ impl ExecutionState {
         segment_count: i32,
         priority_flag: i32,
         message_ttl_ms: i64,
+        partner_id: String,
+        sandbox: bool,
     ) -> Self {
         Self {
             message_id,
@@ -82,6 +99,8 @@ impl ExecutionState {
             current_node_id: pipeline.entry_node_id.clone(),
             attempt: 1,
             config_versions: HashMap::new(),
+            partner_id,
+            sandbox,
             awaiting_stage_execution_id: None,
             resolved_operator_id: None,
             category: None,
@@ -287,6 +306,7 @@ mod tests {
             retry_after: None,
             traceparent: "tp1".into(),
             completed_at: None,
+            sandbox: false,
             stage_result: result,
         }
     }
@@ -307,7 +327,7 @@ mod tests {
     #[test]
     fn full_happy_path_walks_entire_real_graph_to_terminal() {
         let pipeline = real_pipeline();
-        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 2, 2, i64::MAX);
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 2, 2, i64::MAX, "acme".into(), false);
         assert_eq!(state.current_node_id, "n1_destination_resolution");
 
         // DestinationResolution SUCCEEDED -> Policy
@@ -351,7 +371,7 @@ mod tests {
     #[test]
     fn policy_rejected_routes_to_billing_blocked_node_then_terminates() {
         let pipeline = real_pipeline();
-        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX);
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "acme".into(), false);
         dispatch(&mut state, "se1");
         handle_stage_completed(&mut state, &pipeline, &completed("se1", StageName::DestinationResolution, Outcome::Succeeded,
             Some(StageResult::DestinationResolution(DestinationResolutionResult { resolved_operator_id: "beeline".into() }))), 0);
@@ -376,7 +396,7 @@ mod tests {
             }
         }
 
-        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX);
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "acme".into(), false);
         state.current_node_id = "n_billing_blocked".to_string();
         state.category = Some("BLOCKED".to_string());
         dispatch(&mut state, "se-x");
@@ -390,7 +410,7 @@ mod tests {
     #[test]
     fn failed_outcome_with_no_configured_next_terminates_not_panics() {
         let pipeline = real_pipeline();
-        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX);
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "acme".into(), false);
         dispatch(&mut state, "se1");
         let d = handle_stage_completed(&mut state, &pipeline, &completed("se1", StageName::DestinationResolution, Outcome::Failed, None), 0);
         assert_eq!(d, Decision::Terminal);
@@ -404,7 +424,7 @@ mod tests {
         // DestinationResolution с тем же message_id обязано быть проигнорировано,
         // не применено повторно (иначе пайплайн откатился/продвинулся бы мимо Policy).
         let pipeline = real_pipeline();
-        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX);
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "acme".into(), false);
         dispatch(&mut state, "se1");
         handle_stage_completed(&mut state, &pipeline, &completed("se1", StageName::DestinationResolution, Outcome::Succeeded,
             Some(StageResult::DestinationResolution(DestinationResolutionResult { resolved_operator_id: "beeline".into() }))), 0);
@@ -427,7 +447,7 @@ mod tests {
         // только имени стадии) — например, повторная попытка с новым attempt
         // прислала команду, а событие относится к СТАРОЙ, уже неактуальной попытке.
         let pipeline = real_pipeline();
-        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX);
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "acme".into(), false);
         dispatch(&mut state, "se1-attempt2"); // реально ждём вторую попытку
 
         let stale_attempt1 = completed("se1-attempt1", StageName::DestinationResolution, Outcome::Succeeded,
@@ -446,7 +466,7 @@ mod tests {
     #[test]
     fn delivery_retryable_failure_with_ttl_remaining_retries_in_place() {
         let pipeline = real_pipeline();
-        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX);
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "acme".into(), false);
         state.current_node_id = "n5_delivery".to_string();
         state.attempt = 1;
         dispatch(&mut state, "se5");
@@ -463,7 +483,7 @@ mod tests {
     #[test]
     fn delivery_retryable_failure_with_ttl_expired_routes_like_retry_exhausted() {
         let pipeline = real_pipeline();
-        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, 1_700_000_000_000); // TTL уже в прошлом
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, 1_700_000_000_000, "acme".into(), false); // TTL уже в прошлом
         state.current_node_id = "n5_delivery".to_string();
         dispatch(&mut state, "se5");
 
@@ -482,7 +502,7 @@ mod tests {
         // isRetryable) не должен ретраиться до TTL — тот же путь, что и раньше
         // (FAILED -> null в графе -> Terminal), TTL здесь вообще не смотрится.
         let pipeline = real_pipeline();
-        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX); // TTL с запасом
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "acme".into(), false); // TTL с запасом
         state.current_node_id = "n5_delivery".to_string();
         dispatch(&mut state, "se5");
 
@@ -497,7 +517,7 @@ mod tests {
         // retry-until-expiry — эта механика намеренно узко ограничена DELIVERY
         // (см. resolve_next_stage: "только DELIVERY, только транзиентная...").
         let pipeline = real_pipeline();
-        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX);
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "acme".into(), false);
         dispatch(&mut state, "se1");
 
         let event = StageCompletedEvent { retryable: true, ..completed("se1", StageName::DestinationResolution, Outcome::Failed, None) };

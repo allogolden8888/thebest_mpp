@@ -15,6 +15,10 @@ const router = createRouter({
     { path: "/dlq", name: "dlq", component: () => import("../views/DlqBrowseView.vue") },
     { path: "/reconciliation", name: "reconciliation", component: () => import("../views/ReconciliationView.vue") },
     { path: "/reports", name: "reports", component: () => import("../views/ReportsView.vue") },
+    { path: "/access-control", name: "access-control", component: () => import("../views/AccessControlView.vue") },
+    { path: "/audit", name: "audit", component: () => import("../views/AuditLogView.vue") },
+    { path: "/incidents", name: "incidents", component: () => import("../views/IncidentsView.vue") },
+    { path: "/ops-health", name: "ops-health", component: () => import("../views/OpsHealthView.vue") },
   ],
 });
 

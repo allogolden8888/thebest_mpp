@@ -136,6 +136,31 @@ SERVICES = [
     Service("execution-control-service", "go", "stateless", None,
             "не в отдельной таблице capacity_model.md — пул 'Мелкие Go control-plane' (capacity_model.md:12,113)",
             internal_grpc_port=9000),
+    Service("iam-service", "go", "stateless", None,
+            "не в отдельной таблице capacity_model.md — сервис появился уже после того, как этот документ "
+            "писался, но по форме (маленький Go control-plane сервис, синхронный gRPC, без внешнего inbound) "
+            "тот же пул 'Мелкие Go control-plane' (capacity_model.md:12,113), что execution-control-service/"
+            "configuration-service", internal_grpc_port=9000),
+    Service("credential-issuer-service", "go", "stateless", None,
+            "не в отдельной таблице capacity_model.md — сервис появился уже после того, как этот документ "
+            "писался (luminous-hugging-charm.md Фаза 1), но по форме (маленький Go control-plane сервис, "
+            "синхронный gRPC, без внешнего inbound) тот же пул 'Мелкие Go control-plane' "
+            "(capacity_model.md:12,113), что execution-control-service/iam-service/configuration-service",
+            internal_grpc_port=9000),
+    Service("incident-service", "go", "stateless", None,
+            "не в отдельной таблице capacity_model.md — сервис появился уже после того, как этот документ "
+            "писался (luminous-hugging-charm.md Фаза 7), но по форме (маленький Go control-plane сервис, "
+            "синхронный gRPC, без внешнего inbound) тот же пул 'Мелкие Go control-plane' "
+            "(capacity_model.md:12,113), что execution-control-service/iam-service/configuration-service",
+            internal_grpc_port=9000),
+    Service("ops-visibility-service", "go", "stateless", None,
+            "не в отдельной таблице capacity_model.md — сервис появился уже после того, как этот документ "
+            "писался (luminous-hugging-charm.md Фаза 8), тот же пул 'Мелкие Go control-plane' "
+            "(capacity_model.md:12,113). Без internal_grpc_port и без external_port — у этого сервиса "
+            "нет отдельного бизнес-порта вообще: GET /snapshot отдаётся с того же HEALTH_PORT=9090, что "
+            "и /healthz/readyz/metrics (ops-visibility-service/README.md — решение того шага, не редизайн "
+            "здесь), не через отдельный gRPC/HTTP-сервер, как у остальных сервисов этого пула.",
+            kafka_consumer=False),
     Service("configuration-service", "go", "stateless", None,
             "пул 'Мелкие Go control-plane' (capacity_model.md:12,113)", internal_grpc_port=9000),
     Service("config-event-publisher", "go", "stateless", None,
@@ -210,6 +235,38 @@ SECRET_DEPENDENCIES: dict[str, list[str]] = {
     # Redis. Убрано как стороннее/скопированное значение, не додуманное
     # заново — реального использования Redis в этом сервисе нет.
     "execution-control-service": ["postgresql", "redis-configuration"],
+    # services/iam-service/cmd/iam-service/main.go: только pgxpool.Pool
+    # (buildPostgresDSN -> POSTGRES_*) — нет Redis-клиента, нет Kafka
+    # consumer/producer, нет ClickHouse; CheckPermission синхронно идёт в
+    # Postgres на каждый вызов (явно, без кеша — см. README.md сервиса).
+    "iam-service": ["postgresql"],
+    # services/credential-issuer-service/cmd/credential-issuer-service/main.go:
+    # только pgxpool.Pool (buildPostgresDSN -> POSTGRES_*) — нет Redis/Kafka/
+    # ClickHouse. Сознательно НЕТ записи для Vault: этот сервис ходит в
+    # Vault по Kubernetes auth (ServiceAccount JWT обменивается на Vault
+    # token — infra/terraform/vault-secrets.tf
+    # vault_kubernetes_auth_backend_role.credential_issuer_service), не по
+    # статическому токену из k8s Secret — весь смысл этого механизма в том,
+    # что на стороне Vault-клиента нет вообще никакого статического секрета.
+    # VAULT_ADDR — не секрет (см. infra/secrets/generate_external_secrets.py
+    # VAULT_ADDR), и main.go уже дефолтит его на то же самое значение
+    # (http://vault.vault-system.svc:8200), поэтому ничего дополнительно
+    # инжектить здесь не нужно.
+    "credential-issuer-service": ["postgresql"],
+    # services/incident-service/cmd/incident-service/main.go: только
+    # pgxpool.Pool (buildPostgresDSN -> POSTGRES_*) — своя схема incident.*
+    # (migrations/V028__incident.sql), никакого Redis/Kafka/ClickHouse.
+    "incident-service": ["postgresql"],
+    # services/ops-visibility-service/cmd/ops-visibility-service/main.go:
+    # REDIS_RUNTIME_* (снапшот-хранилище, короткий TTL, см. README.md) +
+    # KAFKA_BOOTSTRAP_SERVERS — но Kafka bootstrap-адрес нигде в этом
+    # кодбейзе не идёт через SECRET_DEPENDENCIES (не секрет, обычный plain
+    # env с дефолтом kafka-bootstrap.mpp.svc:9092 — та же конвенция, что
+    # execution-control-service/config-cache-projector и все остальные
+    # Kafka-потребители ниже, ни один из них не несёт запись "kafka" в
+    # этой таблице). Никакого Postgres — эта фаза явно не заводит таблицу
+    # трендов (ops.health_snapshots отложена планом).
+    "ops-visibility-service": ["redis-runtime"],
     "configuration-service": ["postgresql"],
     "config-cache-projector": ["redis-configuration"],
     "consent-cache-projector": ["redis-runtime"],
@@ -330,8 +387,31 @@ def _container(svc: Service) -> dict:
     return container
 
 
+def build_service_account(svc: Service) -> dict:
+    """До этого изменения этот генератор вообще не создавал ServiceAccount —
+    каждый под неявно работал под `default` ServiceAccount namespace `mpp`.
+    Это молча ломало Vault Kubernetes auth (infra/terraform/vault-secrets.tf):
+    `vault_kubernetes_auth_backend_role.credential_issuer_service` и
+    `.partner_credential_readers` биндятся на `bound_service_account_names`
+    (`credential-issuer-service`, `partner-rest-receiver`,
+    `partner-smpp-gateway`), которые без этой функции никогда не существовали
+    бы и ни один под никогда бы их не предъявил. Заведено для КАЖДОГО
+    сервиса (не только этих трёх) — единообразно и с наименьшими
+    привилегиями: остальные сервисы сегодня не нуждаются в отдельном Vault
+    role, но у каждого всё равно своя identity, а не общий `default`, и
+    ничего не нужно будет специально заводить, если такая потребность
+    появится позже. Имя ServiceAccount совпадает с именем сервиса байт-в-
+    байт — это ровно то, что `bound_service_account_names` в Terraform
+    ожидает увидеть."""
+    return {
+        "apiVersion": "v1", "kind": "ServiceAccount",
+        "metadata": _metadata(svc),
+    }
+
+
 def _pod_template(svc: Service) -> dict:
     spec = {
+        "serviceAccountName": svc.name,
         "containers": [_container(svc)],
         "terminationGracePeriodSeconds": 60 if svc.workload_class != "kafka-streams-statefulset" else 120,
     }
@@ -499,7 +579,7 @@ def build_partner_config_configmap() -> dict:
 
 def render_service(svc: Service) -> list[dict]:
     replicas = replicas_for(svc)
-    docs = [build_workload(svc, replicas), build_pdb(svc, replicas)]
+    docs = [build_service_account(svc), build_workload(svc, replicas), build_pdb(svc, replicas)]
     if svc.workload_class in ("sticky-statefulset", "kafka-streams-statefulset"):
         docs.append(build_headless_service(svc))
     if svc.external_port:

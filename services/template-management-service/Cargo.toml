@@ -1,0 +1,53 @@
+[package]
+name = "template-management-service"
+version = "0.1.0"
+edition = "2024"
+# Фаза 4 плана API-пробелов (/Users/Alisher/.claude/plans/luminous-hugging-charm.md) —
+# sender-aware управление policy_template: листинг/поиск, preview-матчинг
+# против примера текста, массовый импорт/экспорт. Rust — тот же язык, что
+# policy-service, потому что флагманская фича (preview) переиспользует ту
+# же логику матчинга/селективности, что уже в policy-service/template_matching.rs.
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+prost = "0.13"
+prost-types = "0.13"
+# Проектор config.changes -> policy.policy_template (см. src/projector.rs —
+# найдено при реализации: эта таблица существовала, но ничего в неё не
+# писало; без живой проекции list/search и preview не имели бы смысла).
+rdkafka = { version = "0.36", features = ["tokio"] }
+# Первый Rust-сервис в этом кодбейзе, читающий/пишущий Postgres напрямую
+# (остальные Rust-сервисы — Kafka stream processors с Redis, не
+# Postgres-читалки) — sqlx выбран за низкий boilerplate для CRUD/поиска;
+# runtime-запросы (без query! макросов), чтобы не требовать живую БД на
+# этапе сборки.
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+# Preview-эндпоинт — тот же алгоритм, что policy-service/src/template_matching.rs
+# (Aho-Corasick префильтр + ручная проверка плейсхолдеров); переиспользуется
+# как отдельный модуль в этом сервисе, а не общий crate — в кодбейзе нет
+# конвенции shared-библиотек между сервисами (каждый — независимый Cargo-проект).
+aho-corasick = "1.1"
+# Bulk import/export — CSV как формат обмена (простой, читаемый людьми,
+# стандартный выбор для табличных импортов такого рода).
+csv = "1"
+# Bulk import пишет напрямую в config.config_outbox, минуя валидацию
+# configuration-service (см. src/bulk.rs) — это единственный validation gate
+# на этом пути записи, поэтому валидация идёт против настоящего
+# policy_template.schema.json, а не ручного дублирования его правил.
+# default-features=false — убирает resolve-http/resolve-file (reqwest/TLS),
+# $ref на внешние URL не нужен для чисто локальной in-memory валидации.
+jsonschema = { version = "0.49", default-features = false }
+
+[build-dependencies]
+prost-build = "0.13"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tower = "0.5"

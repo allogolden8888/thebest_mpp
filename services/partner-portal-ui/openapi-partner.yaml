@@ -1,0 +1,339 @@
+openapi: 3.0.3
+info:
+  title: Partner Self-Service API
+  version: "1.0.0"
+  description: >
+    Ручно составленная спецификация, отражающая реальные маршруты
+    services/partner-self-service-api/internal/httpapi (Фаза 3 плана,
+    /Users/Alisher/.claude/plans/luminous-hugging-charm.md). У сервиса нет
+    собственного генератора OpenAPI (Go chi не генерирует спецификацию
+    автоматически) — этот файл поддерживается вручную и должен обновляться
+    при изменении маршрутов сервиса. Partner Portal UI генерирует
+    TypeScript-типы из этого файла (`npm run generate:api`, openapi-typescript).
+servers:
+  - url: /v1/self-service
+security:
+  - bearerAuth: []
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    ApplicationAuth:
+      type: object
+      required: [type, credential_ref]
+      properties:
+        type: { type: string, enum: [API_KEY, MTLS, SMPP_BIND] }
+        credential_ref: { type: string }
+    Application:
+      type: object
+      required: [application_id, display_name, auth, rate_limit_tps, allowed_channels]
+      properties:
+        application_id: { type: string }
+        display_name: { type: string }
+        auth: { $ref: "#/components/schemas/ApplicationAuth" }
+        ip_allowlist:
+          type: array
+          items: { type: string }
+        rate_limit_tps: { type: integer }
+        allowed_channels:
+          type: array
+          items: { type: string, enum: [SMS, EMAIL, PUSH] }
+        notification_callback_url: { type: string }
+    CreateApplicationRequest:
+      type: object
+      required: [application_id, display_name, auth, rate_limit_tps, allowed_channels]
+      properties:
+        application_id: { type: string }
+        display_name: { type: string }
+        auth: { $ref: "#/components/schemas/ApplicationAuth" }
+        ip_allowlist:
+          type: array
+          items: { type: string }
+        rate_limit_tps: { type: integer }
+        allowed_channels:
+          type: array
+          items: { type: string, enum: [SMS, EMAIL, PUSH] }
+    UpdateApplicationRequest:
+      type: object
+      required: [display_name, rate_limit_tps, allowed_channels]
+      properties:
+        display_name: { type: string }
+        ip_allowlist:
+          type: array
+          items: { type: string }
+        rate_limit_tps: { type: integer }
+        allowed_channels:
+          type: array
+          items: { type: string, enum: [SMS, EMAIL, PUSH] }
+        notification_callback_url: { type: string }
+    Sender:
+      type: object
+      required: [sender_id, type, status]
+      properties:
+        sender_id: { type: string }
+        type: { type: string, enum: [ALPHANAME, SHORT_NUMBER] }
+        status: { type: string, enum: [active, archived] }
+    CreateSenderRequest:
+      type: object
+      required: [sender_id, type]
+      properties:
+        sender_id: { type: string }
+        type: { type: string, enum: [ALPHANAME, SHORT_NUMBER] }
+    UpdateSenderStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [active, archived] }
+    IssuedSecretSummary:
+      type: object
+      required: [id, partner_id, application_id, credential_ref, secret_version, status]
+      properties:
+        id: { type: integer, format: int64 }
+        partner_id: { type: string }
+        application_id: { type: string }
+        credential_ref: { type: string }
+        secret_version: { type: integer }
+        status: { type: string, enum: [active, revoked] }
+        issued_at: { type: string, format: date-time }
+        issued_by: { type: string }
+    RotateCredentialResponse:
+      type: object
+      required: [credential_ref, secret_version, plaintext_secret]
+      properties:
+        credential_ref: { type: string }
+        secret_version: { type: integer }
+        plaintext_secret:
+          type: string
+          description: Show-once — присутствует ТОЛЬКО в ответе на этот вызов, нигде больше не сохраняется/не показывается повторно.
+        issued_at: { type: string, format: date-time }
+    WebhookConfig:
+      type: object
+      required: [application_id, notification_callback_url]
+      properties:
+        application_id: { type: string }
+        notification_callback_url: { type: string }
+    UpdateWebhookRequest:
+      type: object
+      required: [notification_callback_url]
+      properties:
+        notification_callback_url: { type: string }
+    WebhookTestResult:
+      type: object
+      required: [http_status, latency_ms]
+      properties:
+        http_status: { type: integer }
+        latency_ms: { type: integer, format: int64 }
+    Template:
+      type: object
+      required: [template_id, partner_id, channel, category, pattern, version, status, created_at, updated_at]
+      properties:
+        template_id: { type: string }
+        partner_id: { type: string }
+        operator_id: { type: string, nullable: true }
+        sender_id: { type: string, nullable: true }
+        channel: { type: string }
+        category: { type: string }
+        pattern: { type: string }
+        version: { type: integer }
+        status: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    TemplatesListResponse:
+      type: object
+      required: [templates, limit, offset]
+      properties:
+        templates:
+          type: array
+          items: { $ref: "#/components/schemas/Template" }
+        limit: { type: integer, format: int64 }
+        offset: { type: integer, format: int64 }
+paths:
+  /applications:
+    get:
+      operationId: listApplications
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Application" }
+    post:
+      operationId: createApplication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateApplicationRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Application" }
+  /applications/{application_id}:
+    put:
+      operationId: updateApplication
+      parameters:
+        - name: application_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateApplicationRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Application" }
+  /senders:
+    get:
+      operationId: listSenders
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Sender" }
+    post:
+      operationId: createSender
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateSenderRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Sender" }
+  /senders/{sender_id}:
+    patch:
+      operationId: updateSenderStatus
+      parameters:
+        - name: sender_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateSenderStatusRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Sender" }
+  /credentials:
+    get:
+      operationId: listCredentials
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/IssuedSecretSummary" }
+  /applications/{application_id}/credentials/rotate:
+    post:
+      operationId: rotateCredential
+      parameters:
+        - name: application_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RotateCredentialResponse" }
+  /applications/{application_id}/webhook:
+    get:
+      operationId: getWebhook
+      parameters:
+        - name: application_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookConfig" }
+    put:
+      operationId: updateWebhook
+      parameters:
+        - name: application_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateWebhookRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookConfig" }
+  /applications/{application_id}/webhook/test:
+    post:
+      operationId: testWebhook
+      parameters:
+        - name: application_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookTestResult" }
+  /templates:
+    get:
+      operationId: listTemplates
+      description: >
+        Аутентифицированный прокси в template-management-service — partner_id
+        всегда берётся из JWT на бэкенде, query-параметр partner_id здесь
+        не имеет смысла отправлять (будет проигнорирован).
+      parameters:
+        - name: sender_id
+          in: query
+          schema: { type: string }
+        - name: category
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer }
+        - name: offset
+          in: query
+          schema: { type: integer }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplatesListResponse" }

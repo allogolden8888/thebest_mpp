@@ -18,6 +18,46 @@ service ConfigService {
   rpc GetActiveVersion(GetActiveVersionRequest) returns (ConfigVersionResponse);
   rpc ListVersions(ListVersionsRequest) returns (ListVersionsResponse);
   rpc ArchiveVersion(ArchiveVersionRequest) returns (ConfigVersionResponse);
+  // luminous-hugging-charm.md Фаза 10 — validate_config_change БЕЗ
+  // create_immutable_version/write_config_and_outbox: тот же Validator,
+  // что CreateVersion уже вызывает первым шагом
+  // (internal/validate/validate.go), здесь он единственный шаг — ничего не
+  // пишется, ни в config_versions, ни в config_outbox. Позволяет
+  // backoffice-ui показать ошибки схемы/семантики ДО публикации, не после.
+  rpc ValidateVersion(ValidateVersionRequest) returns (ValidateVersionResponse);
+  // Возвращает payload_json двух конкретных версий одной сущности как
+  // есть — вычисление самого diff (построчного/структурного) сознательно
+  // оставлено вызывающей стороне (backoffice-ui): этот сервис владеет
+  // storage/validation, не рендерингом diff, и не должен обрастать
+  // диффинг-библиотекой ради одного экрана другого сервиса.
+  rpc DiffVersions(DiffVersionsRequest) returns (DiffVersionsResponse);
+}
+
+message ValidateVersionRequest {
+  mpp.common.v1.ConfigEntityType entity_type = 1;
+  bytes payload_json = 2;
+}
+
+message ValidateVersionResponse {
+  bool valid = 1;
+  // Пусто, если valid = true. Та же форма сообщений, что
+  // validate.ValidationError.Errors — "keyword_location: message" на
+  // структурные ошибки JSON Schema, голый текст на семантические.
+  repeated string errors = 2;
+}
+
+message DiffVersionsRequest {
+  mpp.common.v1.ConfigEntityType entity_type = 1;
+  string entity_id = 2;
+  int64 from_version = 3;
+  int64 to_version = 4;
+}
+
+message DiffVersionsResponse {
+  int64 from_version = 1;
+  bytes from_payload_json = 2;
+  int64 to_version = 3;
+  bytes to_payload_json = 4;
 }
 
 message CreateVersionRequest {
@@ -33,6 +73,17 @@ message ConfigVersionResponse {
   int64 version = 3;
   string status = 4;
   google.protobuf.Timestamp created_at = 5;
+  // Найдено при реализации partner-self-service-api (Фаза 3 плана): до
+  // этого поля ни одна RPC ConfigService не отдавала обратно содержимое
+  // документа — GetActiveVersion возвращал только метаданные, что делает
+  // read-modify-write (например, добавление одного sender'а в applications[]
+  // партнёра без потери остальных) невозможным ни для одного клиента этого
+  // сервиса. Заполняется в GetActiveVersion/ListVersions (из
+  // config.config_versions.payload) и в CreateVersion (эхо принятого
+  // payload_json) — не заполняется, где ещё не поддержано конкретным
+  // сервисом (proto3 bytes по умолчанию пуст, отличимо от "нет данных" по
+  // контексту вызова, не требует отдельного presence-флага).
+  bytes payload_json = 6;
 }
 
 message GetActiveVersionRequest {
@@ -76,6 +127,14 @@ message ApplyOverrideRequest {
   string requested_by = 6;
   // Пусто — override действует до явного ClearOverride.
   google.protobuf.Timestamp expires_at = 7;
+  // Опционально линкует этот override к инциденту (luminous-hugging-charm.md
+  // Ф7, incident-service, incident.incidents.id — migrations/V028__incident.sql).
+  // 0 (proto3 default) = "без инцидента" — безопасно, incident.incidents.id
+  // это BIGSERIAL, начинается с 1, реальный id никогда не 0. Пишется в
+  // control.execution_control_audit.incident_id (nullable, без FK через
+  // границу схем — см. V028 и incident-service/README.md) для последующего
+  // чтения таймлайна incident-service'ом (TimelineForIncident).
+  int64 incident_id = 8;
 }
 
 message ApplyOverrideResponse {

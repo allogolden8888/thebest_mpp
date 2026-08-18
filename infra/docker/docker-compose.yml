@@ -262,8 +262,12 @@ services:
       redis-runtime:
         condition: service_healthy
 
-  # Пятый хоп — тарификация (BILLING_TARIFF_PATH уже запечён в образ),
-  # атомарный charge через apply_atomic_charge.lua на redis-billing.
+  # Пятый хоп — тарификация (BILLING_TARIFF_PATH — дефолтный fallback-тариф,
+  # запечён в образ), атомарный charge через apply_atomic_charge.lua на
+  # redis-billing. account_id = partner_id, per-partner тариф — TariffCache
+  # читает redis-configuration (Фаза 5a плана закрытия API-пробелов:
+  # multi-tenancy в Billing Service), с graceful fallback на
+  # BILLING_TARIFF_PATH, если для партнёра ничего не опубликовано.
   billing-service:
     image: mpp/billing-service:test
     ports:
@@ -273,6 +277,9 @@ services:
       REDIS_BILLING_HOST: redis-billing
       REDIS_BILLING_PORT: "6379"
       REDIS_BILLING_PASSWORD: mpp_local_dev
+      REDIS_CONFIGURATION_HOST: redis-configuration
+      REDIS_CONFIGURATION_PORT: "6379"
+      REDIS_CONFIGURATION_PASSWORD: mpp_local_dev
       # 2026-08-13 1500 TPS push — калибровка вниз с 512 (исходный, p95=336ms,
       # ~552 потока). 200 и 350 оба дали p95~1800-1900ms — резкий порог, не
       # плавная деградация (Little's Law: запас на всплески трафика, не сама
@@ -318,6 +325,8 @@ services:
       kafka:
         condition: service_healthy
       redis-billing:
+        condition: service_healthy
+      redis-configuration:
         condition: service_healthy
 
   # Шестой хоп — резолвит финальный route (protocol/route_epoch/failover)

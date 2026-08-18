@@ -23,6 +23,249 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type ValidateVersionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	EntityType    v1.ConfigEntityType    `protobuf:"varint,1,opt,name=entity_type,json=entityType,proto3,enum=mpp.common.v1.ConfigEntityType" json:"entity_type,omitempty"`
+	PayloadJson   []byte                 `protobuf:"bytes,2,opt,name=payload_json,json=payloadJson,proto3" json:"payload_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ValidateVersionRequest) Reset() {
+	*x = ValidateVersionRequest{}
+	mi := &file_grpc_internal_control_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ValidateVersionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ValidateVersionRequest) ProtoMessage() {}
+
+func (x *ValidateVersionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_internal_control_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ValidateVersionRequest.ProtoReflect.Descriptor instead.
+func (*ValidateVersionRequest) Descriptor() ([]byte, []int) {
+	return file_grpc_internal_control_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *ValidateVersionRequest) GetEntityType() v1.ConfigEntityType {
+	if x != nil {
+		return x.EntityType
+	}
+	return v1.ConfigEntityType(0)
+}
+
+func (x *ValidateVersionRequest) GetPayloadJson() []byte {
+	if x != nil {
+		return x.PayloadJson
+	}
+	return nil
+}
+
+type ValidateVersionResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Valid bool                   `protobuf:"varint,1,opt,name=valid,proto3" json:"valid,omitempty"`
+	// Пусто, если valid = true. Та же форма сообщений, что
+	// validate.ValidationError.Errors — "keyword_location: message" на
+	// структурные ошибки JSON Schema, голый текст на семантические.
+	Errors        []string `protobuf:"bytes,2,rep,name=errors,proto3" json:"errors,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ValidateVersionResponse) Reset() {
+	*x = ValidateVersionResponse{}
+	mi := &file_grpc_internal_control_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ValidateVersionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ValidateVersionResponse) ProtoMessage() {}
+
+func (x *ValidateVersionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_internal_control_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ValidateVersionResponse.ProtoReflect.Descriptor instead.
+func (*ValidateVersionResponse) Descriptor() ([]byte, []int) {
+	return file_grpc_internal_control_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *ValidateVersionResponse) GetValid() bool {
+	if x != nil {
+		return x.Valid
+	}
+	return false
+}
+
+func (x *ValidateVersionResponse) GetErrors() []string {
+	if x != nil {
+		return x.Errors
+	}
+	return nil
+}
+
+type DiffVersionsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	EntityType    v1.ConfigEntityType    `protobuf:"varint,1,opt,name=entity_type,json=entityType,proto3,enum=mpp.common.v1.ConfigEntityType" json:"entity_type,omitempty"`
+	EntityId      string                 `protobuf:"bytes,2,opt,name=entity_id,json=entityId,proto3" json:"entity_id,omitempty"`
+	FromVersion   int64                  `protobuf:"varint,3,opt,name=from_version,json=fromVersion,proto3" json:"from_version,omitempty"`
+	ToVersion     int64                  `protobuf:"varint,4,opt,name=to_version,json=toVersion,proto3" json:"to_version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DiffVersionsRequest) Reset() {
+	*x = DiffVersionsRequest{}
+	mi := &file_grpc_internal_control_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DiffVersionsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DiffVersionsRequest) ProtoMessage() {}
+
+func (x *DiffVersionsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_internal_control_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DiffVersionsRequest.ProtoReflect.Descriptor instead.
+func (*DiffVersionsRequest) Descriptor() ([]byte, []int) {
+	return file_grpc_internal_control_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *DiffVersionsRequest) GetEntityType() v1.ConfigEntityType {
+	if x != nil {
+		return x.EntityType
+	}
+	return v1.ConfigEntityType(0)
+}
+
+func (x *DiffVersionsRequest) GetEntityId() string {
+	if x != nil {
+		return x.EntityId
+	}
+	return ""
+}
+
+func (x *DiffVersionsRequest) GetFromVersion() int64 {
+	if x != nil {
+		return x.FromVersion
+	}
+	return 0
+}
+
+func (x *DiffVersionsRequest) GetToVersion() int64 {
+	if x != nil {
+		return x.ToVersion
+	}
+	return 0
+}
+
+type DiffVersionsResponse struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	FromVersion     int64                  `protobuf:"varint,1,opt,name=from_version,json=fromVersion,proto3" json:"from_version,omitempty"`
+	FromPayloadJson []byte                 `protobuf:"bytes,2,opt,name=from_payload_json,json=fromPayloadJson,proto3" json:"from_payload_json,omitempty"`
+	ToVersion       int64                  `protobuf:"varint,3,opt,name=to_version,json=toVersion,proto3" json:"to_version,omitempty"`
+	ToPayloadJson   []byte                 `protobuf:"bytes,4,opt,name=to_payload_json,json=toPayloadJson,proto3" json:"to_payload_json,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *DiffVersionsResponse) Reset() {
+	*x = DiffVersionsResponse{}
+	mi := &file_grpc_internal_control_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DiffVersionsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DiffVersionsResponse) ProtoMessage() {}
+
+func (x *DiffVersionsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_internal_control_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DiffVersionsResponse.ProtoReflect.Descriptor instead.
+func (*DiffVersionsResponse) Descriptor() ([]byte, []int) {
+	return file_grpc_internal_control_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *DiffVersionsResponse) GetFromVersion() int64 {
+	if x != nil {
+		return x.FromVersion
+	}
+	return 0
+}
+
+func (x *DiffVersionsResponse) GetFromPayloadJson() []byte {
+	if x != nil {
+		return x.FromPayloadJson
+	}
+	return nil
+}
+
+func (x *DiffVersionsResponse) GetToVersion() int64 {
+	if x != nil {
+		return x.ToVersion
+	}
+	return 0
+}
+
+func (x *DiffVersionsResponse) GetToPayloadJson() []byte {
+	if x != nil {
+		return x.ToPayloadJson
+	}
+	return nil
+}
+
 type CreateVersionRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	EntityType    v1.ConfigEntityType    `protobuf:"varint,1,opt,name=entity_type,json=entityType,proto3,enum=mpp.common.v1.ConfigEntityType" json:"entity_type,omitempty"`
@@ -35,7 +278,7 @@ type CreateVersionRequest struct {
 
 func (x *CreateVersionRequest) Reset() {
 	*x = CreateVersionRequest{}
-	mi := &file_grpc_internal_control_proto_msgTypes[0]
+	mi := &file_grpc_internal_control_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -47,7 +290,7 @@ func (x *CreateVersionRequest) String() string {
 func (*CreateVersionRequest) ProtoMessage() {}
 
 func (x *CreateVersionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_grpc_internal_control_proto_msgTypes[0]
+	mi := &file_grpc_internal_control_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -60,7 +303,7 @@ func (x *CreateVersionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateVersionRequest.ProtoReflect.Descriptor instead.
 func (*CreateVersionRequest) Descriptor() ([]byte, []int) {
-	return file_grpc_internal_control_proto_rawDescGZIP(), []int{0}
+	return file_grpc_internal_control_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *CreateVersionRequest) GetEntityType() v1.ConfigEntityType {
@@ -104,7 +347,7 @@ type ConfigVersionResponse struct {
 
 func (x *ConfigVersionResponse) Reset() {
 	*x = ConfigVersionResponse{}
-	mi := &file_grpc_internal_control_proto_msgTypes[1]
+	mi := &file_grpc_internal_control_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -116,7 +359,7 @@ func (x *ConfigVersionResponse) String() string {
 func (*ConfigVersionResponse) ProtoMessage() {}
 
 func (x *ConfigVersionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_grpc_internal_control_proto_msgTypes[1]
+	mi := &file_grpc_internal_control_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -129,7 +372,7 @@ func (x *ConfigVersionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigVersionResponse.ProtoReflect.Descriptor instead.
 func (*ConfigVersionResponse) Descriptor() ([]byte, []int) {
-	return file_grpc_internal_control_proto_rawDescGZIP(), []int{1}
+	return file_grpc_internal_control_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ConfigVersionResponse) GetEntityType() v1.ConfigEntityType {
@@ -177,7 +420,7 @@ type GetActiveVersionRequest struct {
 
 func (x *GetActiveVersionRequest) Reset() {
 	*x = GetActiveVersionRequest{}
-	mi := &file_grpc_internal_control_proto_msgTypes[2]
+	mi := &file_grpc_internal_control_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -189,7 +432,7 @@ func (x *GetActiveVersionRequest) String() string {
 func (*GetActiveVersionRequest) ProtoMessage() {}
 
 func (x *GetActiveVersionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_grpc_internal_control_proto_msgTypes[2]
+	mi := &file_grpc_internal_control_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -202,7 +445,7 @@ func (x *GetActiveVersionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetActiveVersionRequest.ProtoReflect.Descriptor instead.
 func (*GetActiveVersionRequest) Descriptor() ([]byte, []int) {
-	return file_grpc_internal_control_proto_rawDescGZIP(), []int{2}
+	return file_grpc_internal_control_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *GetActiveVersionRequest) GetEntityType() v1.ConfigEntityType {
@@ -231,7 +474,7 @@ type ListVersionsRequest struct {
 
 func (x *ListVersionsRequest) Reset() {
 	*x = ListVersionsRequest{}
-	mi := &file_grpc_internal_control_proto_msgTypes[3]
+	mi := &file_grpc_internal_control_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -243,7 +486,7 @@ func (x *ListVersionsRequest) String() string {
 func (*ListVersionsRequest) ProtoMessage() {}
 
 func (x *ListVersionsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_grpc_internal_control_proto_msgTypes[3]
+	mi := &file_grpc_internal_control_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -256,7 +499,7 @@ func (x *ListVersionsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListVersionsRequest.ProtoReflect.Descriptor instead.
 func (*ListVersionsRequest) Descriptor() ([]byte, []int) {
-	return file_grpc_internal_control_proto_rawDescGZIP(), []int{3}
+	return file_grpc_internal_control_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ListVersionsRequest) GetEntityType() v1.ConfigEntityType {
@@ -297,7 +540,7 @@ type ListVersionsResponse struct {
 
 func (x *ListVersionsResponse) Reset() {
 	*x = ListVersionsResponse{}
-	mi := &file_grpc_internal_control_proto_msgTypes[4]
+	mi := &file_grpc_internal_control_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -309,7 +552,7 @@ func (x *ListVersionsResponse) String() string {
 func (*ListVersionsResponse) ProtoMessage() {}
 
 func (x *ListVersionsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_grpc_internal_control_proto_msgTypes[4]
+	mi := &file_grpc_internal_control_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -322,7 +565,7 @@ func (x *ListVersionsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListVersionsResponse.ProtoReflect.Descriptor instead.
 func (*ListVersionsResponse) Descriptor() ([]byte, []int) {
-	return file_grpc_internal_control_proto_rawDescGZIP(), []int{4}
+	return file_grpc_internal_control_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ListVersionsResponse) GetVersions() []*ConfigVersionResponse {
@@ -351,7 +594,7 @@ type ArchiveVersionRequest struct {
 
 func (x *ArchiveVersionRequest) Reset() {
 	*x = ArchiveVersionRequest{}
-	mi := &file_grpc_internal_control_proto_msgTypes[5]
+	mi := &file_grpc_internal_control_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -363,7 +606,7 @@ func (x *ArchiveVersionRequest) String() string {
 func (*ArchiveVersionRequest) ProtoMessage() {}
 
 func (x *ArchiveVersionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_grpc_internal_control_proto_msgTypes[5]
+	mi := &file_grpc_internal_control_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -376,7 +619,7 @@ func (x *ArchiveVersionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArchiveVersionRequest.ProtoReflect.Descriptor instead.
 func (*ArchiveVersionRequest) Descriptor() ([]byte, []int) {
-	return file_grpc_internal_control_proto_rawDescGZIP(), []int{5}
+	return file_grpc_internal_control_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ArchiveVersionRequest) GetEntityType() v1.ConfigEntityType {
@@ -416,14 +659,22 @@ type ApplyOverrideRequest struct {
 	Reason        string                   `protobuf:"bytes,5,opt,name=reason,proto3" json:"reason,omitempty"`
 	RequestedBy   string                   `protobuf:"bytes,6,opt,name=requested_by,json=requestedBy,proto3" json:"requested_by,omitempty"`
 	// Пусто — override действует до явного ClearOverride.
-	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	ExpiresAt *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	// Опционально линкует этот override к инциденту (luminous-hugging-charm.md
+	// Ф7, incident-service, incident.incidents.id — migrations/V028__incident.sql).
+	// 0 (proto3 default) = "без инцидента" — безопасно, incident.incidents.id
+	// это BIGSERIAL, начинается с 1, реальный id никогда не 0. Пишется в
+	// control.execution_control_audit.incident_id (nullable, без FK через
+	// границу схем — см. V028 и incident-service/README.md) для последующего
+	// чтения таймлайна incident-service'ом (TimelineForIncident).
+	IncidentId    int64 `protobuf:"varint,8,opt,name=incident_id,json=incidentId,proto3" json:"incident_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ApplyOverrideRequest) Reset() {
 	*x = ApplyOverrideRequest{}
-	mi := &file_grpc_internal_control_proto_msgTypes[6]
+	mi := &file_grpc_internal_control_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -435,7 +686,7 @@ func (x *ApplyOverrideRequest) String() string {
 func (*ApplyOverrideRequest) ProtoMessage() {}
 
 func (x *ApplyOverrideRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_grpc_internal_control_proto_msgTypes[6]
+	mi := &file_grpc_internal_control_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -448,7 +699,7 @@ func (x *ApplyOverrideRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApplyOverrideRequest.ProtoReflect.Descriptor instead.
 func (*ApplyOverrideRequest) Descriptor() ([]byte, []int) {
-	return file_grpc_internal_control_proto_rawDescGZIP(), []int{6}
+	return file_grpc_internal_control_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ApplyOverrideRequest) GetScope() v1.ExecutionControlScope {
@@ -500,6 +751,13 @@ func (x *ApplyOverrideRequest) GetExpiresAt() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *ApplyOverrideRequest) GetIncidentId() int64 {
+	if x != nil {
+		return x.IncidentId
+	}
+	return 0
+}
+
 type ApplyOverrideResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Version       int64                  `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
@@ -510,7 +768,7 @@ type ApplyOverrideResponse struct {
 
 func (x *ApplyOverrideResponse) Reset() {
 	*x = ApplyOverrideResponse{}
-	mi := &file_grpc_internal_control_proto_msgTypes[7]
+	mi := &file_grpc_internal_control_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -522,7 +780,7 @@ func (x *ApplyOverrideResponse) String() string {
 func (*ApplyOverrideResponse) ProtoMessage() {}
 
 func (x *ApplyOverrideResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_grpc_internal_control_proto_msgTypes[7]
+	mi := &file_grpc_internal_control_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -535,7 +793,7 @@ func (x *ApplyOverrideResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApplyOverrideResponse.ProtoReflect.Descriptor instead.
 func (*ApplyOverrideResponse) Descriptor() ([]byte, []int) {
-	return file_grpc_internal_control_proto_rawDescGZIP(), []int{7}
+	return file_grpc_internal_control_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ApplyOverrideResponse) GetVersion() int64 {
@@ -563,7 +821,7 @@ type ClearOverrideRequest struct {
 
 func (x *ClearOverrideRequest) Reset() {
 	*x = ClearOverrideRequest{}
-	mi := &file_grpc_internal_control_proto_msgTypes[8]
+	mi := &file_grpc_internal_control_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -575,7 +833,7 @@ func (x *ClearOverrideRequest) String() string {
 func (*ClearOverrideRequest) ProtoMessage() {}
 
 func (x *ClearOverrideRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_grpc_internal_control_proto_msgTypes[8]
+	mi := &file_grpc_internal_control_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -588,7 +846,7 @@ func (x *ClearOverrideRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClearOverrideRequest.ProtoReflect.Descriptor instead.
 func (*ClearOverrideRequest) Descriptor() ([]byte, []int) {
-	return file_grpc_internal_control_proto_rawDescGZIP(), []int{8}
+	return file_grpc_internal_control_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ClearOverrideRequest) GetScope() v1.ExecutionControlScope {
@@ -622,7 +880,7 @@ type RequestReplayRequest struct {
 
 func (x *RequestReplayRequest) Reset() {
 	*x = RequestReplayRequest{}
-	mi := &file_grpc_internal_control_proto_msgTypes[9]
+	mi := &file_grpc_internal_control_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -634,7 +892,7 @@ func (x *RequestReplayRequest) String() string {
 func (*RequestReplayRequest) ProtoMessage() {}
 
 func (x *RequestReplayRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_grpc_internal_control_proto_msgTypes[9]
+	mi := &file_grpc_internal_control_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -647,7 +905,7 @@ func (x *RequestReplayRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestReplayRequest.ProtoReflect.Descriptor instead.
 func (*RequestReplayRequest) Descriptor() ([]byte, []int) {
-	return file_grpc_internal_control_proto_rawDescGZIP(), []int{9}
+	return file_grpc_internal_control_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *RequestReplayRequest) GetStageExecutionId() string {
@@ -676,7 +934,7 @@ type RequestReplayResponse struct {
 
 func (x *RequestReplayResponse) Reset() {
 	*x = RequestReplayResponse{}
-	mi := &file_grpc_internal_control_proto_msgTypes[10]
+	mi := &file_grpc_internal_control_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -688,7 +946,7 @@ func (x *RequestReplayResponse) String() string {
 func (*RequestReplayResponse) ProtoMessage() {}
 
 func (x *RequestReplayResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_grpc_internal_control_proto_msgTypes[10]
+	mi := &file_grpc_internal_control_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -701,7 +959,7 @@ func (x *RequestReplayResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestReplayResponse.ProtoReflect.Descriptor instead.
 func (*RequestReplayResponse) Descriptor() ([]byte, []int) {
-	return file_grpc_internal_control_proto_rawDescGZIP(), []int{10}
+	return file_grpc_internal_control_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *RequestReplayResponse) GetAccepted() bool {
@@ -722,7 +980,27 @@ var File_grpc_internal_control_proto protoreflect.FileDescriptor
 
 const file_grpc_internal_control_proto_rawDesc = "" +
 	"\n" +
-	"\x1bgrpc/internal_control.proto\x12\vmpp.grpc.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x12common/enums.proto\"\xbb\x01\n" +
+	"\x1bgrpc/internal_control.proto\x12\vmpp.grpc.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x12common/enums.proto\"}\n" +
+	"\x16ValidateVersionRequest\x12@\n" +
+	"\ventity_type\x18\x01 \x01(\x0e2\x1f.mpp.common.v1.ConfigEntityTypeR\n" +
+	"entityType\x12!\n" +
+	"\fpayload_json\x18\x02 \x01(\fR\vpayloadJson\"G\n" +
+	"\x17ValidateVersionResponse\x12\x14\n" +
+	"\x05valid\x18\x01 \x01(\bR\x05valid\x12\x16\n" +
+	"\x06errors\x18\x02 \x03(\tR\x06errors\"\xb6\x01\n" +
+	"\x13DiffVersionsRequest\x12@\n" +
+	"\ventity_type\x18\x01 \x01(\x0e2\x1f.mpp.common.v1.ConfigEntityTypeR\n" +
+	"entityType\x12\x1b\n" +
+	"\tentity_id\x18\x02 \x01(\tR\bentityId\x12!\n" +
+	"\ffrom_version\x18\x03 \x01(\x03R\vfromVersion\x12\x1d\n" +
+	"\n" +
+	"to_version\x18\x04 \x01(\x03R\ttoVersion\"\xac\x01\n" +
+	"\x14DiffVersionsResponse\x12!\n" +
+	"\ffrom_version\x18\x01 \x01(\x03R\vfromVersion\x12*\n" +
+	"\x11from_payload_json\x18\x02 \x01(\fR\x0ffromPayloadJson\x12\x1d\n" +
+	"\n" +
+	"to_version\x18\x03 \x01(\x03R\ttoVersion\x12&\n" +
+	"\x0fto_payload_json\x18\x04 \x01(\fR\rtoPayloadJson\"\xbb\x01\n" +
 	"\x14CreateVersionRequest\x12@\n" +
 	"\ventity_type\x18\x01 \x01(\x0e2\x1f.mpp.common.v1.ConfigEntityTypeR\n" +
 	"entityType\x12\x1b\n" +
@@ -756,7 +1034,7 @@ const file_grpc_internal_control_proto_rawDesc = "" +
 	"entityType\x12\x1b\n" +
 	"\tentity_id\x18\x02 \x01(\tR\bentityId\x12\x18\n" +
 	"\aversion\x18\x03 \x01(\x03R\aversion\x12!\n" +
-	"\frequested_by\x18\x04 \x01(\tR\vrequestedBy\"\xc6\x02\n" +
+	"\frequested_by\x18\x04 \x01(\tR\vrequestedBy\"\xe7\x02\n" +
 	"\x14ApplyOverrideRequest\x12:\n" +
 	"\x05scope\x18\x01 \x01(\x0e2$.mpp.common.v1.ExecutionControlScopeR\x05scope\x12\x19\n" +
 	"\bscope_id\x18\x02 \x01(\tR\ascopeId\x12:\n" +
@@ -765,7 +1043,9 @@ const file_grpc_internal_control_proto_rawDesc = "" +
 	"\x06reason\x18\x05 \x01(\tR\x06reason\x12!\n" +
 	"\frequested_by\x18\x06 \x01(\tR\vrequestedBy\x129\n" +
 	"\n" +
-	"expires_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"l\n" +
+	"expires_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12\x1f\n" +
+	"\vincident_id\x18\b \x01(\x03R\n" +
+	"incidentId\"l\n" +
 	"\x15ApplyOverrideResponse\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\x03R\aversion\x129\n" +
 	"\n" +
@@ -779,12 +1059,14 @@ const file_grpc_internal_control_proto_rawDesc = "" +
 	"\frequested_by\x18\x02 \x01(\tR\vrequestedBy\"^\n" +
 	"\x15RequestReplayResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12)\n" +
-	"\x10rejection_reason\x18\x02 \x01(\tR\x0frejectionReason2\xf4\x02\n" +
+	"\x10rejection_reason\x18\x02 \x01(\tR\x0frejectionReason2\xa7\x04\n" +
 	"\rConfigService\x12V\n" +
 	"\rCreateVersion\x12!.mpp.grpc.v1.CreateVersionRequest\x1a\".mpp.grpc.v1.ConfigVersionResponse\x12\\\n" +
 	"\x10GetActiveVersion\x12$.mpp.grpc.v1.GetActiveVersionRequest\x1a\".mpp.grpc.v1.ConfigVersionResponse\x12S\n" +
 	"\fListVersions\x12 .mpp.grpc.v1.ListVersionsRequest\x1a!.mpp.grpc.v1.ListVersionsResponse\x12X\n" +
-	"\x0eArchiveVersion\x12\".mpp.grpc.v1.ArchiveVersionRequest\x1a\".mpp.grpc.v1.ConfigVersionResponse2\xc9\x01\n" +
+	"\x0eArchiveVersion\x12\".mpp.grpc.v1.ArchiveVersionRequest\x1a\".mpp.grpc.v1.ConfigVersionResponse\x12\\\n" +
+	"\x0fValidateVersion\x12#.mpp.grpc.v1.ValidateVersionRequest\x1a$.mpp.grpc.v1.ValidateVersionResponse\x12S\n" +
+	"\fDiffVersions\x12 .mpp.grpc.v1.DiffVersionsRequest\x1a!.mpp.grpc.v1.DiffVersionsResponse2\xc9\x01\n" +
 	"\x17ExecutionControlService\x12V\n" +
 	"\rApplyOverride\x12!.mpp.grpc.v1.ApplyOverrideRequest\x1a\".mpp.grpc.v1.ApplyOverrideResponse\x12V\n" +
 	"\rClearOverride\x12!.mpp.grpc.v1.ClearOverrideRequest\x1a\".mpp.grpc.v1.ApplyOverrideResponse2g\n" +
@@ -804,56 +1086,66 @@ func file_grpc_internal_control_proto_rawDescGZIP() []byte {
 	return file_grpc_internal_control_proto_rawDescData
 }
 
-var file_grpc_internal_control_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_grpc_internal_control_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_grpc_internal_control_proto_goTypes = []any{
-	(*CreateVersionRequest)(nil),    // 0: mpp.grpc.v1.CreateVersionRequest
-	(*ConfigVersionResponse)(nil),   // 1: mpp.grpc.v1.ConfigVersionResponse
-	(*GetActiveVersionRequest)(nil), // 2: mpp.grpc.v1.GetActiveVersionRequest
-	(*ListVersionsRequest)(nil),     // 3: mpp.grpc.v1.ListVersionsRequest
-	(*ListVersionsResponse)(nil),    // 4: mpp.grpc.v1.ListVersionsResponse
-	(*ArchiveVersionRequest)(nil),   // 5: mpp.grpc.v1.ArchiveVersionRequest
-	(*ApplyOverrideRequest)(nil),    // 6: mpp.grpc.v1.ApplyOverrideRequest
-	(*ApplyOverrideResponse)(nil),   // 7: mpp.grpc.v1.ApplyOverrideResponse
-	(*ClearOverrideRequest)(nil),    // 8: mpp.grpc.v1.ClearOverrideRequest
-	(*RequestReplayRequest)(nil),    // 9: mpp.grpc.v1.RequestReplayRequest
-	(*RequestReplayResponse)(nil),   // 10: mpp.grpc.v1.RequestReplayResponse
-	(v1.ConfigEntityType)(0),        // 11: mpp.common.v1.ConfigEntityType
-	(*timestamppb.Timestamp)(nil),   // 12: google.protobuf.Timestamp
-	(v1.ExecutionControlScope)(0),   // 13: mpp.common.v1.ExecutionControlScope
-	(v1.ExecutionControlState)(0),   // 14: mpp.common.v1.ExecutionControlState
+	(*ValidateVersionRequest)(nil),  // 0: mpp.grpc.v1.ValidateVersionRequest
+	(*ValidateVersionResponse)(nil), // 1: mpp.grpc.v1.ValidateVersionResponse
+	(*DiffVersionsRequest)(nil),     // 2: mpp.grpc.v1.DiffVersionsRequest
+	(*DiffVersionsResponse)(nil),    // 3: mpp.grpc.v1.DiffVersionsResponse
+	(*CreateVersionRequest)(nil),    // 4: mpp.grpc.v1.CreateVersionRequest
+	(*ConfigVersionResponse)(nil),   // 5: mpp.grpc.v1.ConfigVersionResponse
+	(*GetActiveVersionRequest)(nil), // 6: mpp.grpc.v1.GetActiveVersionRequest
+	(*ListVersionsRequest)(nil),     // 7: mpp.grpc.v1.ListVersionsRequest
+	(*ListVersionsResponse)(nil),    // 8: mpp.grpc.v1.ListVersionsResponse
+	(*ArchiveVersionRequest)(nil),   // 9: mpp.grpc.v1.ArchiveVersionRequest
+	(*ApplyOverrideRequest)(nil),    // 10: mpp.grpc.v1.ApplyOverrideRequest
+	(*ApplyOverrideResponse)(nil),   // 11: mpp.grpc.v1.ApplyOverrideResponse
+	(*ClearOverrideRequest)(nil),    // 12: mpp.grpc.v1.ClearOverrideRequest
+	(*RequestReplayRequest)(nil),    // 13: mpp.grpc.v1.RequestReplayRequest
+	(*RequestReplayResponse)(nil),   // 14: mpp.grpc.v1.RequestReplayResponse
+	(v1.ConfigEntityType)(0),        // 15: mpp.common.v1.ConfigEntityType
+	(*timestamppb.Timestamp)(nil),   // 16: google.protobuf.Timestamp
+	(v1.ExecutionControlScope)(0),   // 17: mpp.common.v1.ExecutionControlScope
+	(v1.ExecutionControlState)(0),   // 18: mpp.common.v1.ExecutionControlState
 }
 var file_grpc_internal_control_proto_depIdxs = []int32{
-	11, // 0: mpp.grpc.v1.CreateVersionRequest.entity_type:type_name -> mpp.common.v1.ConfigEntityType
-	11, // 1: mpp.grpc.v1.ConfigVersionResponse.entity_type:type_name -> mpp.common.v1.ConfigEntityType
-	12, // 2: mpp.grpc.v1.ConfigVersionResponse.created_at:type_name -> google.protobuf.Timestamp
-	11, // 3: mpp.grpc.v1.GetActiveVersionRequest.entity_type:type_name -> mpp.common.v1.ConfigEntityType
-	11, // 4: mpp.grpc.v1.ListVersionsRequest.entity_type:type_name -> mpp.common.v1.ConfigEntityType
-	1,  // 5: mpp.grpc.v1.ListVersionsResponse.versions:type_name -> mpp.grpc.v1.ConfigVersionResponse
-	11, // 6: mpp.grpc.v1.ArchiveVersionRequest.entity_type:type_name -> mpp.common.v1.ConfigEntityType
-	13, // 7: mpp.grpc.v1.ApplyOverrideRequest.scope:type_name -> mpp.common.v1.ExecutionControlScope
-	14, // 8: mpp.grpc.v1.ApplyOverrideRequest.state:type_name -> mpp.common.v1.ExecutionControlState
-	12, // 9: mpp.grpc.v1.ApplyOverrideRequest.expires_at:type_name -> google.protobuf.Timestamp
-	12, // 10: mpp.grpc.v1.ApplyOverrideResponse.applied_at:type_name -> google.protobuf.Timestamp
-	13, // 11: mpp.grpc.v1.ClearOverrideRequest.scope:type_name -> mpp.common.v1.ExecutionControlScope
-	0,  // 12: mpp.grpc.v1.ConfigService.CreateVersion:input_type -> mpp.grpc.v1.CreateVersionRequest
-	2,  // 13: mpp.grpc.v1.ConfigService.GetActiveVersion:input_type -> mpp.grpc.v1.GetActiveVersionRequest
-	3,  // 14: mpp.grpc.v1.ConfigService.ListVersions:input_type -> mpp.grpc.v1.ListVersionsRequest
-	5,  // 15: mpp.grpc.v1.ConfigService.ArchiveVersion:input_type -> mpp.grpc.v1.ArchiveVersionRequest
-	6,  // 16: mpp.grpc.v1.ExecutionControlService.ApplyOverride:input_type -> mpp.grpc.v1.ApplyOverrideRequest
-	8,  // 17: mpp.grpc.v1.ExecutionControlService.ClearOverride:input_type -> mpp.grpc.v1.ClearOverrideRequest
-	9,  // 18: mpp.grpc.v1.ReplayService.RequestReplay:input_type -> mpp.grpc.v1.RequestReplayRequest
-	1,  // 19: mpp.grpc.v1.ConfigService.CreateVersion:output_type -> mpp.grpc.v1.ConfigVersionResponse
-	1,  // 20: mpp.grpc.v1.ConfigService.GetActiveVersion:output_type -> mpp.grpc.v1.ConfigVersionResponse
-	4,  // 21: mpp.grpc.v1.ConfigService.ListVersions:output_type -> mpp.grpc.v1.ListVersionsResponse
-	1,  // 22: mpp.grpc.v1.ConfigService.ArchiveVersion:output_type -> mpp.grpc.v1.ConfigVersionResponse
-	7,  // 23: mpp.grpc.v1.ExecutionControlService.ApplyOverride:output_type -> mpp.grpc.v1.ApplyOverrideResponse
-	7,  // 24: mpp.grpc.v1.ExecutionControlService.ClearOverride:output_type -> mpp.grpc.v1.ApplyOverrideResponse
-	10, // 25: mpp.grpc.v1.ReplayService.RequestReplay:output_type -> mpp.grpc.v1.RequestReplayResponse
-	19, // [19:26] is the sub-list for method output_type
-	12, // [12:19] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	15, // 0: mpp.grpc.v1.ValidateVersionRequest.entity_type:type_name -> mpp.common.v1.ConfigEntityType
+	15, // 1: mpp.grpc.v1.DiffVersionsRequest.entity_type:type_name -> mpp.common.v1.ConfigEntityType
+	15, // 2: mpp.grpc.v1.CreateVersionRequest.entity_type:type_name -> mpp.common.v1.ConfigEntityType
+	15, // 3: mpp.grpc.v1.ConfigVersionResponse.entity_type:type_name -> mpp.common.v1.ConfigEntityType
+	16, // 4: mpp.grpc.v1.ConfigVersionResponse.created_at:type_name -> google.protobuf.Timestamp
+	15, // 5: mpp.grpc.v1.GetActiveVersionRequest.entity_type:type_name -> mpp.common.v1.ConfigEntityType
+	15, // 6: mpp.grpc.v1.ListVersionsRequest.entity_type:type_name -> mpp.common.v1.ConfigEntityType
+	5,  // 7: mpp.grpc.v1.ListVersionsResponse.versions:type_name -> mpp.grpc.v1.ConfigVersionResponse
+	15, // 8: mpp.grpc.v1.ArchiveVersionRequest.entity_type:type_name -> mpp.common.v1.ConfigEntityType
+	17, // 9: mpp.grpc.v1.ApplyOverrideRequest.scope:type_name -> mpp.common.v1.ExecutionControlScope
+	18, // 10: mpp.grpc.v1.ApplyOverrideRequest.state:type_name -> mpp.common.v1.ExecutionControlState
+	16, // 11: mpp.grpc.v1.ApplyOverrideRequest.expires_at:type_name -> google.protobuf.Timestamp
+	16, // 12: mpp.grpc.v1.ApplyOverrideResponse.applied_at:type_name -> google.protobuf.Timestamp
+	17, // 13: mpp.grpc.v1.ClearOverrideRequest.scope:type_name -> mpp.common.v1.ExecutionControlScope
+	4,  // 14: mpp.grpc.v1.ConfigService.CreateVersion:input_type -> mpp.grpc.v1.CreateVersionRequest
+	6,  // 15: mpp.grpc.v1.ConfigService.GetActiveVersion:input_type -> mpp.grpc.v1.GetActiveVersionRequest
+	7,  // 16: mpp.grpc.v1.ConfigService.ListVersions:input_type -> mpp.grpc.v1.ListVersionsRequest
+	9,  // 17: mpp.grpc.v1.ConfigService.ArchiveVersion:input_type -> mpp.grpc.v1.ArchiveVersionRequest
+	0,  // 18: mpp.grpc.v1.ConfigService.ValidateVersion:input_type -> mpp.grpc.v1.ValidateVersionRequest
+	2,  // 19: mpp.grpc.v1.ConfigService.DiffVersions:input_type -> mpp.grpc.v1.DiffVersionsRequest
+	10, // 20: mpp.grpc.v1.ExecutionControlService.ApplyOverride:input_type -> mpp.grpc.v1.ApplyOverrideRequest
+	12, // 21: mpp.grpc.v1.ExecutionControlService.ClearOverride:input_type -> mpp.grpc.v1.ClearOverrideRequest
+	13, // 22: mpp.grpc.v1.ReplayService.RequestReplay:input_type -> mpp.grpc.v1.RequestReplayRequest
+	5,  // 23: mpp.grpc.v1.ConfigService.CreateVersion:output_type -> mpp.grpc.v1.ConfigVersionResponse
+	5,  // 24: mpp.grpc.v1.ConfigService.GetActiveVersion:output_type -> mpp.grpc.v1.ConfigVersionResponse
+	8,  // 25: mpp.grpc.v1.ConfigService.ListVersions:output_type -> mpp.grpc.v1.ListVersionsResponse
+	5,  // 26: mpp.grpc.v1.ConfigService.ArchiveVersion:output_type -> mpp.grpc.v1.ConfigVersionResponse
+	1,  // 27: mpp.grpc.v1.ConfigService.ValidateVersion:output_type -> mpp.grpc.v1.ValidateVersionResponse
+	3,  // 28: mpp.grpc.v1.ConfigService.DiffVersions:output_type -> mpp.grpc.v1.DiffVersionsResponse
+	11, // 29: mpp.grpc.v1.ExecutionControlService.ApplyOverride:output_type -> mpp.grpc.v1.ApplyOverrideResponse
+	11, // 30: mpp.grpc.v1.ExecutionControlService.ClearOverride:output_type -> mpp.grpc.v1.ApplyOverrideResponse
+	14, // 31: mpp.grpc.v1.ReplayService.RequestReplay:output_type -> mpp.grpc.v1.RequestReplayResponse
+	23, // [23:32] is the sub-list for method output_type
+	14, // [14:23] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_grpc_internal_control_proto_init() }
@@ -867,7 +1159,7 @@ func file_grpc_internal_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_grpc_internal_control_proto_rawDesc), len(file_grpc_internal_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   11,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   3,
 		},

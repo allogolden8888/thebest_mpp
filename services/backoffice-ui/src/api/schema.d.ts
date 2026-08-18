@@ -52,6 +52,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/config/versions/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["validateConfigVersion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/config/versions/diff": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["diffConfigVersions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/execution-control/override": {
         parameters: {
             query?: never;
@@ -156,6 +188,198 @@ export interface paths {
             cookie?: never;
         };
         get: operations["getReport"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getMe"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listAudit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/iam/roles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listIamRoles"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/iam/staff-assignments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listStaffAssignments"];
+        put?: never;
+        post: operations["createStaffAssignment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/iam/staff-assignments/{external_id}/{role}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["revokeStaffAssignment"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/partners/{partner_id}/applications/{application_id}/credentials/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["rotatePartnerCredential"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/partners/{partner_id}/credentials": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listPartnerCredentials"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/incidents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listIncidents"];
+        put?: never;
+        post: operations["openIncident"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/incidents/{incident_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getIncident"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/incidents/{incident_id}/notes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["addIncidentNote"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/incidents/{incident_id}/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["resolveIncident"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/ops/snapshot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getOpsSnapshot"];
         put?: never;
         post?: never;
         delete?: never;
@@ -270,6 +494,197 @@ export interface components {
         ReportResponse: {
             rows: components["schemas"]["ReportRow"][];
         };
+        MeResponse: {
+            external_id: string;
+            roles: string[];
+            permissions: string[];
+        };
+        AuditEntry: {
+            /** @enum {string} */
+            source: "replay" | "execution_control" | "billing_reconciliation" | "identity";
+            actor: string;
+            action: string;
+            target: string;
+            /** Format: date-time */
+            created_at: string;
+        };
+        AuditResponse: {
+            entries: components["schemas"]["AuditEntry"][];
+            next_offset?: number | null;
+        };
+        IamRole: {
+            /** Format: int64 */
+            id: number;
+            name: string;
+            description: string;
+            permissions: string[];
+        };
+        IamRolesResponse: {
+            roles: components["schemas"]["IamRole"][];
+        };
+        StaffAssignment: {
+            /** Format: int64 */
+            id: number;
+            external_id: string;
+            role: string;
+            granted_by: string;
+            /** Format: date-time */
+            granted_at: string;
+        };
+        StaffAssignmentsResponse: {
+            assignments: components["schemas"]["StaffAssignment"][];
+        };
+        CreateStaffAssignmentRequest: {
+            external_id: string;
+            role: string;
+        };
+        CreateStaffAssignmentResponse: {
+            assignment: components["schemas"]["StaffAssignment"];
+        };
+        RevokeStaffAssignmentResponse: {
+            revoked: boolean;
+        };
+        RotateCredentialResponse: {
+            credential_ref: string;
+            secret_version: number;
+            /** @description Присутствует ТОЛЬКО в этом одном ответе (show-once) — нигде не сохраняется, повторно недоступен после закрытия модалки. */
+            plaintext_secret: string;
+            /** Format: date-time */
+            issued_at?: string;
+        };
+        IssuedSecret: {
+            /** Format: int64 */
+            id: number;
+            partner_id: string;
+            application_id: string;
+            credential_ref: string;
+            secret_version: number;
+            status: string;
+            /** Format: date-time */
+            issued_at?: string;
+            issued_by: string;
+        };
+        IssuedSecretsResponse: {
+            secrets: components["schemas"]["IssuedSecret"][];
+        };
+        ValidateVersionRequest: {
+            entity_type: string;
+            payload_json: unknown;
+        };
+        ValidateVersionResponse: {
+            valid: boolean;
+            errors: string[];
+        };
+        DiffVersionsResponse: {
+            from_version: number;
+            from_payload_json: unknown;
+            to_version: number;
+            to_payload_json: unknown;
+        };
+        Incident: {
+            /** Format: int64 */
+            id: number;
+            title: string;
+            /** @enum {string} */
+            severity: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+            /** @enum {string} */
+            status: "OPEN" | "RESOLVED";
+            opened_by: string;
+            /** Format: date-time */
+            opened_at: string;
+            resolved_by?: string;
+            /** Format: date-time */
+            resolved_at?: string;
+            postmortem_notes?: string;
+        };
+        OpenIncidentRequest: {
+            title: string;
+            /** @enum {string} */
+            severity: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+        };
+        ListIncidentsResponse: {
+            incidents: components["schemas"]["Incident"][];
+        };
+        TimelineEntry: {
+            /** Format: int64 */
+            id: number;
+            scope: string;
+            scope_id: string;
+            state: string;
+            admission_rate: number;
+            reason: string;
+            requested_by: string;
+            /** Format: date-time */
+            created_at?: string;
+            /** Format: date-time */
+            expires_at?: string;
+        };
+        IncidentNote: {
+            /** Format: int64 */
+            id: number;
+            /** Format: int64 */
+            incident_id: number;
+            author: string;
+            note: string;
+            /** Format: date-time */
+            created_at?: string;
+        };
+        IncidentDetail: {
+            incident: components["schemas"]["Incident"];
+            timeline: components["schemas"]["TimelineEntry"][];
+            notes: components["schemas"]["IncidentNote"][];
+        };
+        AddNoteRequest: {
+            note: string;
+        };
+        ResolveIncidentRequest: {
+            postmortem_notes: string;
+        };
+        PartitionLag: {
+            topic: string;
+            partition: number;
+            /** Format: int64 */
+            commit_offset: number;
+            /** Format: int64 */
+            end_offset: number;
+            /** Format: int64 */
+            lag: number;
+            error?: string;
+        };
+        ConsumerGroupLag: {
+            group: string;
+            state: string;
+            /** Format: int64 */
+            total_lag: number;
+            partitions: components["schemas"]["PartitionLag"][];
+            error?: string;
+        };
+        KafkaLagSnapshot: {
+            /** Format: date-time */
+            generated_at: string;
+            bootstrap_servers: string[];
+            groups: components["schemas"]["ConsumerGroupLag"][];
+            error?: string;
+        };
+        ReadyzResult: {
+            service: string;
+            ready: boolean;
+            http_status?: number;
+            /** Format: int64 */
+            latency_ms: number;
+            error?: string;
+        };
+        ReadyzSnapshot: {
+            /** Format: date-time */
+            generated_at: string;
+            services: components["schemas"]["ReadyzResult"][];
+        };
+        OpsSnapshotResponse: {
+            kafka_lag?: components["schemas"]["KafkaLagSnapshot"] | null;
+            kafka_lag_available: boolean;
+            readyz?: components["schemas"]["ReadyzSnapshot"] | null;
+            readyz_available: boolean;
+        };
     };
     responses: never;
     parameters: never;
@@ -371,6 +786,55 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ConfigVersion"];
+                };
+            };
+        };
+    };
+    validateConfigVersion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ValidateVersionRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ValidateVersionResponse"];
+                };
+            };
+        };
+    };
+    diffConfigVersions: {
+        parameters: {
+            query: {
+                entity_type: string;
+                entity_id: string;
+                from: number;
+                to: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiffVersionsResponse"];
                 };
             };
         };
@@ -542,6 +1006,324 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ReportResponse"];
+                };
+            };
+        };
+    };
+    getMe: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MeResponse"];
+                };
+            };
+        };
+    };
+    listAudit: {
+        parameters: {
+            query?: {
+                source?: "replay" | "execution_control" | "billing_reconciliation" | "identity";
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditResponse"];
+                };
+            };
+        };
+    };
+    listIamRoles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IamRolesResponse"];
+                };
+            };
+        };
+    };
+    listStaffAssignments: {
+        parameters: {
+            query?: {
+                external_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StaffAssignmentsResponse"];
+                };
+            };
+        };
+    };
+    createStaffAssignment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateStaffAssignmentRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreateStaffAssignmentResponse"];
+                };
+            };
+        };
+    };
+    revokeStaffAssignment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                external_id: string;
+                role: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevokeStaffAssignmentResponse"];
+                };
+            };
+        };
+    };
+    rotatePartnerCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                partner_id: string;
+                application_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RotateCredentialResponse"];
+                };
+            };
+        };
+    };
+    listPartnerCredentials: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                partner_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssuedSecretsResponse"];
+                };
+            };
+        };
+    };
+    listIncidents: {
+        parameters: {
+            query?: {
+                status?: "OPEN" | "RESOLVED";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListIncidentsResponse"];
+                };
+            };
+        };
+    };
+    openIncident: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OpenIncidentRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Incident"];
+                };
+            };
+        };
+    };
+    getIncident: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                incident_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IncidentDetail"];
+                };
+            };
+        };
+    };
+    addIncidentNote: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                incident_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AddNoteRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IncidentNote"];
+                };
+            };
+        };
+    };
+    resolveIncident: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                incident_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResolveIncidentRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Incident"];
+                };
+            };
+        };
+    };
+    getOpsSnapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpsSnapshotResponse"];
                 };
             };
         };

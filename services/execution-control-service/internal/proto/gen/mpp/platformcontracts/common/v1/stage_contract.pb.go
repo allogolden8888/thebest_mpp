@@ -498,12 +498,23 @@ func (x *RoutingExtension) GetResolvedOperatorId() string {
 }
 
 type DeliveryExtension struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RouteId       string                 `protobuf:"bytes,1,opt,name=route_id,json=routeId,proto3" json:"route_id,omitempty"`
-	Protocol      Protocol               `protobuf:"varint,2,opt,name=protocol,proto3,enum=mpp.common.v1.Protocol" json:"protocol,omitempty"`
-	RouteVersion  string                 `protobuf:"bytes,3,opt,name=route_version,json=routeVersion,proto3" json:"route_version,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	RouteId      string                 `protobuf:"bytes,1,opt,name=route_id,json=routeId,proto3" json:"route_id,omitempty"`
+	Protocol     Protocol               `protobuf:"varint,2,opt,name=protocol,proto3,enum=mpp.common.v1.Protocol" json:"protocol,omitempty"`
+	RouteVersion string                 `protobuf:"bytes,3,opt,name=route_version,json=routeVersion,proto3" json:"route_version,omitempty"`
+	// Найдено при реализации Delivery Service (service_internal_methods.md
+	// §1.8): resolve_gateway_instance читает Operator Route Registry по ключу
+	// operator_route:{operator_id}:{route_id} (data_infrastructure_spec.md
+	// §287), и OperatorSubmitService.SubmitRequest.operator_id (grpc/
+	// operator_gateway.proto) тоже нужен явно — но ни один предыдущий stage
+	// не передавал resolved_operator_id дальше DeliveryExtension (только
+	// PolicyExtension/BillingExtension/RoutingExtension/RoutingResult его
+	// несут). Pipeline Engine уже накапливает его в ExecutionState с этапа
+	// DestinationResolution — добавлено сюда, а не переоткрыто заново из
+	// route_id (route_id не гарантированно структурно кодирует operator_id).
+	ResolvedOperatorId string `protobuf:"bytes,4,opt,name=resolved_operator_id,json=resolvedOperatorId,proto3" json:"resolved_operator_id,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *DeliveryExtension) Reset() {
@@ -553,6 +564,13 @@ func (x *DeliveryExtension) GetProtocol() Protocol {
 func (x *DeliveryExtension) GetRouteVersion() string {
 	if x != nil {
 		return x.RouteVersion
+	}
+	return ""
+}
+
+func (x *DeliveryExtension) GetResolvedOperatorId() string {
+	if x != nil {
+		return x.ResolvedOperatorId
 	}
 	return ""
 }
@@ -1198,11 +1216,12 @@ const file_common_stage_contract_proto_rawDesc = "" +
 	"\rsegment_count\x18\x02 \x01(\x05R\fsegmentCount\x12\x1a\n" +
 	"\bcategory\x18\x03 \x01(\tR\bcategory\"D\n" +
 	"\x10RoutingExtension\x120\n" +
-	"\x14resolved_operator_id\x18\x01 \x01(\tR\x12resolvedOperatorId\"\x88\x01\n" +
+	"\x14resolved_operator_id\x18\x01 \x01(\tR\x12resolvedOperatorId\"\xba\x01\n" +
 	"\x11DeliveryExtension\x12\x19\n" +
 	"\broute_id\x18\x01 \x01(\tR\arouteId\x123\n" +
 	"\bprotocol\x18\x02 \x01(\x0e2\x17.mpp.common.v1.ProtocolR\bprotocol\x12#\n" +
-	"\rroute_version\x18\x03 \x01(\tR\frouteVersion\"\x8a\x01\n" +
+	"\rroute_version\x18\x03 \x01(\tR\frouteVersion\x120\n" +
+	"\x14resolved_operator_id\x18\x04 \x01(\tR\x12resolvedOperatorId\"\x8a\x01\n" +
 	"\x1fDeliveryReconciliationExtension\x12E\n" +
 	"\x12triggering_outcome\x18\x01 \x01(\x0e2\x16.mpp.common.v1.OutcomeR\x11triggeringOutcome\x12 \n" +
 	"\fqueue_msg_id\x18\x02 \x01(\tR\n" +

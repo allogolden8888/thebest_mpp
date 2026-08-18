@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.time.Instant;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -17,6 +18,7 @@ import uz.mpp.platformcontracts.common.v1.Protocol;
 import uz.mpp.platformcontracts.common.v1.StageCompletedEvent;
 import uz.mpp.platformcontracts.common.v1.StageExecuteCommand;
 import uz.mpp.platformcontracts.common.v1.StageName;
+import uz.mpp.platformcontracts.events.v1.DeliveryStatusEvent;
 import uz.mpp.platformcontracts.grpc.v1.SubmitOutcomeStatus;
 import uz.mpp.platformcontracts.grpc.v1.SubmitRequest;
 import uz.mpp.platformcontracts.grpc.v1.SubmitResponse;
@@ -181,5 +183,32 @@ class DeliveryServiceTest {
     void admitDecisionAllowsSubmit() {
         assertTrue(DeliveryService.isAdmitted(ControlSnapshot.Decision.ADMIT));
         assertFalse(DeliveryService.isAdmitted(ControlSnapshot.Decision.HOLD));
+    }
+
+    /**
+     * Фаза 11 плана закрытия API-пробелов: sandbox эхом переносится в
+     * StageCompletedEvent — общая точка buildEvent, не зависит от исхода.
+     */
+    @Test
+    void buildEventEchoesSandboxFlagFromCommand() {
+        StageExecuteCommand sandboxCommand = command().toBuilder().setSandbox(true).build();
+        StageCompletedEvent event = DeliveryService.buildEvent(sandboxCommand, "q1", new SubmitOutcome(Outcome.OUTCOME_SUCCEEDED, "", "smsc-1"));
+        assertTrue(event.getSandbox(), "sandbox=true в команде обязан попасть в событие");
+    }
+
+    /**
+     * Фаза 11 плана закрытия API-пробелов: синтетический DLR — normalized_status
+     * обязан быть буквально "DELIVERED" (message-state-resolver парсит это
+     * как LifecycleStatus enum literal, не произвольную строку — см.
+     * CandidateTransitionResolver.fromDeliveryStatus), operator_id берётся
+     * из DeliveryExtension.resolved_operator_id, не из route_id.
+     */
+    @Test
+    void buildSandboxDeliveryStatusEventProducesLiteralDeliveredStatus() {
+        DeliveryStatusEvent event = DeliveryService.buildSandboxDeliveryStatusEvent(command(), command().getDelivery(), Instant.parse("2026-01-01T00:00:00Z"));
+        assertEquals("m1", event.getMessageId());
+        assertEquals("beeline", event.getOperatorId());
+        assertEquals("DELIVERED", event.getNormalizedStatus());
+        assertEquals("SANDBOX_SYNTHETIC", event.getRawOperatorStatus());
     }
 }

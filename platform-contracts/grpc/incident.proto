@@ -1,0 +1,140 @@
+syntax = "proto3";
+
+package mpp.grpc.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "mpp/platformcontracts/grpc/v1;grpcv1";
+option java_package = "uz.mpp.platformcontracts.grpc.v1";
+option java_multiple_files = true;
+
+// Фаза 7 плана закрытия API-пробелов (luminous-hugging-charm.md) —
+// инцидент-менеджмент. control.execution_control_audit (internal_control.proto
+// ApplyOverride, migrations/V016__execution_control_audit.sql) уже пишет
+// каждый override как сырую строку (scope, state, reason, requested_by,
+// expires_at) — это сырьё для расследования, не концепция группировки. Этот
+// сервис добавляет саму группировку: именованный, отслеживаемый инцидент с
+// таймлайном связанных override и обязательным постмортемом при закрытии.
+// Backoffice API → Incident Service (backoffice-ui раздел "Incidents" —
+// открыть/закрыть, связанные overrides, таймлайн, постмортем; право
+// incident:manage, migrations/V025__iam.sql).
+service IncidentService {
+  // Открывает новый инцидент — первый шаг разбора ("что-то происходит,
+  // заводим трекинг"), до того как известны все связанные override.
+  // status инициализируется OPEN, opened_at = now() на стороне БД.
+  rpc OpenIncident(OpenIncidentRequest) returns (Incident);
+
+  // Список инцидентов для экрана backoffice-ui — с опциональным фильтром по
+  // статусу (пусто = все). Отсортирован по opened_at DESC (самые свежие
+  // сверху — то, что горит сейчас, важнее давно закрытого).
+  rpc ListIncidents(ListIncidentsRequest) returns (ListIncidentsResponse);
+
+  // Полная карточка одного инцидента — ВКЛЮЧАЯ таймлайн: строки
+  // control.execution_control_audit, у которых incident_id совпадает с этим
+  // инцидентом (прямое cross-schema чтение чужой таблицы, тот же паттерн,
+  // что backoffice-api уже использует для DLQ/reconciliation/audit browse —
+  // не новая gRPC-зависимость от execution-control-service).
+  rpc GetIncident(GetIncidentRequest) returns (IncidentDetail);
+
+  // Добавляет запись в таймлайн/коллаборацию инцидента (свободный текст —
+  // "что обнаружили", "что делаем сейчас" и т.п.). incident_notes сама по
+  // себе IS аудит-след для заметок — отдельной audit-таблицы для этого не
+  // заводится (в отличие от iam.staff_role_assignments/
+  // credentials.issued_secrets, здесь нет отдельной мутации сверх самой
+  // вставки).
+  rpc AddNote(AddNoteRequest) returns (IncidentNote);
+
+  // Закрывает инцидент: status -> RESOLVED, resolved_by/resolved_at
+  // проставляются сервером. postmortem_notes ОБЯЗАТЕЛЕН (непустой) —
+  // закрытый без разбора причин инцидент обесценивает саму идею трекинга,
+  // это настоящая валидация (codes.InvalidArgument), не просьба/подсказка.
+  rpc ResolveIncident(ResolveIncidentRequest) returns (Incident);
+}
+
+message Incident {
+  int64 id = 1;
+  string title = 2;
+  // LOW/MEDIUM/HIGH/CRITICAL — CHECK-ограничение
+  // migrations/V028__incident.sql.
+  string severity = 3;
+  // OPEN/RESOLVED.
+  string status = 4;
+  string opened_by = 5;
+  google.protobuf.Timestamp opened_at = 6;
+  // Пусто, пока status = OPEN.
+  string resolved_by = 7;
+  google.protobuf.Timestamp resolved_at = 8;
+  // Пусто, пока status = OPEN; обязателен на момент перехода в RESOLVED
+  // (см. ResolveIncidentRequest).
+  string postmortem_notes = 9;
+}
+
+message OpenIncidentRequest {
+  string title = 1;
+  string severity = 2;
+  // sub вызывающего человека (Keycloak, тот же принцип, что granted_by в
+  // iam.proto) — уходит и в opened_by, и остаётся неизменной записью того,
+  // кто первым завёл трекинг.
+  string opened_by = 3;
+}
+
+message ListIncidentsRequest {
+  // Пусто — все инциденты; заполнено (OPEN/RESOLVED) — фильтр для списка
+  // "что сейчас открыто" backoffice-ui.
+  string status = 1;
+}
+
+message ListIncidentsResponse {
+  repeated Incident incidents = 1;
+}
+
+message GetIncidentRequest {
+  int64 incident_id = 1;
+}
+
+// TimelineEntry — проекция строки control.execution_control_audit
+// (migrations/V016), связанной с этим инцидентом (incident_id совпадает).
+// Поля — ровно то подмножество ApplyOverrideRequest/audit-записи, что нужно
+// для чтения таймлайна человеком в backoffice-ui, не полная схема таблицы.
+message TimelineEntry {
+  int64 id = 1;
+  string scope = 2;
+  string scope_id = 3;
+  string state = 4;
+  double admission_rate = 5;
+  string reason = 6;
+  string requested_by = 7;
+  google.protobuf.Timestamp created_at = 8;
+  // Пусто, если override действовал до явного ClearOverride (та же
+  // семантика, что ApplyOverrideRequest.expires_at в internal_control.proto).
+  google.protobuf.Timestamp expires_at = 9;
+}
+
+message IncidentDetail {
+  Incident incident = 1;
+  // Хронологически по created_at ASC — читается как история "что
+  // происходило", не как "последнее сверху".
+  repeated TimelineEntry timeline = 2;
+  repeated IncidentNote notes = 3;
+}
+
+message AddNoteRequest {
+  int64 incident_id = 1;
+  string author = 2;
+  string note = 3;
+}
+
+message IncidentNote {
+  int64 id = 1;
+  int64 incident_id = 2;
+  string author = 3;
+  string note = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+message ResolveIncidentRequest {
+  int64 incident_id = 1;
+  string resolved_by = 2;
+  // Обязателен, непустой — см. IncidentService.ResolveIncident docstring.
+  string postmortem_notes = 3;
+}

@@ -1,6 +1,8 @@
 package uz.mpp.delivery;
 
 import com.google.protobuf.ByteString;
+import com.google.protobuf.Timestamp;
+import java.time.Instant;
 import java.util.List;
 import java.util.Set;
 import uz.mpp.delivery.MessageContextStore.MessageContext;
@@ -10,6 +12,7 @@ import uz.mpp.platformcontracts.common.v1.DeliveryResult;
 import uz.mpp.platformcontracts.common.v1.Outcome;
 import uz.mpp.platformcontracts.common.v1.StageCompletedEvent;
 import uz.mpp.platformcontracts.common.v1.StageExecuteCommand;
+import uz.mpp.platformcontracts.events.v1.DeliveryStatusEvent;
 import uz.mpp.platformcontracts.grpc.v1.MessageSegment;
 import uz.mpp.platformcontracts.grpc.v1.SubmitOutcomeStatus;
 import uz.mpp.platformcontracts.grpc.v1.SubmitRequest;
@@ -170,8 +173,36 @@ public final class DeliveryService {
             .setReasonCode(outcome.reasonCode() == null ? "" : outcome.reasonCode())
             .setRetryable(retryable)
             .setTraceparent(command.getTraceparent())
+            // Фаза 11 плана закрытия API-пробелов: эхо command.sandbox.
+            .setSandbox(command.getSandbox())
             .setDelivery(DeliveryResult.newBuilder().setQueueMsgId(queueMsgId))
             .build();
+    }
+
+    /**
+     * Фаза 11 плана закрытия API-пробелов: синтетический DLR для
+     * sandbox-сообщений — публикуется delivery-service напрямую на
+     * {@code delivery.status} (тот же топик, что использует dlr-manager для
+     * настоящих DLR), в обход всей цепочки submit→correlate→DLR, которой
+     * dlr-manager/dlr-correlation-writer владеют для реального трафика.
+     * {@code normalized_status = "DELIVERED"} — не произвольная строка,
+     * {@code message-state-resolver} парсит её как литерал {@code LifecycleStatus}
+     * (см. {@code CandidateTransitionResolver.fromDeliveryStatus}), так что
+     * значение обязано совпадать буквально с существующим словарём.
+     */
+    public static DeliveryStatusEvent buildSandboxDeliveryStatusEvent(StageExecuteCommand command, DeliveryExtension extension, Instant now) {
+        return DeliveryStatusEvent.newBuilder()
+            .setEventId("evt-sandbox-dlr-" + command.getStageExecutionId())
+            .setMessageId(command.getMessageId())
+            .setOperatorId(extension.getResolvedOperatorId())
+            .setNormalizedStatus("DELIVERED")
+            .setRawOperatorStatus("SANDBOX_SYNTHETIC")
+            .setOccurredAt(toTimestamp(now))
+            .build();
+    }
+
+    private static Timestamp toTimestamp(Instant instant) {
+        return Timestamp.newBuilder().setSeconds(instant.getEpochSecond()).setNanos(instant.getNano()).build();
     }
 
     /**

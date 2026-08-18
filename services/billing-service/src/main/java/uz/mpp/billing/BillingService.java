@@ -24,12 +24,16 @@ import uz.mpp.platformcontracts.common.v1.StageExecuteCommand;
  * реальный Kafka-путь — негативный {@code segment_count} отклоняется
  * одинаково в обоих местах, не только в одном.
  *
- * <p><b>Упрощение этого среза, не редизайн:</b> {@code resolve_tariff} по
- * спеке ключуется по {@code partner_id}, которого нет в
- * {@code StageExecuteCommand} напрямую — вероятный источник, как и для
- * Policy Service, это {@code msgctx} в Runtime Redis. Этот срез
- * соответствует Фазе 2.2 (один тестовый партнёр, один тариф) —
- * {@link TariffResolver} не параметризован по партнёру.
+ * <p><b>Фаза 5a плана закрытия API-пробелов закрыла упрощение "Фазы 2.2"
+ * выше</b> (текст оставлен для истории — раньше {@link TariffResolver} не
+ * был параметризован по партнёру вообще): {@code BillingExtension} теперь
+ * несёт {@code partner_id} (накоплен Pipeline Engine с самого начала
+ * обработки сообщения, не перечитывается из {@code msgctx} — Billing
+ * намеренно не читает Runtime Redis per-message ради throughput). Per-partner
+ * резолв тарифа — {@link TariffCache}, вызывающая сторона ({@link KafkaIo})
+ * передаёт уже резолвленный {@link TariffResolver} в {@link #resolveTariff}.
+ * Конструкторный {@code tariffResolver} остаётся дефолтом только для
+ * {@link #handleBillingExecute} (чистый in-memory путь юнит-тестов).
  */
 public final class BillingService {
 
@@ -50,13 +54,13 @@ public final class BillingService {
      * ({@code perSegment * segmentCount} с отрицательным множителем), и
      * {@code applyCharge} рапортует это как обычный {@code SUCCEEDED}.
      */
-    public TariffResolver.Tariff resolveTariff(BillingExtension ext) {
+    public TariffResolver.Tariff resolveTariff(TariffResolver resolver, BillingExtension ext) {
         if (ext.getSegmentCount() <= 0) {
             throw new IllegalArgumentException(
                 "segment_count обязан быть положительным, получено " + ext.getSegmentCount()
                     + " — отрицательное/нулевое значение инвертировало бы списание в начисление");
         }
-        return tariffResolver.resolve(ext.getCategory(), ext.getSegmentCount());
+        return resolver.resolve(ext.getCategory(), ext.getSegmentCount());
     }
 
     public StageCompletedEvent buildEvent(StageExecuteCommand command, String category, TariffResolver.Tariff tariff, ChargeResult chargeResult) {
@@ -81,7 +85,7 @@ public final class BillingService {
      */
     public Result handleBillingExecute(StageExecuteCommand command, Account account, long expectedEpoch) {
         BillingExtension ext = command.getBilling();
-        TariffResolver.Tariff tariff = resolveTariff(ext);
+        TariffResolver.Tariff tariff = resolveTariff(tariffResolver, ext);
         ChargeResult chargeResult = BillingAccountState.applyCharge(account, command.getStageExecutionId(), tariff.amountMinorUnits(), expectedEpoch);
         StageCompletedEvent event = buildEvent(command, ext.getCategory(), tariff, chargeResult);
         return new Result(event, chargeResult.account());
@@ -122,6 +126,11 @@ public final class BillingService {
             .setStageExecutionId(command.getStageExecutionId())
             .setAttempt(command.getAttempt())
             .setStageName(command.getStageName())
-            .setTraceparent(command.getTraceparent());
+            .setTraceparent(command.getTraceparent())
+            // Фаза 11 плана закрытия API-пробелов: эхо command.sandbox —
+            // общий "конверт" StageCompletedEvent несёт флаг независимо от
+            // outcome (succeeded/rejected), чтобы message-state-resolver
+            // видел его даже при отклонённом заряде.
+            .setSandbox(command.getSandbox());
     }
 }

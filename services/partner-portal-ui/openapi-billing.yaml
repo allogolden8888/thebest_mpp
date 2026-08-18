@@ -1,0 +1,153 @@
+openapi: 3.0.3
+info:
+  title: Billing Self-Service API
+  version: "1.0.0"
+  description: >
+    Ручно составленная спецификация, отражающая реальные маршруты
+    services/billing-self-service-api/internal/httpapi (Фаза 5 плана,
+    /Users/Alisher/.claude/plans/luminous-hugging-charm.md). Поддерживается
+    вручную, должна обновляться при изменении маршрутов сервиса.
+servers:
+  - url: /v1/self-service/billing
+security:
+  - bearerAuth: []
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    LedgerEntry:
+      type: object
+      required: [id, charge_id, account_id, partner_id, amount, currency, entry_type, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        charge_id: { type: string }
+        account_id: { type: string }
+        partner_id: { type: string }
+        amount:
+          type: string
+          description: NUMERIC(18,4) как строка — не парсить как float, только для отображения/дальнейшего decimal-разбора.
+        currency: { type: string }
+        entry_type: { type: string, enum: [charge, compensating] }
+        source_charge_id: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+    SpendSummary:
+      type: object
+      required: [currency, total]
+      properties:
+        currency: { type: string }
+        total: { type: string, description: "netto (charge - compensating) как строка, та же NUMERIC-осторожность, что LedgerEntry.amount" }
+    PricePerSegment:
+      type: object
+      additionalProperties: { type: integer }
+    ServicePackage:
+      type: object
+      required: [segments, price]
+      properties:
+        segments: { type: integer, format: int64 }
+        price: { type: integer, format: int64 }
+    RecurringChargesSpec:
+      type: object
+      properties:
+        alphaname_monthly_fee: { type: integer, format: int64 }
+        service_sms_package: { $ref: "#/components/schemas/ServicePackage" }
+    BillingTariff:
+      type: object
+      required: [currency, price_per_segment, default_category]
+      properties:
+        currency: { type: string }
+        price_per_segment: { $ref: "#/components/schemas/PricePerSegment" }
+        default_category: { type: string }
+        recurring_charges: { $ref: "#/components/schemas/RecurringChargesSpec" }
+    TariffResponse:
+      type: object
+      required: [custom]
+      properties:
+        custom:
+          type: boolean
+          description: >
+            false — для партнёра не опубликован собственный BILLING_TARIFF,
+            применяется платформенный дефолт billing-service; конкретные
+            цифры дефолта этому сервису недоступны (зашиты в образ
+            billing-service) — не показывать угаданные значения, только
+            факт "используется дефолт".
+        tariff: { $ref: "#/components/schemas/BillingTariff" }
+    RecurringChargePreview:
+      type: object
+      required: [sender_id, type, fee_known]
+      properties:
+        sender_id: { type: string }
+        type: { type: string, enum: [ALPHANAME, SHORT_NUMBER] }
+        fee_known:
+          type: boolean
+          description: false — тариф для партнёра не опубликован, показывать "уточняется", не подставлять 0/угаданное значение.
+        fee: { type: integer, format: int64 }
+        currency: { type: string }
+paths:
+  /ledger:
+    get:
+      operationId: getLedger
+      parameters:
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+        - name: limit
+          in: query
+          schema: { type: integer }
+        - name: offset
+          in: query
+          schema: { type: integer }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/LedgerEntry" }
+  /summary:
+    get:
+      operationId: getSpendSummary
+      description: from и to обязательны (RFC3339).
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SpendSummary" }
+  /tariff:
+    get:
+      operationId: getTariff
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TariffResponse" }
+  /recurring:
+    get:
+      operationId: getRecurringPreview
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/RecurringChargePreview" }

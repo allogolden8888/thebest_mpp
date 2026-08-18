@@ -16,10 +16,19 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 uuid = { version = "1", features = ["v4"] }
-# Не добавлен: async-trait — ни один трейт здесь не нуждается в async fn
-# в trait object (AuthVerifier/AdmissionGate/RateLimiter — все синхронные,
-# единственный async I/O — publish_incoming и sync_rate_limit_counters,
-# оба конкретные функции, не за трейтом).
+# reqwest — единственный HTTP-клиент в этом сервисе, добавлен ради
+# vault_auth.rs (VaultAuthVerifier читает partner credentials из живого
+# Vault вместо статических PARTNER_CRED_* env-переменных). rustls-tls (не
+# default-tls/native-tls) — не тянуть системный OpenSSL ради одного
+# HTTP-клиента, тот же выбор, что уже избегает лишних системных зависимостей
+# у rdkafka/redis в этом сервисе.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Не добавлен: async-trait. AuthVerifier::verify теперь возвращает
+# `Pin<Box<dyn Future<...>>>` вручную (VaultAuthVerifier делает реальный
+# сетевой I/O) — трейт по-прежнему используется как `Box<dyn AuthVerifier>`
+# (AppState), поэтому нужен dyn-совместимый async, но ручной boxed-future
+# ничем не хуже async-trait для одного метода и не добавляет зависимость.
+# AdmissionGate/RateLimiter остаются полностью синхронными.
 
 [build-dependencies]
 prost-build = "0.13"

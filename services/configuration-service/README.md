@@ -26,6 +26,17 @@ go test ./...
 
 **Исправлено по code review:** сервис изначально не компилировался — `//go:embed schemas/*.json` в `internal/validate/validate.go` указывал на директорию `internal/validate/schemas/`, а реальные файлы лежали в `services/configuration-service/schemas/` (на уровень выше пакета, `go:embed` не может ссылаться за пределы своей директории через `../`). Схемы перенесены под `internal/validate/schemas/`. Отдельно `compiler.AddResource(url, doc)` передавал уже распарсенный `any` вместо `io.Reader`, ожидаемого текущей версией `santhosh-tekuri/jsonschema/v5` — заменено на `compiler.AddResource(url, bytes.NewReader(raw))`. Оба бага означали, что `internal/validate`/`internal/store`/`internal/grpcserver`/`cmd` никогда не собирались в этом состоянии, несмотря на предыдущую версию этого README, утверждавшую обратное — сейчас `go build ./... && go test ./...` реально проходит (перепроверено).
 
+## Config preview/diff/dry-run (luminous-hugging-charm.md Фаза 10)
+
+Два новых RPC на `ConfigService` (`internal_control.proto`), оба read-mostly, ни один не пишет в `config_versions`/`config_outbox`:
+
+* **`ValidateVersion(entity_type, payload_json) -> (valid, errors)`** — тот же `Validator.Validate`, что `CreateVersion` уже вызывает первым шагом, здесь он единственный шаг. **Невалидный payload — НЕ gRPC-ошибка**: `valid=false` с `errors` — обычный успешный RPC-ответ (см. докстринг метода в `server.go`). Это ожидаемый, частый исход ("покажи мне, что не так до публикации"), не исключительная ситуация вызывающего — в отличие от `CreateVersion`, где та же ошибка валидации маппится в `codes.InvalidArgument`.
+* **`DiffVersions(entity_type, entity_id, from_version, to_version) -> (from_payload_json, to_payload_json)`** — новый `store.GetVersionByNumber` (единственный store-метод, который вообще возвращает `payload` — остальные RPC этого сервиса сознательно его не несут). Возвращает оба payload **как есть**, без вычисления самого diff — построчный/структурный diff сознательно оставлен `backoffice-ui` (`ConfigView.vue`, карточка "Diff"), этот сервис не должен обрастать диффинг-библиотекой ради одного экрана другого сервиса.
+
+`backoffice-api` проксирует оба как `POST /v1/config/versions/validate` и `GET /v1/config/versions/diff?entity_type=&entity_id=&from=&to=` — **единственная пара маршрутов в `backoffice-api`, где `POST` не требует права**: `ValidateVersion` ничего не пишет, тот же класс действия, что read-only browse (см. `backoffice-api/README.md`).
+
+Тесты — `server_test.go` (фейковый `Store`, включая факт, что невалидный payload НЕ становится gRPC-ошибкой), `store_test.go` `TestGetVersionByNumberReturnsExactVersionPayload` (реальный Postgres, два payload двух версий одной сущности, сверка через нормализацию JSON — JSONB переформатирует пробелы при хранении, `{"n":1}` возвращается как `{"n": 1}`, побайтовое сравнение было бы хрупким).
+
 ## Что НЕ реализовано на этом шаге (честно, не спрятано)
 
 * **ОБНОВЛЕНО 2026-08-06:** `docker build` реально прогнан и провалидирован для этого сервиса (найдены и исправлены реальные баги по пути, где применимо — см. `development_plan.md` "Координация" п.5 и `infra/docker/README.md`). Формулировка ниже — из более раннего состояния сессии, оставлена для истории.

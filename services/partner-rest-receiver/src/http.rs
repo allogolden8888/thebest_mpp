@@ -1,9 +1,13 @@
-//! Оркестрация всего `service_internal_methods.md` §1.1: разделено на
-//! `authorize_and_admit` — чистая синхронная функция (validate/auth/IP/
-//! admission/rate-limit, тестируется без сети) и тонкий Axum-обработчик,
-//! который добавляет только реальный async I/O (`publish_incoming`).
-//! Тот же паттерн "чистое ядро + тонкая обвязка", что и `handle_command`
-//! у остальных сервисов этого среза.
+//! Оркестрация всего `service_internal_methods.md` §1.1: `authorize_and_admit`
+//! (validate/auth/IP/admission/rate-limit) + тонкий Axum-обработчик, который
+//! добавляет остальной async I/O (`publish_incoming` и т.д.). Тот же паттерн
+//! "ядро + тонкая обвязка", что и `handle_command` у остальных сервисов этого
+//! среза — но, в отличие от них, ядро больше не полностью синхронное: с
+//! появлением `VaultAuthVerifier` (`vault_auth.rs`) `auth_verifier.verify`
+//! может делать реальный сетевой I/O (Vault read на cache miss), поэтому
+//! `authorize_and_admit` теперь `async fn`. Остаётся тестируемым без реальной
+//! сети — `AuthVerifier` тестового дубля (`AcceptAnyKey` ниже) ничего не
+//! ждёт, `#[tokio::test]` вместо `#[test]` — единственное отличие для тестов.
 
 use crate::admission::{AdmissionDecision, AdmissionGate};
 use crate::auth::AuthVerifier;
@@ -76,7 +80,7 @@ pub enum HandlerError {
 /// `check_rate_limit` ниже (см. `RateLimiter::try_consume_auth_attempt`) —
 /// легитимный трафик того же партнёра не наказывается чужими попытками
 /// подбора ключа.
-pub fn authorize_and_admit(
+pub async fn authorize_and_admit(
     raw: &RawRequest,
     snapshot: &PartnerSnapshot,
     auth_verifier: &dyn AuthVerifier,
@@ -95,7 +99,7 @@ pub fn authorize_and_admit(
     if !partner.is_active() {
         return Err(HandlerError::PartnerNotActive);
     }
-    if !auth_verifier.verify(application, &validated.api_key) {
+    if !auth_verifier.verify(application, &validated.api_key).await {
         return Err(HandlerError::AuthFailed);
     }
 
@@ -205,6 +209,11 @@ async fn handle_send_message(
         remote_ip: extract_remote_ip(&headers, peer),
         body_json: body,
         idempotency_key: header_string(&headers, "x-idempotency-key"),
+        // Фаза 11 плана закрытия API-пробелов — dry-run отправка. Только
+        // литеральное "true" включает sandbox: отсутствие заголовка,
+        // "false", "1", опечатка и т.п. — всё безопасно трактуется как
+        // false, не пытаемся угадывать намерение партнёра из мусора.
+        sandbox: header_string(&headers, "x-sandbox").as_deref() == Some("true"),
     };
 
     let validated = match authorize_and_admit(
@@ -213,7 +222,9 @@ async fn handle_send_message(
         state.auth_verifier.as_ref(),
         state.admission_gate.as_ref(),
         &state.rate_limiter,
-    ) {
+    )
+    .await
+    {
         Ok(v) => v,
         Err(e) => {
             let (status, retry_after, error) = error_response_parts(&e);
@@ -337,8 +348,8 @@ mod tests {
 
     struct AcceptAnyKey;
     impl AuthVerifier for AcceptAnyKey {
-        fn verify(&self, _application: &Application, provided_key: &str) -> bool {
-            provided_key == "correct-key"
+        fn verify<'a>(&'a self, _application: &'a Application, provided_key: &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+            Box::pin(async move { provided_key == "correct-key" })
         }
     }
 
@@ -373,33 +384,34 @@ mod tests {
             remote_ip: Some("185.65.212.55".parse().unwrap()),
             body_json: r#"{"msisdn":"998901331835","sender_id":"Click","body":"OTP 123456"}"#.into(),
             idempotency_key: None,
+            sandbox: false,
         }
     }
 
-    #[test]
-    fn happy_path_authorized() {
-        let result = authorize_and_admit(&raw(), &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &RateLimiter::default());
+    #[tokio::test]
+    async fn happy_path_authorized() {
+        let result = authorize_and_admit(&raw(), &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &RateLimiter::default()).await;
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn wrong_api_key_rejected_as_auth_failed() {
+    #[tokio::test]
+    async fn wrong_api_key_rejected_as_auth_failed() {
         let mut r = raw();
         r.api_key = Some("wrong-key".into());
-        let result = authorize_and_admit(&r, &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &RateLimiter::default());
+        let result = authorize_and_admit(&r, &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &RateLimiter::default()).await;
         assert_eq!(result.unwrap_err(), HandlerError::AuthFailed);
     }
 
-    #[test]
-    fn unknown_partner_rejected_as_auth_failed_not_leaking_existence() {
+    #[tokio::test]
+    async fn unknown_partner_rejected_as_auth_failed_not_leaking_existence() {
         let mut r = raw();
         r.partner_id = Some("unknown_partner".into());
-        let result = authorize_and_admit(&r, &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &RateLimiter::default());
+        let result = authorize_and_admit(&r, &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &RateLimiter::default()).await;
         assert_eq!(result.unwrap_err(), HandlerError::AuthFailed);
     }
 
-    #[test]
-    fn suspended_partner_rejected() {
+    #[tokio::test]
+    async fn suspended_partner_rejected() {
         let mut snap = snapshot();
         snap = PartnerSnapshot::from_partners(vec![Partner {
             partner_id: "click_uz".into(),
@@ -407,21 +419,21 @@ mod tests {
             status: "suspended".into(),
             applications: snap.application("click_uz", "click_uz_main").unwrap().0.applications.clone(),
         }]);
-        let result = authorize_and_admit(&raw(), &snap, &AcceptAnyKey, &AlwaysAdmit, &RateLimiter::default());
+        let result = authorize_and_admit(&raw(), &snap, &AcceptAnyKey, &AlwaysAdmit, &RateLimiter::default()).await;
         assert_eq!(result.unwrap_err(), HandlerError::PartnerNotActive);
     }
 
-    #[test]
-    fn ip_outside_allowlist_rejected() {
+    #[tokio::test]
+    async fn ip_outside_allowlist_rejected() {
         let mut r = raw();
         r.remote_ip = Some("8.8.8.8".parse().unwrap());
-        let result = authorize_and_admit(&r, &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &RateLimiter::default());
+        let result = authorize_and_admit(&r, &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &RateLimiter::default()).await;
         assert_eq!(result.unwrap_err(), HandlerError::IpOrChannelDenied);
     }
 
-    #[test]
-    fn admission_reject_propagates_retry_after() {
-        let result = authorize_and_admit(&raw(), &snapshot(), &AcceptAnyKey, &AlwaysReject(30), &RateLimiter::default());
+    #[tokio::test]
+    async fn admission_reject_propagates_retry_after() {
+        let result = authorize_and_admit(&raw(), &snapshot(), &AcceptAnyKey, &AlwaysReject(30), &RateLimiter::default()).await;
         assert_eq!(result.unwrap_err(), HandlerError::AdmissionRejected { retry_after_seconds: 30 });
     }
 
@@ -431,8 +443,8 @@ mod tests {
     /// без единого throttling. Теперь после headroom-ёмкости (rate_limit_tps=5
     /// * 4 = 20) попытки подбора начинают получать AuthRateLimited — конечная,
     /// не бесконечная попытка перебора.
-    #[test]
-    fn brute_force_against_known_pair_with_wrong_key_is_eventually_throttled() {
+    #[tokio::test]
+    async fn brute_force_against_known_pair_with_wrong_key_is_eventually_throttled() {
         let limiter = RateLimiter::default();
         let mut wrong_key_request = raw();
         wrong_key_request.api_key = Some("guessed-wrong-key".into());
@@ -440,7 +452,7 @@ mod tests {
         let mut auth_failed_count = 0;
         let mut auth_rate_limited_count = 0;
         for _ in 0..30 {
-            match authorize_and_admit(&wrong_key_request, &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &limiter) {
+            match authorize_and_admit(&wrong_key_request, &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &limiter).await {
                 Err(HandlerError::AuthFailed) => auth_failed_count += 1,
                 Err(HandlerError::AuthRateLimited) => auth_rate_limited_count += 1,
                 other => panic!("ожидали AuthFailed или AuthRateLimited, получили {other:?}"),
@@ -450,30 +462,33 @@ mod tests {
         assert_eq!(auth_rate_limited_count, 10, "остальные попытки в этом окне должны быть отклонены throttling'ом, не тратить CPU на сравнение ключа");
     }
 
-    #[test]
-    fn legitimate_traffic_at_configured_tps_never_sees_auth_rate_limited() {
+    #[tokio::test]
+    async fn legitimate_traffic_at_configured_tps_never_sees_auth_rate_limited() {
         let limiter = RateLimiter::default();
         // rate_limit_tps=5 в snapshot() -> message bucket capacity=1 (см.
         // MESSAGE_BURST_HEADROOM_FACTOR: max(5*0.15, 1.0)=1) — ровно 1
-        // мгновенный запрос должен пройти (не AuthRateLimited).
-        let result = authorize_and_admit(&raw(), &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &limiter);
+        // мгновенный запрос должен пройти (не AuthRateLimited). Значение
+        // capacity — из main (1500 TPS load-test push), вызов через .await —
+        // из subagent-1 (authorize_and_admit стал async ради VaultAuthVerifier,
+        // который делает реальный сетевой вызов; слияние двух веток).
+        let result = authorize_and_admit(&raw(), &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &limiter).await;
         assert!(result.is_ok(), "легитимный запрос в пределах собственного rate_limit_tps не должен быть отклонён");
     }
 
-    #[test]
-    fn rate_limit_exhausted_after_configured_tps() {
+    #[tokio::test]
+    async fn rate_limit_exhausted_after_configured_tps() {
         let limiter = RateLimiter::default();
         // rate_limit_tps=5 -> message bucket capacity=1 (см. MESSAGE_BURST_HEADROOM_FACTOR).
-        assert!(authorize_and_admit(&raw(), &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &limiter).is_ok());
-        let result = authorize_and_admit(&raw(), &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &limiter);
+        assert!(authorize_and_admit(&raw(), &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &limiter).await.is_ok());
+        let result = authorize_and_admit(&raw(), &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &limiter).await;
         assert_eq!(result.unwrap_err(), HandlerError::RateLimited);
     }
 
-    #[test]
-    fn validation_error_propagates_with_original_reason() {
+    #[tokio::test]
+    async fn validation_error_propagates_with_original_reason() {
         let mut r = raw();
         r.body_json = "not json".into();
-        let result = authorize_and_admit(&r, &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &RateLimiter::default());
+        let result = authorize_and_admit(&r, &snapshot(), &AcceptAnyKey, &AlwaysAdmit, &RateLimiter::default()).await;
         assert!(matches!(result.unwrap_err(), HandlerError::Validation(_)));
     }
 

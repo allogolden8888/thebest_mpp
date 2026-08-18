@@ -44,13 +44,19 @@ pub struct PolicyLiveState {
 /// `policy.policy_template`. `partner_id`/`operator_id`/`channel`/`version`
 /// сознательно проигнорированы — этот сервис держит один общий реестр
 /// шаблонов, не резолвит по партнёру/каналу (та же упрощённая семантика,
-/// что уже была у статического файла).
+/// что уже была у статического файла). `sender_id` — ИСКЛЮЧЕНИЕ из этого
+/// правила (Фаза 2 плана закрытия API-пробелов): в отличие от остальных
+/// игнорируемых полей, он напрямую участвует в матчинге
+/// (`Template::find_match`), не просто метаданные — `#[serde(default)]`,
+/// т.к. это поле новее самого формата payload'а (nullable в схеме).
 #[derive(Debug, Deserialize)]
 struct TemplateConfigPayload {
     template_id: String,
     category: String,
     pattern: String,
     status: String, // "active" | "archived"
+    #[serde(default)]
+    sender_id: Option<String>,
 }
 
 /// Живое состояние policy-конфига поверх статических bootstrap-файлов —
@@ -94,6 +100,7 @@ impl ConfigOverlay {
                     template_id: payload.template_id.clone(),
                     pattern: payload.pattern.clone(),
                     category: payload.category.clone(),
+                    sender_id: payload.sender_id.clone(),
                 },
             );
         }
@@ -238,6 +245,7 @@ mod tests {
             template_id: "tpl-contract-payment".to_string(),
             pattern: "%w shartnoma bo'yicha %d{1,6} so'm to'lovni bugun amalga oshiring".to_string(),
             category: "TRANSACTION".to_string(),
+            sender_id: None,
         }
     }
 
@@ -292,7 +300,7 @@ mod tests {
     fn starts_out_matching_the_static_baseline() {
         let overlay = overlay();
         let state = overlay.build_live_state();
-        assert!(state.templates.find_match("Hello shartnoma bo'yicha 123 so'm to'lovni bugun amalga oshiring").is_some());
+        assert!(state.templates.find_match("Hello shartnoma bo'yicha 123 so'm to'lovni bugun amalga oshiring", "any-sender").is_some());
     }
 
     #[test]
@@ -321,7 +329,7 @@ mod tests {
         let event = template_event("tpl-new", "SERVICE", "%w promo kod faollashtirildi", "active");
         assert!(handle_config_change(&overlay, &event));
         let state = overlay.build_live_state();
-        let matched = state.templates.find_match("Hello promo kod faollashtirildi").unwrap();
+        let matched = state.templates.find_match("Hello promo kod faollashtirildi", "any-sender").unwrap();
         assert_eq!(matched.category, "SERVICE");
     }
 
@@ -347,7 +355,7 @@ mod tests {
         assert!(handle_config_change(&overlay, &real_event), "handle_config_change должен вернуть true для реального события");
         let state = overlay.build_live_state();
         let real_body = "Promo5789 promo kod faollashtirildi"; // реально из msgctx:38dbc4b4-... в Runtime Redis
-        let matched = state.templates.find_match(real_body);
+        let matched = state.templates.find_match(real_body, "any-sender");
         assert!(matched.is_some(), "реальное тело реально провалившегося сообщения должно матчиться, получили {matched:?}");
         assert_eq!(matched.unwrap().category, "SERVICE");
     }
@@ -357,13 +365,13 @@ mod tests {
         let overlay = overlay();
         let event = template_event("tpl-new", "SERVICE", "%w promo kod faollashtirildi", "active");
         handle_config_change(&overlay, &event);
-        assert!(overlay.build_live_state().templates.find_match("Hello promo kod faollashtirildi").is_some());
+        assert!(overlay.build_live_state().templates.find_match("Hello promo kod faollashtirildi", "any-sender").is_some());
 
         handle_config_change(&overlay, &template_event("tpl-new", "SERVICE", "%w promo kod faollashtirildi", "archived"));
         let state = overlay.build_live_state();
-        assert!(state.templates.find_match("Hello promo kod faollashtirildi").is_none());
+        assert!(state.templates.find_match("Hello promo kod faollashtirildi", "any-sender").is_none());
         // Базовый (статический) шаблон остаётся нетронутым.
-        assert!(state.templates.find_match("Hello shartnoma bo'yicha 123 so'm to'lovni bugun amalga oshiring").is_some());
+        assert!(state.templates.find_match("Hello shartnoma bo'yicha 123 so'm to'lovni bugun amalga oshiring", "any-sender").is_some());
     }
 
     #[test]

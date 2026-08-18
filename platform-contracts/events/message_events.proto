@@ -18,6 +18,14 @@ message IncomingMessage {
   mpp.common.v1.Channel channel = 3;
   string partner_id = 4;
   string application_id = 5;
+  // Фаза 11 плана закрытия API-пробелов: dry-run режим — не тарифицируется
+  // (billing-service), не отправляется реальному оператору
+  // (delivery-service), lifecycle всё равно проходит до DELIVERED через
+  // синтетический DeliveryStatusEvent. Прокидывается через Pipeline Engine
+  // ExecutionState в StageExecuteCommand.sandbox (общее поле верхнего
+  // уровня, не per-extension — нужно всем стадиям одинаково, см.
+  // stage_contract.proto).
+  bool sandbox = 6;
 
   oneof body {
     mpp.common.v1.SmsPayload sms = 10;

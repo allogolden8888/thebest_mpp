@@ -154,6 +154,269 @@ components:
         rows:
           type: array
           items: { $ref: "#/components/schemas/ReportRow" }
+    MeResponse:
+      type: object
+      required: [external_id, roles, permissions]
+      properties:
+        external_id: { type: string }
+        roles:
+          type: array
+          items: { type: string }
+        permissions:
+          type: array
+          items: { type: string }
+    AuditEntry:
+      type: object
+      required: [source, actor, action, target, created_at]
+      properties:
+        source:
+          type: string
+          enum: [replay, execution_control, billing_reconciliation, identity]
+        actor: { type: string }
+        action: { type: string }
+        target: { type: string }
+        created_at: { type: string, format: date-time }
+    AuditResponse:
+      type: object
+      required: [entries]
+      properties:
+        entries:
+          type: array
+          items: { $ref: "#/components/schemas/AuditEntry" }
+        next_offset: { type: integer, nullable: true }
+    IamRole:
+      type: object
+      required: [id, name, description, permissions]
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        description: { type: string }
+        permissions:
+          type: array
+          items: { type: string }
+    IamRolesResponse:
+      type: object
+      required: [roles]
+      properties:
+        roles:
+          type: array
+          items: { $ref: "#/components/schemas/IamRole" }
+    StaffAssignment:
+      type: object
+      required: [id, external_id, role, granted_by, granted_at]
+      properties:
+        id: { type: integer, format: int64 }
+        external_id: { type: string }
+        role: { type: string }
+        granted_by: { type: string }
+        granted_at: { type: string, format: date-time }
+    StaffAssignmentsResponse:
+      type: object
+      required: [assignments]
+      properties:
+        assignments:
+          type: array
+          items: { $ref: "#/components/schemas/StaffAssignment" }
+    CreateStaffAssignmentRequest:
+      type: object
+      required: [external_id, role]
+      properties:
+        external_id: { type: string }
+        role: { type: string }
+    CreateStaffAssignmentResponse:
+      type: object
+      required: [assignment]
+      properties:
+        assignment: { $ref: "#/components/schemas/StaffAssignment" }
+    RevokeStaffAssignmentResponse:
+      type: object
+      required: [revoked]
+      properties:
+        revoked: { type: boolean }
+    RotateCredentialResponse:
+      type: object
+      required: [credential_ref, secret_version, plaintext_secret]
+      properties:
+        credential_ref: { type: string }
+        secret_version: { type: integer }
+        plaintext_secret:
+          type: string
+          description: >
+            Присутствует ТОЛЬКО в этом одном ответе (show-once) — нигде не
+            сохраняется, повторно недоступен после закрытия модалки.
+        issued_at: { type: string, format: date-time }
+    IssuedSecret:
+      type: object
+      required: [id, partner_id, application_id, credential_ref, secret_version, status, issued_by]
+      properties:
+        id: { type: integer, format: int64 }
+        partner_id: { type: string }
+        application_id: { type: string }
+        credential_ref: { type: string }
+        secret_version: { type: integer }
+        status: { type: string }
+        issued_at: { type: string, format: date-time }
+        issued_by: { type: string }
+    IssuedSecretsResponse:
+      type: object
+      required: [secrets]
+      properties:
+        secrets:
+          type: array
+          items: { $ref: "#/components/schemas/IssuedSecret" }
+    ValidateVersionRequest:
+      type: object
+      required: [entity_type, payload_json]
+      properties:
+        entity_type: { type: string }
+        payload_json: {}
+    ValidateVersionResponse:
+      type: object
+      required: [valid, errors]
+      properties:
+        valid: { type: boolean }
+        errors:
+          type: array
+          items: { type: string }
+    DiffVersionsResponse:
+      type: object
+      required: [from_version, from_payload_json, to_version, to_payload_json]
+      properties:
+        from_version: { type: integer }
+        from_payload_json: {}
+        to_version: { type: integer }
+        to_payload_json: {}
+    Incident:
+      type: object
+      required: [id, title, severity, status, opened_by, opened_at]
+      properties:
+        id: { type: integer, format: int64 }
+        title: { type: string }
+        severity: { type: string, enum: [LOW, MEDIUM, HIGH, CRITICAL] }
+        status: { type: string, enum: [OPEN, RESOLVED] }
+        opened_by: { type: string }
+        opened_at: { type: string, format: date-time }
+        resolved_by: { type: string }
+        resolved_at: { type: string, format: date-time }
+        postmortem_notes: { type: string }
+    OpenIncidentRequest:
+      type: object
+      required: [title, severity]
+      properties:
+        title: { type: string }
+        severity: { type: string, enum: [LOW, MEDIUM, HIGH, CRITICAL] }
+    ListIncidentsResponse:
+      type: object
+      required: [incidents]
+      properties:
+        incidents:
+          type: array
+          items: { $ref: "#/components/schemas/Incident" }
+    TimelineEntry:
+      type: object
+      required: [id, scope, scope_id, state, admission_rate, reason, requested_by]
+      properties:
+        id: { type: integer, format: int64 }
+        scope: { type: string }
+        scope_id: { type: string }
+        state: { type: string }
+        admission_rate: { type: number }
+        reason: { type: string }
+        requested_by: { type: string }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+    IncidentNote:
+      type: object
+      required: [id, incident_id, author, note]
+      properties:
+        id: { type: integer, format: int64 }
+        incident_id: { type: integer, format: int64 }
+        author: { type: string }
+        note: { type: string }
+        created_at: { type: string, format: date-time }
+    IncidentDetail:
+      type: object
+      required: [incident, timeline, notes]
+      properties:
+        incident: { $ref: "#/components/schemas/Incident" }
+        timeline:
+          type: array
+          items: { $ref: "#/components/schemas/TimelineEntry" }
+        notes:
+          type: array
+          items: { $ref: "#/components/schemas/IncidentNote" }
+    AddNoteRequest:
+      type: object
+      required: [note]
+      properties:
+        note: { type: string }
+    ResolveIncidentRequest:
+      type: object
+      required: [postmortem_notes]
+      properties:
+        postmortem_notes: { type: string }
+    PartitionLag:
+      type: object
+      required: [topic, partition, commit_offset, end_offset, lag]
+      properties:
+        topic: { type: string }
+        partition: { type: integer }
+        commit_offset: { type: integer, format: int64 }
+        end_offset: { type: integer, format: int64 }
+        lag: { type: integer, format: int64 }
+        error: { type: string }
+    ConsumerGroupLag:
+      type: object
+      required: [group, state, total_lag, partitions]
+      properties:
+        group: { type: string }
+        state: { type: string }
+        total_lag: { type: integer, format: int64 }
+        partitions:
+          type: array
+          items: { $ref: "#/components/schemas/PartitionLag" }
+        error: { type: string }
+    KafkaLagSnapshot:
+      type: object
+      required: [generated_at, bootstrap_servers, groups]
+      properties:
+        generated_at: { type: string, format: date-time }
+        bootstrap_servers:
+          type: array
+          items: { type: string }
+        groups:
+          type: array
+          items: { $ref: "#/components/schemas/ConsumerGroupLag" }
+        error: { type: string }
+    ReadyzResult:
+      type: object
+      required: [service, ready, latency_ms]
+      properties:
+        service: { type: string }
+        ready: { type: boolean }
+        http_status: { type: integer }
+        latency_ms: { type: integer, format: int64 }
+        error: { type: string }
+    ReadyzSnapshot:
+      type: object
+      required: [generated_at, services]
+      properties:
+        generated_at: { type: string, format: date-time }
+        services:
+          type: array
+          items: { $ref: "#/components/schemas/ReadyzResult" }
+    OpsSnapshotResponse:
+      type: object
+      required: [kafka_lag_available, readyz_available]
+      properties:
+        kafka_lag:
+          allOf: [{ $ref: "#/components/schemas/KafkaLagSnapshot" }]
+          nullable: true
+        kafka_lag_available: { type: boolean }
+        readyz:
+          allOf: [{ $ref: "#/components/schemas/ReadyzSnapshot" }]
+          nullable: true
+        readyz_available: { type: boolean }
 paths:
   /config/versions:
     post:
@@ -224,6 +487,46 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ConfigVersion" }
+  /config/versions/validate:
+    post:
+      operationId: validateConfigVersion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ValidateVersionRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ValidateVersionResponse" }
+  /config/versions/diff:
+    get:
+      operationId: diffConfigVersions
+      parameters:
+        - name: entity_type
+          in: query
+          required: true
+          schema: { type: string }
+        - name: entity_id
+          in: query
+          required: true
+          schema: { type: string }
+        - name: from
+          in: query
+          required: true
+          schema: { type: integer }
+        - name: to
+          in: query
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DiffVersionsResponse" }
   /execution-control/override:
     post:
       operationId: applyExecutionControlOverride
@@ -346,3 +649,205 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ReportResponse" }
+  /me:
+    get:
+      operationId: getMe
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MeResponse" }
+  /audit:
+    get:
+      operationId: listAudit
+      parameters:
+        - name: source
+          in: query
+          schema:
+            type: string
+            enum: [replay, execution_control, billing_reconciliation, identity]
+        - name: limit
+          in: query
+          schema: { type: integer }
+        - name: offset
+          in: query
+          schema: { type: integer }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditResponse" }
+  /iam/roles:
+    get:
+      operationId: listIamRoles
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IamRolesResponse" }
+  /iam/staff-assignments:
+    get:
+      operationId: listStaffAssignments
+      parameters:
+        - name: external_id
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffAssignmentsResponse" }
+    post:
+      operationId: createStaffAssignment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateStaffAssignmentRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreateStaffAssignmentResponse" }
+  /iam/staff-assignments/{external_id}/{role}:
+    delete:
+      operationId: revokeStaffAssignment
+      parameters:
+        - name: external_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: role
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RevokeStaffAssignmentResponse" }
+  /partners/{partner_id}/applications/{application_id}/credentials/rotate:
+    post:
+      operationId: rotatePartnerCredential
+      parameters:
+        - name: partner_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: application_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RotateCredentialResponse" }
+  /partners/{partner_id}/credentials:
+    get:
+      operationId: listPartnerCredentials
+      parameters:
+        - name: partner_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IssuedSecretsResponse" }
+  /incidents:
+    post:
+      operationId: openIncident
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OpenIncidentRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Incident" }
+    get:
+      operationId: listIncidents
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [OPEN, RESOLVED] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ListIncidentsResponse" }
+  /incidents/{incident_id}:
+    get:
+      operationId: getIncident
+      parameters:
+        - name: incident_id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IncidentDetail" }
+  /incidents/{incident_id}/notes:
+    post:
+      operationId: addIncidentNote
+      parameters:
+        - name: incident_id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AddNoteRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IncidentNote" }
+  /incidents/{incident_id}/resolve:
+    post:
+      operationId: resolveIncident
+      parameters:
+        - name: incident_id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResolveIncidentRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Incident" }
+  /ops/snapshot:
+    get:
+      operationId: getOpsSnapshot
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OpsSnapshotResponse" }

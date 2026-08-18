@@ -122,6 +122,11 @@ fn build_event(command: &StageExecuteCommand, outcome: Outcome, reason_code: &st
         retry_after: None,
         traceparent: command.traceparent.clone(),
         completed_at: None,
+        // Фаза 11 плана закрытия API-пробелов: эхо command.sandbox.
+        // resolve_final_route само не меняет поведение по sandbox — routing
+        // не трогает деньги/сеть (см. doc-комментарий в README), только
+        // переносит флаг дальше для видимости в message_read_model.
+        sandbox: command.sandbox,
         stage_result: result.map(StageResult::Routing),
     }
 }
@@ -252,6 +257,7 @@ mod tests {
             config_versions: Default::default(),
             traceparent: "tp1".into(),
             payload_ref: None,
+            sandbox: false,
             stage_extension: Some(StageExtension::Routing(crate::proto::RoutingExtension {
                 resolved_operator_id: resolved_operator_id.to_string(),
             })),
@@ -270,6 +276,17 @@ mod tests {
             }
             other => panic!("ожидали RoutingResult, получили {other:?}"),
         }
+    }
+
+    /// Фаза 11 плана закрытия API-пробелов: sandbox эхом переносится в
+    /// событие — routing-service сам не меняет поведение (не трогает
+    /// деньги/сеть), только переносит флаг дальше.
+    #[test]
+    fn sandbox_flag_is_echoed_from_command_into_event() {
+        let mut sandbox_command = command("beeline_uz");
+        sandbox_command.sandbox = true;
+        let event = handle_command(&sandbox_command, &snapshot(), &ControlSnapshot::new());
+        assert!(event.sandbox, "sandbox=true в команде обязан попасть в событие");
     }
 
     #[test]

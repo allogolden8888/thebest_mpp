@@ -59,6 +59,13 @@ pub fn build_stage_execute(
             resolved_operator_id: state.resolved_operator_id.clone().unwrap_or_default(),
             segment_count: state.segment_count,
             category: state.category.clone().unwrap_or_default(),
+            // Найдено при закрытии multi-tenancy-пробела в Billing Service
+            // (Фаза 5a): добавлено полем 4 в BillingExtension, см. комментарий
+            // в platform-contracts/common/stage_contract.proto. ExecutionState
+            // уже накапливает partner_id с handle_incoming — только не
+            // прокидывал дальше сюда, тот же класс находки, что
+            // DeliveryExtension.resolved_operator_id выше.
+            partner_id: state.partner_id.clone(),
         }),
         StageName::Routing => StageExtension::Routing(RoutingExtension {
             resolved_operator_id: state.resolved_operator_id.clone().unwrap_or_default(),
@@ -118,6 +125,11 @@ pub fn build_stage_execute(
         config_versions: state.config_versions.clone(),
         traceparent: String::new(),
         payload_ref: None,
+        // Фаза 11: верхнеуровневое поле, присваивается один раз независимо
+        // от того, какая стадия строится — не размножается по match-arm'ам
+        // выше (в отличие от BillingExtension.partner_id, Фаза 5a), потому
+        // что sandbox нужен всем стадиям одинаково, не по-разному.
+        sandbox: state.sandbox,
         stage_extension: Some(extension),
     })
 }
@@ -134,7 +146,7 @@ mod tests {
     #[test]
     fn destination_resolution_command_carries_destination_address() {
         let pipeline = pipeline();
-        let state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX);
+        let state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "acme".into(), false);
         let decision = NextStageDecision { node_id: "n1_destination_resolution".into(), stage_name: "DESTINATION_RESOLUTION".into() };
         let command = build_stage_execute(&decision, &state, "998901331835", "se1".into()).unwrap();
         match command.stage_extension {
@@ -147,7 +159,7 @@ mod tests {
     #[test]
     fn billing_command_carries_accumulated_operator_and_category() {
         let pipeline = pipeline();
-        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 3, 2, i64::MAX);
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 3, 2, i64::MAX, "acme".into(), false);
         state.resolved_operator_id = Some("beeline".into());
         state.category = Some("TRANSACTION".into());
         let decision = NextStageDecision { node_id: "n3_billing".into(), stage_name: "BILLING".into() };
@@ -157,16 +169,34 @@ mod tests {
                 assert_eq!(ext.resolved_operator_id, "beeline");
                 assert_eq!(ext.category, "TRANSACTION");
                 assert_eq!(ext.segment_count, 3, "segment_count посчитан один раз при кэшировании контекста, не перечитывается");
+                assert_eq!(ext.partner_id, "acme", "partner_id обязан дойти до BillingExtension (Фаза 5a — multi-tenancy в Billing Service)");
             }
             other => panic!("ожидали BillingExtension, получили {other:?}"),
         }
+    }
+
+    /// Фаза 11: sandbox — верхнеуровневое поле StageExecuteCommand, не
+    /// per-extension (в отличие от BillingExtension.partner_id) — должно
+    /// доезжать одинаково для ЛЮБОЙ стадии, не только Billing/Delivery,
+    /// которые реально на него реагируют. Проверяем на Routing именно
+    /// потому, что RoutingExtension сам по себе sandbox не несёт вообще —
+    /// это доказывает, что поле присваивается независимо от того, какой
+    /// match-arm сработал.
+    #[test]
+    fn sandbox_reaches_top_level_command_regardless_of_stage() {
+        let pipeline = pipeline();
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "acme".into(), true);
+        state.resolved_operator_id = Some("beeline".into());
+        let decision = NextStageDecision { node_id: "n4_routing".into(), stage_name: "ROUTING".into() };
+        let command = build_stage_execute(&decision, &state, "998901331835", "se4".into()).unwrap();
+        assert!(command.sandbox, "sandbox=true в ExecutionState обязан попасть в StageExecuteCommand.sandbox даже для Routing");
     }
 
     #[test]
     fn delivery_command_carries_real_route_from_routing_result_not_routing_extension() {
         // Прямая регрессия на находку кодревью: раньше здесь строился RoutingExtension.
         let pipeline = pipeline();
-        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX);
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "acme".into(), false);
         state.route_id = Some("beeline_smpp_primary".into());
         state.protocol = Some(1); // PROTOCOL_SMPP
         state.route_version = Some("3".into());
@@ -190,7 +220,7 @@ mod tests {
         // Delivery не может резолвить Operator Route Registry
         // (operator_route:{operator_id}:{route_id}) без него.
         let pipeline = pipeline();
-        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX);
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "acme".into(), false);
         state.resolved_operator_id = Some("beeline".into());
         state.route_id = Some("beeline_smpp_primary".into());
         state.protocol = Some(1);
@@ -208,7 +238,7 @@ mod tests {
         // ExecutionState без изменений — не выводятся из category, как
         // resolved_operator_id/route_id выше.
         let pipeline = pipeline();
-        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 3, 1_700_000_000_000);
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 3, 1_700_000_000_000, "acme".into(), false);
         state.route_id = Some("beeline_smpp_primary".into());
         state.protocol = Some(1);
         let decision = NextStageDecision { node_id: "n5_delivery".into(), stage_name: "DELIVERY".into() };
@@ -224,7 +254,7 @@ mod tests {
     #[test]
     fn delivery_command_without_route_in_state_is_rejected_not_built_with_empty_fields() {
         let pipeline = pipeline();
-        let state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX); // route_id/protocol всё ещё None
+        let state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "acme".into(), false); // route_id/protocol всё ещё None
         let decision = NextStageDecision { node_id: "n5_delivery".into(), stage_name: "DELIVERY".into() };
         assert!(build_stage_execute(&decision, &state, "998901331835", "se5".into()).is_err());
     }
@@ -232,7 +262,7 @@ mod tests {
     #[test]
     fn delivery_reconciliation_command_carries_delivery_reconciliation_extension() {
         let pipeline = pipeline();
-        let state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX);
+        let state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "acme".into(), false);
         let decision = NextStageDecision { node_id: "n6_reconciliation".into(), stage_name: "DELIVERY_RECONCILIATION".into() };
         let command = build_stage_execute(&decision, &state, "998901331835", "se6".into()).unwrap();
         match command.stage_extension {
@@ -250,7 +280,7 @@ mod tests {
         // внутри build_stage_execute) — контроль за этим лежит на вызывающей стороне,
         // здесь только доказано, что значение пробрасывается как есть.
         let pipeline = pipeline();
-        let state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX);
+        let state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "acme".into(), false);
         let decision = NextStageDecision { node_id: "n1_destination_resolution".into(), stage_name: "DESTINATION_RESOLUTION".into() };
         let command = build_stage_execute(&decision, &state, "998901331835", "stable-id-123".into()).unwrap();
         assert_eq!(command.stage_execution_id, "stable-id-123");

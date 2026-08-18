@@ -58,6 +58,7 @@ pub fn build_incoming_message(
         channel: Channel::Sms as i32,
         partner_id: req.partner_id.clone(),
         application_id: req.application_id.clone(),
+        sandbox: req.sandbox,
         body: Some(Body::Sms(sms)),
         received_at: Some(to_timestamp(now)),
         message_ttl: Some(to_timestamp(now + DEFAULT_MESSAGE_TTL)),
@@ -81,6 +82,7 @@ mod tests {
             body: "Your OTP is 123456".into(),
             idempotency_key: None,
             priority: None,
+            sandbox: false,
         }
     }
 
@@ -120,6 +122,17 @@ mod tests {
         let received_at = msg.received_at.unwrap();
         let ttl = msg.message_ttl.unwrap();
         assert_eq!(ttl.seconds - received_at.seconds, DEFAULT_MESSAGE_TTL.as_secs() as i64);
+    }
+
+    /// Фаза 11 плана закрытия API-пробелов: ValidatedRequest.sandbox
+    /// обязан попасть в IncomingMessage.sandbox — единственная точка входа
+    /// dry-run-флага в весь остальной пайплайн.
+    #[test]
+    fn sandbox_flag_propagates_into_incoming_message() {
+        let mut r = req();
+        r.sandbox = true;
+        let msg = build_incoming_message(&r, "m1".into(), "t1".into(), SystemTime::now());
+        assert!(msg.sandbox);
     }
 
     #[test]

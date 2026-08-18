@@ -135,6 +135,13 @@ pub struct Template {
     pub template_id: String,
     pub pattern: String,
     pub category: String,
+    /// `None` — шаблон применим к любому отправителю партнёра (поведение по
+    /// умолчанию, сохраняющее сегодняшнее неявное поведение). `Some(id)` —
+    /// шаблон применим ТОЛЬКО к сообщениям с ровно этим `sender_id`
+    /// (Фаза 2 плана, `policy.policy_template.sender_id`, nullable —
+    /// null означает "все отправители партнёра", по аналогии с nullable
+    /// `operator_id`).
+    pub sender_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,6 +175,7 @@ impl TemplateId {
 pub struct CompiledRuleset {
     templates: Vec<Template>,                // индекс — TemplateId
     tokens_by_template: Vec<Vec<Token>>,      // индекс — TemplateId, параллельно templates
+    sender_id_by_template: Vec<Option<String>>, // индекс — TemplateId, параллельно templates (Фаза 2 — sender-scoping)
     automaton: Option<AhoCorasick>,
     pattern_owner: Vec<(TemplateId, usize)>,  // PatternID (индекс автомата) -> (template, frag_idx)
 }
@@ -175,6 +183,7 @@ pub struct CompiledRuleset {
 impl CompiledRuleset {
     pub fn new(templates: Vec<Template>) -> Self {
         let mut tokens_by_template: Vec<Vec<Token>> = Vec::with_capacity(templates.len());
+        let mut sender_id_by_template: Vec<Option<String>> = Vec::with_capacity(templates.len());
         let mut patterns: Vec<String> = Vec::new();
         let mut pattern_owner: Vec<(TemplateId, usize)> = Vec::new();
 
@@ -187,11 +196,12 @@ impl CompiledRuleset {
                 pattern_owner.push((template_id, idx));
             }
             tokens_by_template.push(tokens);
+            sender_id_by_template.push(t.sender_id.clone());
         }
 
         let automaton = if patterns.is_empty() { None } else { Some(AhoCorasick::new(&patterns).expect("valid patterns")) };
 
-        Self { templates, tokens_by_template, automaton, pattern_owner }
+        Self { templates, tokens_by_template, sender_id_by_template, automaton, pattern_owner }
     }
 
     /// template (TemplateId) -> {frag_idx -> [(start, end_exclusive), ...]}
@@ -336,11 +346,30 @@ impl CompiledRuleset {
     /// равенстве специфичности победит первый встреченный" держалась только
     /// на порядке обхода `Vec` — здесь она выражена явным сравнением, а не
     /// порядком итерации.
-    pub fn find_match(&self, text: &str) -> Option<MatchedTemplate> {
+    ///
+    /// Фаза 2 (`sender_id` в модели шаблонов) — `sender_id` сужает кандидатов
+    /// до шаблонов, применимых к ЭТОМУ отправителю: шаблон с
+    /// `Template.sender_id == None` подходит любому отправителю (сегодняшнее
+    /// поведение по умолчанию), шаблон с `Some(id)` — только отправителю с
+    /// ровно этим `sender_id`. Проверка — дешёвое сравнение `Option<String>`,
+    /// сделанное ВНУТРИ цикла по `hits.keys()` (то есть только для
+    /// кандидатов, уже прошедших Aho-Corasick-префильтр), а не отдельным
+    /// проходом по всем зарегистрированным шаблонам — иначе это вернуло бы
+    /// ровно ту O(число_шаблонов) регрессию, которая была найдена кодревью и
+    /// исправлена переходом на `hits.keys()` (см. комментарий выше). Фильтр
+    /// применяется ДО сравнения специфичности — шаблон с несовпадающим
+    /// sender_id не участвует в тай-брейке вообще, независимо от того,
+    /// насколько он специфичнее.
+    pub fn find_match(&self, text: &str, sender_id: &str) -> Option<MatchedTemplate> {
         let hits = self.fragment_hits(text);
 
         let mut best: Option<(TemplateId, (usize, usize))> = None; // (template_id, specificity) — TemplateId сам по себе insertion order
         for &template_id in hits.keys() {
+            if let Some(required) = &self.sender_id_by_template[template_id.index()] {
+                if required != sender_id {
+                    continue;
+                }
+            }
             if !self.check_template(template_id, &hits, text) {
                 continue;
             }
@@ -372,6 +401,7 @@ mod tests {
             template_id: "tpl-contract-payment".to_string(),
             pattern: "%w shartnoma bo'yicha %d{1,6} so'm to'lovni bugun amalga oshiring".to_string(),
             category: "TRANSACTION".to_string(),
+            sender_id: None,
         }
     }
 
@@ -379,7 +409,7 @@ mod tests {
     fn real_example_matches() {
         let ruleset = CompiledRuleset::new(vec![real_template()]);
         let text = "Hello1238!@* shartnoma bo'yicha 1 2 3 4 5 6 so'm to'lovni bugun amalga oshiring";
-        let result = ruleset.find_match(text);
+        let result = ruleset.find_match(text, "any-sender");
         assert!(result.is_some(), "должно было смачиться — это ровно пример из чата");
         assert_eq!(result.unwrap().category, "TRANSACTION");
     }
@@ -388,34 +418,34 @@ mod tests {
     fn digit_count_out_of_range_no_match() {
         let ruleset = CompiledRuleset::new(vec![real_template()]);
         let text = "Hello1238!@* shartnoma bo'yicha 1 2 3 4 5 6 7 so'm to'lovni bugun amalga oshiring";
-        assert!(ruleset.find_match(text).is_none(), "7 цифр вне {{1,6}} — не должно матчиться");
+        assert!(ruleset.find_match(text, "any-sender").is_none(), "7 цифр вне {{1,6}} — не должно матчиться");
     }
 
     #[test]
     fn word_placeholder_rejects_internal_whitespace() {
         let ruleset = CompiledRuleset::new(vec![real_template()]);
         let text = "Hello world shartnoma bo'yicha 123 so'm to'lovni bugun amalga oshiring";
-        assert!(ruleset.find_match(text).is_none());
+        assert!(ruleset.find_match(text, "any-sender").is_none());
     }
 
     #[test]
     fn missing_literal_fragment_no_match() {
         let ruleset = CompiledRuleset::new(vec![real_template()]);
         let text = "Hello1238 completely different text with no template fragments at all";
-        assert!(ruleset.find_match(text).is_none());
+        assert!(ruleset.find_match(text, "any-sender").is_none());
     }
 
     #[test]
     fn digits_with_separators_counted_correctly() {
         let ruleset = CompiledRuleset::new(vec![real_template()]);
         let text = "ABC123 shartnoma bo'yicha 12-34-56 so'm to'lovni bugun amalga oshiring";
-        assert!(ruleset.find_match(text).is_some(), "разделители между цифрами должны игнорироваться");
+        assert!(ruleset.find_match(text, "any-sender").is_some(), "разделители между цифрами должны игнорироваться");
     }
 
     #[test]
     fn multiple_candidates_resolved_deterministically() {
-        let tpl_word = Template { template_id: "tpl-word".into(), pattern: "code: %w".into(), category: "SERVICE".into() };
-        let tpl_digit = Template { template_id: "tpl-digit".into(), pattern: "code: %d{4,4}".into(), category: "SERVICE".into() };
+        let tpl_word = Template { template_id: "tpl-word".into(), pattern: "code: %w".into(), category: "SERVICE".into(), sender_id: None };
+        let tpl_digit = Template { template_id: "tpl-digit".into(), pattern: "code: %d{4,4}".into(), category: "SERVICE".into(), sender_id: None };
         let ruleset = CompiledRuleset::new(vec![tpl_word, tpl_digit]);
 
         // Найдено при реализации 4.3: "code: 1234" технически проходит фазу 2
@@ -424,11 +454,11 @@ mod tests {
         // гипотетическая. `tpl-word` зарегистрирован ПЕРВЫМ (insertion order),
         // но `tpl-digit` строже (ограничивает и алфавит, и длину) — специфичность
         // обязана выбрать именно его, не первый по регистрации.
-        let result_digit_text = ruleset.find_match("code: 1234");
+        let result_digit_text = ruleset.find_match("code: 1234", "any-sender");
         assert_eq!(result_digit_text.unwrap().template_id, "tpl-digit",
             "более специфичный шаблон (%d{{4,4}}) обязан победить менее специфичный (%w) при реальной неоднозначности");
 
-        let result_word_only_text = ruleset.find_match("code: ABCD");
+        let result_word_only_text = ruleset.find_match("code: ABCD", "any-sender");
         assert_eq!(result_word_only_text.unwrap().template_id, "tpl-word", "ABCD не цифры — только tpl-word должен пройти");
     }
 
@@ -438,14 +468,14 @@ mod tests {
         // чтобы отличить "правило работает" от "правило совпало случайно с
         // порядком регистрации" (симметричный тест — Word и Digit в
         // обратном порядке регистрации всё равно должны выбрать Digit).
-        let tpl_word = Template { template_id: "w".into(), pattern: "pin: %w".into(), category: "S".into() };
-        let tpl_digit = Template { template_id: "d".into(), pattern: "pin: %d{4,4}".into(), category: "S".into() };
+        let tpl_word = Template { template_id: "w".into(), pattern: "pin: %w".into(), category: "S".into(), sender_id: None };
+        let tpl_digit = Template { template_id: "d".into(), pattern: "pin: %d{4,4}".into(), category: "S".into(), sender_id: None };
         // Регистрируем Digit ПЕРВЫМ на этот раз — если бы побеждал порядок
         // регистрации, а не специфичность, оба порядка дали бы Digit, и тест
         // не отличил бы правило от совпадения. Раз оба порядка (этот тест и
         // предыдущий) дают Digit — специфичность реально решает, не порядок.
         let ruleset = CompiledRuleset::new(vec![tpl_digit, tpl_word]);
-        let result = ruleset.find_match("pin: 1234");
+        let result = ruleset.find_match("pin: 1234", "any-sender");
         assert_eq!(result.unwrap().template_id, "d");
     }
 
@@ -455,20 +485,20 @@ mod tests {
         // (genuine ambiguity: "code " — суффикс "the code ", Aho-Corasick
         // находит оба литерала в одном тексте) — более длинный, более
         // специфичный литеральный префикс обязан победить.
-        let short_literal = Template { template_id: "short".into(), pattern: "code %w".into(), category: "S".into() };
-        let long_literal = Template { template_id: "long".into(), pattern: "the code %w".into(), category: "S".into() };
+        let short_literal = Template { template_id: "short".into(), pattern: "code %w".into(), category: "S".into(), sender_id: None };
+        let long_literal = Template { template_id: "long".into(), pattern: "the code %w".into(), category: "S".into(), sender_id: None };
         let ruleset = CompiledRuleset::new(vec![short_literal, long_literal]);
-        let result = ruleset.find_match("the code 123");
+        let result = ruleset.find_match("the code 123", "any-sender");
         assert_eq!(result.unwrap().template_id, "long", "более длинный, более специфичный литеральный контекст должен победить");
     }
 
     #[test]
     fn leading_and_trailing_placeholder() {
-        let tpl = Template { template_id: "tpl-edges".into(), pattern: "%d{2,2}-ok-%w".into(), category: "SERVICE".into() };
+        let tpl = Template { template_id: "tpl-edges".into(), pattern: "%d{2,2}-ok-%w".into(), category: "SERVICE".into(), sender_id: None };
         let ruleset = CompiledRuleset::new(vec![tpl]);
-        assert!(ruleset.find_match("42-ok-done").is_some());
-        assert!(ruleset.find_match("4-ok-done").is_none(), "только 1 цифра, нужно ровно 2");
-        assert!(ruleset.find_match("42-ok-").is_none(), "пустой %w в конце недопустим");
+        assert!(ruleset.find_match("42-ok-done", "any-sender").is_some());
+        assert!(ruleset.find_match("4-ok-done", "any-sender").is_none(), "только 1 цифра, нужно ровно 2");
+        assert!(ruleset.find_match("42-ok-", "any-sender").is_none(), "пустой %w в конце недопустим");
     }
 
     // Регрессия на находку кодревью: parse_pattern раньше паниковал на любом
@@ -477,9 +507,9 @@ mod tests {
     // ʻ/ʼ (U+02BB/U+02BC, 2 байта) — не гипотетический вход.
     #[test]
     fn cyrillic_literal_fragment_does_not_panic() {
-        let tpl = Template { template_id: "tpl-cyr".into(), pattern: "Спасибо за %w покупку".into(), category: "SERVICE".into() };
+        let tpl = Template { template_id: "tpl-cyr".into(), pattern: "Спасибо за %w покупку".into(), category: "SERVICE".into(), sender_id: None };
         let ruleset = CompiledRuleset::new(vec![tpl]);
-        assert!(ruleset.find_match("Спасибо за вашу покупку").is_some());
+        assert!(ruleset.find_match("Спасибо за вашу покупку", "any-sender").is_some());
     }
 
     #[test]
@@ -488,18 +518,18 @@ mod tests {
         // словах вроде "oʻzbekcha". Ровно такой же класс символа, что уже
         // используется в этих тестах внутри %w-разделённых фрагментов
         // ("bo'yicha", "so'm"), но здесь — внутри самого литерала.
-        let tpl = Template { template_id: "tpl-uz".into(), pattern: "toʻlov %w bajarildi".into(), category: "SERVICE".into() };
+        let tpl = Template { template_id: "tpl-uz".into(), pattern: "toʻlov %w bajarildi".into(), category: "SERVICE".into(), sender_id: None };
         let ruleset = CompiledRuleset::new(vec![tpl]);
-        assert!(ruleset.find_match("toʻlov muvaffaqiyatli bajarildi").is_some());
+        assert!(ruleset.find_match("toʻlov muvaffaqiyatli bajarildi", "any-sender").is_some());
     }
 
     #[test]
     fn emoji_literal_fragment_does_not_panic() {
         // Emoji — 4-байтовый UTF-8 символ, самый жёсткий случай для
         // границ char boundary.
-        let tpl = Template { template_id: "tpl-emoji".into(), pattern: "🎉 %w tabriklaymiz".into(), category: "SERVICE".into() };
+        let tpl = Template { template_id: "tpl-emoji".into(), pattern: "🎉 %w tabriklaymiz".into(), category: "SERVICE".into(), sender_id: None };
         let ruleset = CompiledRuleset::new(vec![tpl]);
-        assert!(ruleset.find_match("🎉 sizni tabriklaymiz").is_some());
+        assert!(ruleset.find_match("🎉 sizni tabriklaymiz", "any-sender").is_some());
     }
 
     // Регрессия на находку кодревью: `find_match` раньше шёл циклом по ВСЕМ
@@ -522,17 +552,90 @@ mod tests {
                 template_id: format!("unrelated-{i}"),
                 pattern: format!("совершенно другой текст номер {i} без общих слов"),
                 category: "OTHER".into(),
+                sender_id: None,
             })
             .collect();
         templates.push(Template {
             template_id: "tpl-real".into(),
             pattern: "%w shartnoma bo'yicha %d{1,6} so'm to'lovni bugun amalga oshiring".into(),
             category: "TRANSACTION".into(),
+            sender_id: None,
         });
 
         let ruleset = CompiledRuleset::new(templates);
-        let result = ruleset.find_match("Hello1238!@* shartnoma bo'yicha 1 2 3 4 5 6 so'm to'lovni bugun amalga oshiring");
+        // sender_id аргумент здесь безразличен для сути теста — все 20 000
+        // "посторонних" шаблонов и сам "tpl-real" имеют sender_id: None
+        // (применимы к любому отправителю), поэтому передаём произвольную
+        // строку: sender-scoping (Фаза 2) не должен влиять на этот сценарий.
+        let result = ruleset.find_match("Hello1238!@* shartnoma bo'yicha 1 2 3 4 5 6 so'm to'lovni bugun amalga oshiring", "any-sender");
         assert_eq!(result.unwrap().template_id, "tpl-real", "20 000 не связанных шаблонов не должны мешать найти реальное совпадение");
+    }
+
+    // Фаза 2 плана (sender_id в модели шаблонов) — `policy.policy_template.sender_id`
+    // (nullable, null = все отправители партнёра) теперь должен реально сужать,
+    // какие шаблоны применимы к сообщению от конкретного отправителя, не только
+    // содержательно совпадать по тексту.
+    #[test]
+    fn template_scoped_to_sender_only_matches_that_sender() {
+        let tpl = Template {
+            template_id: "tpl-scoped".into(),
+            pattern: "code: %w".into(),
+            category: "SERVICE".into(),
+            sender_id: Some("sender-a".into()),
+        };
+        let ruleset = CompiledRuleset::new(vec![tpl]);
+
+        // Тот же текст, тот же шаблон технически проходит фазу 2 матчинга —
+        // единственная разница между вызовами ниже — переданный sender_id.
+        let matched = ruleset.find_match("code: 1234", "sender-a");
+        assert_eq!(matched.unwrap().template_id, "tpl-scoped", "sender_id совпадает с шаблоном — должен матчиться");
+
+        let not_matched = ruleset.find_match("code: 1234", "sender-b");
+        assert!(not_matched.is_none(), "тот же текст, но чужой sender_id — шаблон не должен быть eligible вообще");
+    }
+
+    #[test]
+    fn sender_eligibility_checked_before_specificity_not_after() {
+        // Оба шаблона матчат один и тот же текст, у tpl-b профиль плейсхолдеров
+        // строже (Digit=2 против Word=1) — если бы specificity() решала раньше
+        // sender-фильтра, "sender-a" получил бы результат от tpl-b (чужого
+        // отправителя). Правильно: tpl-b должен быть исключён из кандидатов ДО
+        // сравнения специфичности, независимо от того, что он "выиграл бы" по
+        // очкам, если бы участвовал.
+        let tpl_a = Template {
+            template_id: "tpl-a".into(),
+            pattern: "code: %w".into(),
+            category: "SERVICE".into(),
+            sender_id: Some("a".into()),
+        };
+        let tpl_b = Template {
+            template_id: "tpl-b".into(),
+            pattern: "code: %d{4,4}".into(),
+            category: "SERVICE".into(),
+            sender_id: Some("b".into()),
+        };
+        let ruleset = CompiledRuleset::new(vec![tpl_a, tpl_b]);
+
+        let result = ruleset.find_match("code: 1234", "a");
+        assert_eq!(result.unwrap().template_id, "tpl-a", "sender=a не должен получить матч от шаблона, привязанного к sender=b, даже если тот специфичнее");
+    }
+
+    #[test]
+    fn template_with_no_sender_id_matches_any_sender() {
+        // Дефолт/обратная совместимость: sender_id: None — сегодняшнее неявное
+        // поведение (шаблон применим к любому отправителю партнёра), явно
+        // подтверждённое здесь для нескольких разных значений sender_id.
+        let tpl = Template {
+            template_id: "tpl-any".into(),
+            pattern: "code: %w".into(),
+            category: "SERVICE".into(),
+            sender_id: None,
+        };
+        let ruleset = CompiledRuleset::new(vec![tpl]);
+
+        assert_eq!(ruleset.find_match("code: 1234", "sender-a").unwrap().template_id, "tpl-any");
+        assert_eq!(ruleset.find_match("code: 1234", "sender-b").unwrap().template_id, "tpl-any");
+        assert_eq!(ruleset.find_match("code: 1234", "completely-different-sender").unwrap().template_id, "tpl-any");
     }
 
     #[test]

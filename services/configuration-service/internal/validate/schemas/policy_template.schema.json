@@ -13,6 +13,10 @@
       "description": "null = общий для всех операторов этого партнёра",
       "type": ["string", "null"]
     },
+    "sender_id": {
+      "description": "null = применяется ко всем отправителям (senders) этого партнёра",
+      "type": ["string", "null"]
+    },
     "channel": { "enum": ["SMS", "EMAIL", "PUSH"] },
     "category": {
       "type": "string",
