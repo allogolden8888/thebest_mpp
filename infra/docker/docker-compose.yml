@@ -54,7 +54,13 @@ services:
 
   redis-configuration:
     image: redis:7-alpine
-    command: ["redis-server", "--requirepass", "mpp_local_dev"]
+    # --save "" отключает RDB snapshotting — тот же паттерн, что и у
+    # redis-runtime выше (см. комментарий там для деталей про BGSAVE-стойки
+    # под нагрузкой). Это перезаписываемый кеш (rebuildable cache, см.
+    # hld.md:1356) — не нужна durability между рестартами локального
+    # docker-compose, дефолтная snapshot-политика только рискует теми же
+    # многосекундными BGSAVE-стойками под нагрузкой без какой-либо пользы.
+    command: ["redis-server", "--requirepass", "mpp_local_dev", "--save", ""]
     ports:
       - "6381:6379"
     healthcheck:
@@ -65,7 +71,15 @@ services:
 
   redis-billing:
     image: redis:7-alpine
-    command: ["redis-server", "--requirepass", "mpp_local_dev"]
+    # --appendonly yes — в отличие от redis-configuration/redis-runtime
+    # выше, здесь хранится живой account balance/CAS epoch state (см.
+    # hld.md:342), а не перезаписываемый кеш — infra/terraform/redis.tf
+    # требует AOF для этого инстанса в production. Локальный compose до
+    # этого не имел ни --save "", ни --appendonly — на дефолтной RDB-only
+    # персистентности потеря данных между снапшотами возможна при падении
+    # контейнера. Здесь НЕ добавляем --save "" — этому инстансу нужна
+    # durability, не только скорость, в отличие от redis-configuration.
+    command: ["redis-server", "--requirepass", "mpp_local_dev", "--appendonly", "yes"]
     ports:
       - "6382:6379"
     healthcheck:
@@ -314,7 +328,22 @@ services:
     # (8 CPU/7.75GB, shared with two other running projects) — right-sized
     # to 1.5g, still above the image default for the 450-thread stack
     # overhead, well short of starving the rest of the stack.
-    entrypoint: ["java", "-Xms1g", "-Xmx1500m", "-XX:StartFlightRecording=filename=/tmp/billing.jfr,duration=150s,dumponexit=true,settings=profile", "-jar", "/app/billing-service.jar"]
+    # 2026-08-19: fixed -Xms/-Xmx replaced with container-aware percentage
+    # sizing (-XX:MaxRAMPercentage/-XX:InitialRAMPercentage), same change
+    # as the Dockerfile's own ENTRYPOINT — this override still takes
+    # precedence for local docker-compose runs, so it has to carry the same
+    # flags or the Dockerfile fix is silently shadowed here. 75% ceiling
+    # against the mem_limit below (2g) lands at ~1.5g heap, matching the
+    # 1.5g figure calibrated above; actual value now scales automatically
+    # if mem_limit changes instead of needing a second hand-edit.
+    entrypoint: ["java", "-XX:MaxRAMPercentage=75", "-XX:InitialRAMPercentage=50", "-XX:StartFlightRecording=filename=/tmp/billing.jfr,duration=150s,dumponexit=true,settings=profile", "-jar", "/app/billing-service.jar"]
+    # Оценка (estimate), близко к текущему эффективному heap-потолку выше
+    # (~1.5g при 75% от mem_limit) — НЕ откалибровано отдельным нагрузочным
+    # прогоном под cgroup-лимитом, только выведено из уже откалиброванного
+    # -Xmx1500m. Нужна повторная 1500 TPS проверка (см.
+    # LATENCY_INVESTIGATION_1500TPS.md) с реальным mem_limit, а не
+    # безлимитным контейнером, прежде чем считать это финальным числом.
+    mem_limit: 2g
     # Реальная находка (нагрузочный прогон): Main.java теперь принудительно
     # System.exit(1) на фатальной ошибке consumer-цикла (иначе HealthServer
     # держит процесс "живым" не-daemon потоком с /healthz=200 у мёртвого
@@ -366,6 +395,13 @@ services:
       # 128 — безопасное значение до AMD-тюнинга (12 CPU/15GB), под которое
       # калибровка 450 не переносится 1:1.
       DELIVERY_CONCURRENCY: "128"
+    # Оценка (estimate) — Dockerfile ENTRYPOINT теперь -XX:MaxRAMPercentage=75,
+    # структурно тот же профиль, что и billing-service (тот же 128-поточный
+    # пул, тот же Redis-клиент), так что взят тот же mem_limit по аналогии, а
+    # не из отдельной калибровки этого сервиса. Нужна отдельная 1500 TPS
+    # проверка (см. LATENCY_INVESTIGATION_1500TPS.md) под этим лимитом, а не
+    # безлимитным контейнером, прежде чем считать финальным.
+    mem_limit: 2g
     depends_on:
       kafka:
         condition: service_healthy
@@ -423,6 +459,13 @@ services:
       MAX_CONCURRENT_SUBMITS: "100"
       SMPP_SYSTEM_ID: ${SMPP_SYSTEM_ID:-mpp_esme}
       SMPP_PASSWORD: ${SMPP_PASSWORD:-demo_password}
+    # Оценка (estimate) — 100-поточный пул (MAX_CONCURRENT_SUBMITS) +
+    # Netty I/O event loop поменьше, чем у billing/delivery; 1.5g даёт
+    # ~1.1g heap на 75%, с запасом под сам Netty off-heap буферы (SMPP-сессия
+    # чувствительна к CPU/memory starvation — см. комментарий про 300 воркер-
+    # потоков выше). Не откалибровано отдельным нагрузочным прогоном под
+    # этим лимитом — см. LATENCY_INVESTIGATION_1500TPS.md, нужна проверка.
+    mem_limit: 1.5g
     depends_on:
       kafka:
         condition: service_healthy
@@ -441,6 +484,14 @@ services:
       - "9100:9090"
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    # Оценка (estimate) — единственный "тяжёлый" момент старта: полный
+    # restore message-state.changelog из Kafka в память до readyz=true;
+    # устоявшийся steady-state расход ниже billing/delivery (нет
+    # REDIS_*_CONCURRENCY-пула потоков). 1g даёт ~750m heap на 75%. Не
+    # откалибровано отдельным нагрузочным прогоном под этим лимитом — см.
+    # LATENCY_INVESTIGATION_1500TPS.md, нужна проверка, особенно на объём
+    # changelog при более длительных прогонах.
+    mem_limit: 1g
     depends_on:
       kafka:
         condition: service_healthy
@@ -485,6 +536,16 @@ services:
       - "9103:9090"
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    # Оценка (estimate) — важное отличие от остальных Java-сервисов здесь:
+    # RocksDB state store — off-heap (native) память, не подчиняется
+    # -XX:MaxRAMPercentage, так что 75% лимита в Dockerfile ENTRYPOINT
+    # ограничивает только JVM heap, RocksDB может расти сверху. 1.5g вместо
+    # 1g для остальных consumer-only сервисов — запас под RocksDB
+    # block cache/memtables поверх ~1.1g JVM heap. Не откалибровано
+    # отдельным нагрузочным прогоном под этим лимитом — см.
+    # LATENCY_INVESTIGATION_1500TPS.md, нужна проверка при росте state
+    # store (число уникальных message_id с активным retry).
+    mem_limit: 1.5g
     depends_on:
       kafka:
         condition: service_healthy

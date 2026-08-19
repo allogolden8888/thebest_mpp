@@ -1,5 +1,6 @@
 # Сгенерированные артефакты — воспроизводятся из генераторов, не источник истины.
 **/rendered/
+**/rendered-small/
 **/target/
 __pycache__/
 *.pyc
@@ -14,3 +15,11 @@ node_modules/
 # Реальные хост/креды тестовых окружений (например SMSC-симулятора) —
 # только для docker-compose var-substitution, никогда не коммитятся.
 infra/docker/.env
+# Локальный dev-only RSA-кейпейр для JWT self-service API — сгенерирован
+# заново на каждой машине, не общий секрет.
+infra/docker/dev-secrets/
+# Мусор локального clickhouse-server, запущенного из корня репозитория —
+# access-control storage и кеш препроцессированных конфигов, не артефакты
+# репозитория.
+access/
+preprocessed_configs/

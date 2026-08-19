@@ -23,4 +23,4 @@ FROM eclipse-temurin:25-jre
 WORKDIR /app
 COPY --from=builder /build/target/message-state-resolver-0.1.0.jar /app/message-state-resolver.jar
 EXPOSE 9090
-ENTRYPOINT ["java", "-XX:StartFlightRecording=filename=/tmp/message-state-resolver.jfr,duration=150s,dumponexit=true,settings=profile", "-jar", "/app/message-state-resolver.jar"]
+ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75", "-XX:InitialRAMPercentage=50", "-XX:StartFlightRecording=filename=/tmp/message-state-resolver.jfr,duration=150s,dumponexit=true,settings=profile", "-jar", "/app/message-state-resolver.jar"]

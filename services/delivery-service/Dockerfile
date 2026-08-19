@@ -40,4 +40,4 @@ FROM eclipse-temurin:25-jre
 WORKDIR /app
 COPY --from=builder /build/target/delivery-service-0.1.0.jar /app/delivery-service.jar
 EXPOSE 9090
-ENTRYPOINT ["java", "-XX:StartFlightRecording=filename=/tmp/delivery.jfr,duration=150s,dumponexit=true,settings=profile", "-jar", "/app/delivery-service.jar"]
+ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75", "-XX:InitialRAMPercentage=50", "-XX:StartFlightRecording=filename=/tmp/delivery.jfr,duration=150s,dumponexit=true,settings=profile", "-jar", "/app/delivery-service.jar"]

@@ -26,4 +26,4 @@ RUN mvn -B -DskipTests package
 FROM eclipse-temurin:25-jre-jammy
 COPY --from=builder /build/target/scheduler-standard-lane.jar /app/app.jar
 EXPOSE 9090
-ENTRYPOINT ["java", "-jar", "/app/app.jar"]
+ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75", "-XX:InitialRAMPercentage=50", "-jar", "/app/app.jar"]

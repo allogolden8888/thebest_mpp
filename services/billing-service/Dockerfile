@@ -27,4 +27,4 @@ COPY --from=builder /build/target/billing-service-0.1.0.jar /app/billing-service
 COPY --from=builder /config_schemas /config_schemas
 ENV BILLING_TARIFF_PATH=/config_schemas/examples/billing_tariff.valid.json
 EXPOSE 9090
-ENTRYPOINT ["java", "-Xms512m", "-Xmx1g", "-XX:StartFlightRecording=filename=/tmp/billing.jfr,duration=150s,dumponexit=true,settings=profile", "-jar", "/app/billing-service.jar"]
+ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75", "-XX:InitialRAMPercentage=50", "-XX:StartFlightRecording=filename=/tmp/billing.jfr,duration=150s,dumponexit=true,settings=profile", "-jar", "/app/billing-service.jar"]
