@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	_ "github.com/KimMachineGun/automemlimit"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"mpp/partner-notification-service/internal/config"

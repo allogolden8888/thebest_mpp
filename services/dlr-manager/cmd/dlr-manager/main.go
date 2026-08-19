@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	_ "github.com/KimMachineGun/automemlimit"
 	"google.golang.org/protobuf/proto"
 
 	"mpp/dlr-manager/internal/correlation"
@@ -52,10 +53,11 @@ func buildDatabaseURL() string {
 	db := getenv("POSTGRES_DB", "mpp")
 	user := getenv("POSTGRES_USER", "mpp")
 	password := os.Getenv("POSTGRES_PASSWORD")
+	poolMaxConns := getenv("POSTGRES_POOL_MAX_CONNS", "8")
 	if password == "" {
-		return fmt.Sprintf("postgres://%s@%s:%s/%s?sslmode=disable", url.QueryEscape(user), host, port, db)
+		return fmt.Sprintf("postgres://%s@%s:%s/%s?sslmode=disable&pool_max_conns=%s", url.QueryEscape(user), host, port, db, poolMaxConns)
 	}
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", url.QueryEscape(user), url.QueryEscape(password), host, port, db)
+	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable&pool_max_conns=%s", url.QueryEscape(user), url.QueryEscape(password), host, port, db, poolMaxConns)
 }
 
 // buildRedisRuntimeURL — тот же класс находки, что buildDatabaseURL, для

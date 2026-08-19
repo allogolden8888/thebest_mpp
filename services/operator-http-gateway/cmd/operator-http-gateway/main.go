@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	_ "github.com/KimMachineGun/automemlimit"
 	"google.golang.org/grpc"
 
 	"mpp/operator-http-gateway/internal/core"

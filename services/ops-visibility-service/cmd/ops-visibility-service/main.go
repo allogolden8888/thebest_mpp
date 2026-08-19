@@ -20,6 +20,8 @@ import (
 	"syscall"
 	"time"
 
+	_ "github.com/KimMachineGun/automemlimit"
+
 	"mpp/ops-visibility-service/internal/health"
 	"mpp/ops-visibility-service/internal/httpapi"
 	"mpp/ops-visibility-service/internal/kafkalag"

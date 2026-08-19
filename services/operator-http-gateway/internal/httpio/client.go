@@ -98,7 +98,7 @@ type Client struct {
 func NewClient(timeout time.Duration) *Client {
 	return &Client{httpClient: &http.Client{
 		Timeout:   timeout,
-		Transport: &http.Transport{DialContext: ssrfSafeDialer(timeout).DialContext},
+		Transport: &http.Transport{DialContext: ssrfSafeDialer(timeout).DialContext, MaxIdleConnsPerHost: 64},
 	}}
 }
 

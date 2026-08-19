@@ -41,6 +41,8 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	_ "github.com/KimMachineGun/automemlimit"
+
 	"mpp/analytics-writer/internal/core"
 	"mpp/analytics-writer/internal/health"
 	"mpp/analytics-writer/internal/kafkaio"

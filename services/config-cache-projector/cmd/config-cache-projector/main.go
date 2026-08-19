@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	_ "github.com/KimMachineGun/automemlimit"
+
 	"mpp/config-cache-projector/internal/health"
 	"mpp/config-cache-projector/internal/kafkaio"
 	"mpp/config-cache-projector/internal/projector"

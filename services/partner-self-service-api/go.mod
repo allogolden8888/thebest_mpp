@@ -3,6 +3,7 @@ module mpp/partner-self-service-api
 go 1.26.2
 
 require (
+	github.com/KimMachineGun/automemlimit v0.7.5
 	github.com/go-chi/chi/v5 v5.3.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	go.opentelemetry.io/otel v1.44.0
@@ -17,6 +18,7 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/metric v1.44.0 // indirect
 	golang.org/x/net v0.56.0 // indirect

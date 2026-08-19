@@ -52,7 +52,7 @@ func newRestClientWithoutSSRFGuard(timeout time.Duration) *RestClient {
 func newRestClient(timeout time.Duration, ssrfGuard bool) *RestClient {
 	client := &http.Client{Timeout: timeout}
 	if ssrfGuard {
-		client.Transport = &http.Transport{DialContext: ssrfSafeDialer().DialContext}
+		client.Transport = &http.Transport{DialContext: ssrfSafeDialer().DialContext, MaxIdleConnsPerHost: 64}
 	}
 	return &RestClient{client: client, timeout: timeout, ssrfGuard: ssrfGuard}
 }

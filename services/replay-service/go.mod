@@ -3,6 +3,7 @@ module mpp/replay-service
 go 1.26.2
 
 require (
+	github.com/KimMachineGun/automemlimit v0.7.5
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/twmb/franz-go v1.21.5
 	google.golang.org/grpc v1.82.1
@@ -15,6 +16,7 @@ require (
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/klauspost/compress v1.18.6 // indirect
+	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58 // indirect
 	github.com/pierrec/lz4/v4 v4.1.26 // indirect
 	github.com/twmb/franz-go/pkg/kmsg v1.13.1 // indirect
 	golang.org/x/net v0.53.0 // indirect

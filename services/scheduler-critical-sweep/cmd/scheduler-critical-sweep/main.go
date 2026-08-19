@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	_ "github.com/KimMachineGun/automemlimit"
 	"github.com/google/uuid"
 
 	"mpp/scheduler-critical-sweep/internal/controlsnapshot"

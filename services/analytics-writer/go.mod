@@ -4,6 +4,7 @@ go 1.26.2
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.47.0
+	github.com/KimMachineGun/automemlimit v0.7.5
 	github.com/twmb/franz-go v1.21.5
 	google.golang.org/protobuf v1.36.11
 	mpp/platformcontracts v0.0.0
@@ -18,6 +19,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/compress v1.18.6 // indirect
 	github.com/paulmach/orb v0.13.0 // indirect
+	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58 // indirect
 	github.com/pierrec/lz4/v4 v4.1.27 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect

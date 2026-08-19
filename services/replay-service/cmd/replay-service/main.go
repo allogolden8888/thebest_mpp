@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"time"
 
+	_ "github.com/KimMachineGun/automemlimit"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 
@@ -44,10 +45,11 @@ func buildPostgresDSN() string {
 	db := env("POSTGRES_DB", "mpp")
 	user := env("POSTGRES_USER", "")
 	password := env("POSTGRES_PASSWORD", "")
+	poolMaxConns := env("POSTGRES_POOL_MAX_CONNS", "8")
 	if user == "" {
-		return fmt.Sprintf("postgres://%s:%s/%s", host, port, db)
+		return fmt.Sprintf("postgres://%s:%s/%s?pool_max_conns=%s", host, port, db, poolMaxConns)
 	}
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s", user, password, host, port, db)
+	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?pool_max_conns=%s", user, password, host, port, db, poolMaxConns)
 }
 
 func main() {
