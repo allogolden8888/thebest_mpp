@@ -190,6 +190,14 @@ services:
       REDIS_RUNTIME_PORT: "6379"
       REDIS_RUNTIME_PASSWORD: mpp_local_dev
       PARTNER_CRED_VAULT___PARTNERS_CLICK_UZ_MAIN_API_KEY: local-dev-test-key
+      # combined-api-gaps добавил VaultAuthVerifier как дефолт
+      # (AUTH_VERIFIER_MODE unset -> "vault") — до сегодняшнего ребилда
+      # этот сервис тихо работал на старом pre-merge образе (EnvAuthVerifier
+      # всегда), поэтому разрыв не был виден раньше. Явный "env" — тот
+      # самый bootstrap/break-glass режим, что описан в самом
+      # build_auth_verifier() в main.rs, а не обход валидации: реального
+      # Vault-провиженинга credential'ов под тестового партнёра здесь нет.
+      AUTH_VERIFIER_MODE: env
       RUST_LOG: info
     # 2026-08-13 1500 TPS push — partner.valid.json запечён в образ на
     # build-time (COPY, PARTNER_CONFIG_PATH), rate_limit_tps=300 там
@@ -549,6 +557,282 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+
+  # --- combined-api-gaps (luminous-hugging-charm.md) — не были заведены ни
+  # одной из веток в локальный docker-compose, только в исходном коде.
+  # 2026-08-19: заведены здесь, чтобы этот "walking skeleton" фактически
+  # поднимался, а не только собирался/тестировался вне Docker.
+  # (Восстановлено 2026-08-19 после того, как параллельный agent-проход
+  # WEAK_HARDWARE_AUDIT.md/fccc877 расценил этот блок как "unrelated scope
+  # creep" и убрал его из своего коммита — контейнеры всё это время
+  # оставались реально запущены, просто без этого файла compose их было
+  # бы нечем пересоздать.)
+
+  # Dev-mode Vault (HashiCorp officla image) — единственный сервис в этом
+  # стеке, которому реально нужен Vault (credential-issuer-service, пишущий
+  # клиент). VAULT_MOUNT=secret ниже — дефолтный KV2-mount, который dev-mode
+  # уже включает сам, чтобы не нужен был отдельный init-контейнер с
+  # `vault secrets enable -path=mpp kv-v2`.
+  vault:
+    image: hashicorp/vault:1.19
+    cap_add:
+      - IPC_LOCK
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: root-token-local-dev
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+    healthcheck:
+      # 127.0.0.1, не localhost — в этом образе localhost резолвится в IPv6
+      # (::1) первым, а Vault dev-режим слушает только IPv4 (0.0.0.0:8200,
+      # см. netstat внутри контейнера), так что healthcheck с localhost
+      # стабильно падал в "Connection refused" при живом, отвечающем Vault.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8200/v1/sys/health?standbyok=true"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  configuration-service:
+    image: mpp/configuration-service:test
+    ports:
+      - "9104:9090"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: mpp
+      POSTGRES_USER: mpp
+      POSTGRES_PASSWORD: mpp_local_dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  iam-service:
+    image: mpp/iam-service:test
+    ports:
+      - "9105:9090"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: mpp
+      POSTGRES_USER: mpp
+      POSTGRES_PASSWORD: mpp_local_dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  credential-issuer-service:
+    image: mpp/credential-issuer-service:test
+    ports:
+      - "9106:9090"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: mpp
+      POSTGRES_USER: mpp
+      POSTGRES_PASSWORD: mpp_local_dev
+      VAULT_ADDR: http://vault:8200
+      VAULT_MOUNT: secret
+      # Статический токен — local/dev escape hatch, который сам клиент
+      # явно поддерживает (см. cmd/credential-issuer-service/main.go
+      # buildVaultTokenSource) вместо реального Kubernetes auth login.
+      VAULT_TOKEN: root-token-local-dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+      vault:
+        condition: service_healthy
+
+  incident-service:
+    image: mpp/incident-service:test
+    ports:
+      - "9107:9090"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: mpp
+      POSTGRES_USER: mpp
+      POSTGRES_PASSWORD: mpp_local_dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  ops-visibility-service:
+    image: mpp/ops-visibility-service:test
+    ports:
+      - "9108:9090"
+    environment:
+      REDIS_RUNTIME_HOST: redis-runtime
+      REDIS_RUNTIME_PORT: "6379"
+      REDIS_RUNTIME_PASSWORD: mpp_local_dev
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      redis-runtime:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  template-management-service:
+    image: mpp/template-management-service:test
+    ports:
+      - "9109:9090"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: mpp
+      POSTGRES_USER: mpp
+      POSTGRES_PASSWORD: mpp_local_dev
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  partner-self-service-api:
+    image: mpp/partner-self-service-api:test
+    ports:
+      - "9110:9090"
+      - "8081:8080"
+    environment:
+      # Локальный dev-only RSA-кейпейр (infra/docker/dev-secrets/, не
+      # коммитится — см. .gitignore), только публичная половина. Общий на
+      # все 3 self-service/compliance API ниже — один "локальный IdP" для
+      # локальной проверки, не настоящий Keycloak.
+      JWT_PUBLIC_KEY_PEM: |
+        -----BEGIN PUBLIC KEY-----
+        MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAr6ChhBR6hStwLBcl/n3z
+        N+mFv4S7ocHFZaTdbD5vLRfOcIPIKrXs5Oaf6AKIr2JjKSGI2JWbpprDRw2P4ZK9
+        g6USZ9VYvudEh9I+In7x9ds+4TNdaQTh8OKZWq6mFF5Kl6aLuwd5h6er0GoDRDip
+        jrD61NZKZp+gMk6CkH5KbiK0sy3Yp/Ip0ELbMkzhJi8nw2Rd5qVbI2wzoi+h6/wb
+        Ml4tgq78NFWc4GB96pWLZIotzmZypbqTCOzwDqf5DBGYABHb/2OOF8jmXaodXiWk
+        h6xvXwJXLNNqjAE6Dy5OfO0RYWHhm7qQ+62pzOO1Kj63YDr7FKydtVswNUmIfgj9
+        KwIDAQAB
+        -----END PUBLIC KEY-----
+      CONFIGURATION_SERVICE_ADDR: configuration-service:9000
+      CREDENTIAL_ISSUER_SERVICE_ADDR: credential-issuer-service:9000
+      TEMPLATE_MANAGEMENT_SERVICE_URL: http://template-management-service:8080
+    depends_on:
+      configuration-service:
+        condition: service_started
+      credential-issuer-service:
+        condition: service_started
+
+  billing-self-service-api:
+    image: mpp/billing-self-service-api:test
+    ports:
+      - "9111:9090"
+      - "8082:8080"
+    environment:
+      JWT_PUBLIC_KEY_PEM: |
+        -----BEGIN PUBLIC KEY-----
+        MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAr6ChhBR6hStwLBcl/n3z
+        N+mFv4S7ocHFZaTdbD5vLRfOcIPIKrXs5Oaf6AKIr2JjKSGI2JWbpprDRw2P4ZK9
+        g6USZ9VYvudEh9I+In7x9ds+4TNdaQTh8OKZWq6mFF5Kl6aLuwd5h6er0GoDRDip
+        jrD61NZKZp+gMk6CkH5KbiK0sy3Yp/Ip0ELbMkzhJi8nw2Rd5qVbI2wzoi+h6/wb
+        Ml4tgq78NFWc4GB96pWLZIotzmZypbqTCOzwDqf5DBGYABHb/2OOF8jmXaodXiWk
+        h6xvXwJXLNNqjAE6Dy5OfO0RYWHhm7qQ+62pzOO1Kj63YDr7FKydtVswNUmIfgj9
+        KwIDAQAB
+        -----END PUBLIC KEY-----
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: mpp
+      POSTGRES_USER: mpp
+      POSTGRES_PASSWORD: mpp_local_dev
+      CONFIGURATION_SERVICE_ADDR: configuration-service:9000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      configuration-service:
+        condition: service_started
+
+  compliance-api:
+    image: mpp/compliance-api:test
+    ports:
+      - "9112:9090"
+      - "8083:8080"
+    environment:
+      JWT_PUBLIC_KEY_PEM: |
+        -----BEGIN PUBLIC KEY-----
+        MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAr6ChhBR6hStwLBcl/n3z
+        N+mFv4S7ocHFZaTdbD5vLRfOcIPIKrXs5Oaf6AKIr2JjKSGI2JWbpprDRw2P4ZK9
+        g6USZ9VYvudEh9I+In7x9ds+4TNdaQTh8OKZWq6mFF5Kl6aLuwd5h6er0GoDRDip
+        jrD61NZKZp+gMk6CkH5KbiK0sy3Yp/Ip0ELbMkzhJi8nw2Rd5qVbI2wzoi+h6/wb
+        Ml4tgq78NFWc4GB96pWLZIotzmZypbqTCOzwDqf5DBGYABHb/2OOF8jmXaodXiWk
+        h6xvXwJXLNNqjAE6Dy5OfO0RYWHhm7qQ+62pzOO1Kj63YDr7FKydtVswNUmIfgj9
+        KwIDAQAB
+        -----END PUBLIC KEY-----
+      REDIS_RUNTIME_HOST: redis-runtime
+      REDIS_RUNTIME_PORT: "6379"
+      REDIS_RUNTIME_PASSWORD: mpp_local_dev
+      CONFIGURATION_SERVICE_ADDR: configuration-service:9000
+      IAM_SERVICE_ADDR: iam-service:9000
+    depends_on:
+      redis-runtime:
+        condition: service_healthy
+      configuration-service:
+        condition: service_started
+      iam-service:
+        condition: service_started
+
+  partner-portal-ui:
+    image: mpp/partner-portal-ui:test
+    ports:
+      - "8090:8080"
+    depends_on:
+      - partner-self-service-api
+      - billing-self-service-api
+
+  # Админка (backoffice) — RBAC/аудит через iam-service, ротация credentials,
+  # инциденты, ops-видимость. EXECUTION_CONTROL_SERVICE_ADDR/REPLAY_SERVICE_ADDR/
+  # CLICKHOUSE_* оставлены на дефолтах (недостижимы в этом локальном стеке —
+  # execution-control-service/replay-service/ClickHouse сюда не заведены) —
+  # некритично: gRPC-клиенты здесь лениво коннектятся (grpc.NewClient не
+  # блокирует и не падает на недостижимом таргете), соответствующие
+  # health-проверки просто покажут unhealthy, остальной функционал (RBAC/
+  # аудит/credentials/incidents/config) не затронут.
+  backoffice-api:
+    image: mpp/backoffice-api:test
+    ports:
+      - "9113:9090"
+      - "8084:8080"
+    environment:
+      JWT_PUBLIC_KEY_PEM: |
+        -----BEGIN PUBLIC KEY-----
+        MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAr6ChhBR6hStwLBcl/n3z
+        N+mFv4S7ocHFZaTdbD5vLRfOcIPIKrXs5Oaf6AKIr2JjKSGI2JWbpprDRw2P4ZK9
+        g6USZ9VYvudEh9I+In7x9ds+4TNdaQTh8OKZWq6mFF5Kl6aLuwd5h6er0GoDRDip
+        jrD61NZKZp+gMk6CkH5KbiK0sy3Yp/Ip0ELbMkzhJi8nw2Rd5qVbI2wzoi+h6/wb
+        Ml4tgq78NFWc4GB96pWLZIotzmZypbqTCOzwDqf5DBGYABHb/2OOF8jmXaodXiWk
+        h6xvXwJXLNNqjAE6Dy5OfO0RYWHhm7qQ+62pzOO1Kj63YDr7FKydtVswNUmIfgj9
+        KwIDAQAB
+        -----END PUBLIC KEY-----
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: mpp
+      POSTGRES_USER: mpp
+      POSTGRES_PASSWORD: mpp_local_dev
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      CONFIGURATION_SERVICE_ADDR: configuration-service:9000
+      CREDENTIAL_ISSUER_SERVICE_ADDR: credential-issuer-service:9000
+      IAM_SERVICE_ADDR: iam-service:9000
+      INCIDENT_SERVICE_ADDR: incident-service:9000
+      OPS_VISIBILITY_SERVICE_ADDR: ops-visibility-service:9090
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      iam-service:
+        condition: service_started
+      configuration-service:
+        condition: service_started
+
+  backoffice-ui:
+    image: mpp/backoffice-ui:test
+    ports:
+      - "8091:8080"
+    depends_on:
+      - backoffice-api
 
 volumes:
   postgres_data:
