@@ -73,6 +73,17 @@ INSTANCE_PROFILE = {
     "go": {"cpu": 2, "mem_gi": 4},
 }
 
+# Оценка, не измерение — как и остальные числа в capacity_model.md (см. заголовок
+# документа: "Числа по-прежнему оценки, не измерения; каждая цифра подлежит
+# подтверждению нагрузочным тестированием"). Для этих 13 admin/control-plane
+# сервисов нет отдельной записи в capacity_model.md вообще (не только числа
+# неточные — самой строки в таблице нет), это стартовая точка до
+# load-test/VPA-подтверждения, не измеренное значение.
+CONTROL_PLANE_RESOURCES = {
+    "limits": {"cpu": "500m", "memory": "1Gi"},
+    "requests": {"cpu": "250m", "memory": "512Mi"},
+}
+
 MIN_REPLICAS = 2  # HA floor — ни один сервис не должен работать в единственном экземпляре
 
 
@@ -90,6 +101,7 @@ class Service:
     notes: str = ""
     secrets: list[str] = field(default_factory=list)  # ключи из SECRET_K8S_NAME — envFrom на соответствующий Secret,
                                                         # см. SECRET_DEPENDENCIES ниже и infra/secrets/
+    resource_tier: str = "default"  # "control-plane" => CONTROL_PLANE_RESOURCES вместо INSTANCE_PROFILE[lang]
 
 
 SERVICES = [
@@ -135,24 +147,24 @@ SERVICES = [
             "capacity_model.md:112", kafka_consumer=True, rocksdb_pvc_gi=100),
     Service("execution-control-service", "go", "stateless", None,
             "не в отдельной таблице capacity_model.md — пул 'Мелкие Go control-plane' (capacity_model.md:12,113)",
-            internal_grpc_port=9000),
+            internal_grpc_port=9000, resource_tier="control-plane"),
     Service("iam-service", "go", "stateless", None,
             "не в отдельной таблице capacity_model.md — сервис появился уже после того, как этот документ "
             "писался, но по форме (маленький Go control-plane сервис, синхронный gRPC, без внешнего inbound) "
             "тот же пул 'Мелкие Go control-plane' (capacity_model.md:12,113), что execution-control-service/"
-            "configuration-service", internal_grpc_port=9000),
+            "configuration-service", internal_grpc_port=9000, resource_tier="control-plane"),
     Service("credential-issuer-service", "go", "stateless", None,
             "не в отдельной таблице capacity_model.md — сервис появился уже после того, как этот документ "
             "писался (luminous-hugging-charm.md Фаза 1), но по форме (маленький Go control-plane сервис, "
             "синхронный gRPC, без внешнего inbound) тот же пул 'Мелкие Go control-plane' "
             "(capacity_model.md:12,113), что execution-control-service/iam-service/configuration-service",
-            internal_grpc_port=9000),
+            internal_grpc_port=9000, resource_tier="control-plane"),
     Service("incident-service", "go", "stateless", None,
             "не в отдельной таблице capacity_model.md — сервис появился уже после того, как этот документ "
             "писался (luminous-hugging-charm.md Фаза 7), но по форме (маленький Go control-plane сервис, "
             "синхронный gRPC, без внешнего inbound) тот же пул 'Мелкие Go control-plane' "
             "(capacity_model.md:12,113), что execution-control-service/iam-service/configuration-service",
-            internal_grpc_port=9000),
+            internal_grpc_port=9000, resource_tier="control-plane"),
     Service("ops-visibility-service", "go", "stateless", None,
             "не в отдельной таблице capacity_model.md — сервис появился уже после того, как этот документ "
             "писался (luminous-hugging-charm.md Фаза 8), тот же пул 'Мелкие Go control-plane' "
@@ -160,15 +172,19 @@ SERVICES = [
             "нет отдельного бизнес-порта вообще: GET /snapshot отдаётся с того же HEALTH_PORT=9090, что "
             "и /healthz/readyz/metrics (ops-visibility-service/README.md — решение того шага, не редизайн "
             "здесь), не через отдельный gRPC/HTTP-сервер, как у остальных сервисов этого пула.",
-            kafka_consumer=False),
+            kafka_consumer=False, resource_tier="control-plane"),
     Service("configuration-service", "go", "stateless", None,
-            "пул 'Мелкие Go control-plane' (capacity_model.md:12,113)", internal_grpc_port=9000),
+            "пул 'Мелкие Go control-plane' (capacity_model.md:12,113)", internal_grpc_port=9000,
+            resource_tier="control-plane"),
     Service("config-event-publisher", "go", "stateless", None,
-            "пул 'Мелкие Go control-plane' (capacity_model.md:12,113)", kafka_consumer=False),
+            "пул 'Мелкие Go control-plane' (capacity_model.md:12,113)", kafka_consumer=False,
+            resource_tier="control-plane"),
     Service("config-cache-projector", "go", "stateless", None,
-            "пул 'Мелкие Go control-plane' (capacity_model.md:12,113)", kafka_consumer=True),
+            "пул 'Мелкие Go control-plane' (capacity_model.md:12,113)", kafka_consumer=True,
+            resource_tier="control-plane"),
     Service("consent-cache-projector", "go", "stateless", None,
-            "не указан ни в одной vCPU-таблице (services_specifictaion.md:703-707,1131)", kafka_consumer=True),
+            "не указан ни в одной vCPU-таблице (services_specifictaion.md:703-707,1131)", kafka_consumer=True,
+            resource_tier="control-plane"),
     Service("dlr-correlation-writer", "go", "stateless", None,
             "пул 'Мелкие Go control-plane' (capacity_model.md:113)", kafka_consumer=True),
     Service("dlr-manager", "go", "stateless", 12,
@@ -184,12 +200,14 @@ SERVICES = [
             "capacity_model.md:115", internal_grpc_port=9000),
     Service("partner-api", "go", "stateless", None,
             "пул 'Мелкие Go control-plane' (capacity_model.md:113)",
-            external_port={"name": "http", "port": 8080, "protocol": "TCP"}),
+            external_port={"name": "http", "port": 8080, "protocol": "TCP"}, resource_tier="control-plane"),
     Service("backoffice-api", "go", "stateless", None,
             "пул 'Мелкие Go control-plane' (capacity_model.md:113)",
-            external_port={"name": "http", "port": 8080, "protocol": "TCP"}, internal_grpc_port=9000),
+            external_port={"name": "http", "port": 8080, "protocol": "TCP"}, internal_grpc_port=9000,
+            resource_tier="control-plane"),
     Service("replay-service", "go", "stateless", None,
-            "пул 'Мелкие Go control-plane' (capacity_model.md:113)", internal_grpc_port=9000),
+            "пул 'Мелкие Go control-plane' (capacity_model.md:113)", internal_grpc_port=9000,
+            resource_tier="control-plane"),
     Service("lifecycle-writer", "go", "stateless", 8,
             "capacity_model.md:116 (v2)", kafka_consumer=True),
     Service("analytics-writer", "go", "stateless", 16,
@@ -198,7 +216,7 @@ SERVICES = [
             "capacity_model.md:118", kafka_consumer=True, internal_grpc_port=9000),
     Service("backoffice-ui", "go", "frontend", None,
             "не в capacity model — статический SPA, floor MIN_REPLICAS",
-            external_port={"name": "http", "port": 8080, "protocol": "TCP"}),
+            external_port={"name": "http", "port": 8080, "protocol": "TCP"}, resource_tier="control-plane"),
 ]
 
 # Секретные зависимости по сервису — из четырёх ключей ниже, каждый мапится
@@ -312,6 +330,10 @@ def replicas_for(svc: Service) -> int:
 
 
 def _resources(svc: Service, guaranteed: bool) -> dict:
+    if svc.resource_tier == "control-plane":
+        # Изолированная ветка, не проходит через языковую арифметику ниже —
+        # та ломается на дробных vCPU из-за форматирования f"{cpu}000m".
+        return CONTROL_PLANE_RESOURCES
     profile = INSTANCE_PROFILE[svc.lang]
     limits = {"cpu": f"{profile['cpu']}000m", "memory": f"{profile['mem_gi']}Gi"}
     if guaranteed:
