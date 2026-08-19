@@ -5,6 +5,8 @@ import io.grpc.Server;
 import io.grpc.ServerBuilder;
 import uz.mpp.operatorsmpp.client.OperatorSmppClient;
 import uz.mpp.operatorsmpp.client.SmppConnectionSupervisor;
+import uz.mpp.operatorsmpp.core.AdaptiveThreadPoolCalibrator;
+import uz.mpp.operatorsmpp.core.AdaptiveThreadPoolCalibrator.ResizableSemaphore;
 import uz.mpp.operatorsmpp.core.PacerCore;
 import uz.mpp.operatorsmpp.core.PacerMetrics;
 import uz.mpp.operatorsmpp.core.PriorityGate;
@@ -26,9 +28,10 @@ import java.util.Map;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Operator SMPP Session Manager (services_specifictaion.md §2.3) — SMPP
@@ -83,9 +86,14 @@ public final class Main {
         // Semaphore — НОВЫЙ механизм, отдельный от PriorityGate: PriorityGate
         // сегодня только СЧИТАЕТ in-flight submit'ы, чтобы решить, откладывать
         // ли query_sm (enforce_query_sm_priority), реального предела
-        // конкурентности не задаёт. Semaphore(MAX_CONCURRENT_SUBMITS) — жёсткий
-        // предел одновременных client.submitSm() к оператору.
-        Semaphore concurrentSubmitPermits = new Semaphore(maxConcurrentSubmits);
+        // конкурентности не задаёт. ResizableSemaphore — жёсткий предел
+        // одновременных client.submitSm() к оператору, стартует на
+        // AdaptiveThreadPoolCalibrator.FLOOR и растёт/сжимается в лок-степе
+        // с pacerWorkerPool (см. calibrator ниже) — не на статическом
+        // MAX_CONCURRENT_SUBMITS напрямую (тот путь однажды уже уронил
+        // саму SMPP-сессию под 300 потоками на этой машине, см.
+        // AdaptiveThreadPoolCalibrator javadoc/b713c53).
+        ResizableSemaphore concurrentSubmitPermits = new ResizableSemaphore(AdaptiveThreadPoolCalibrator.FLOOR);
 
         Map<PriorityTier, Integer> maxQueueDepthByTier = buildMaxQueueDepthByTier(tpsLimit);
         Map<PriorityTier, ArrayBlockingQueue<QueuedSubmit>> queuesByTier = new EnumMap<>(PriorityTier.class);
@@ -140,11 +148,22 @@ public final class Main {
         // Worker-пул, дёргающий реальный client.submitSm() — тот же
         // daemon-ThreadFactory convention, что уже установлен в
         // billing-service/KafkaIo.java и delivery-service/KafkaIo.java.
-        ExecutorService pacerWorkerPool = Executors.newFixedThreadPool(maxConcurrentSubmits, r -> {
-            Thread t = new Thread(r, "operator-smpp-pacer-worker");
-            t.setDaemon(true);
-            return t;
-        });
+        // Стартует на AdaptiveThreadPoolCalibrator.FLOOR, не на
+        // maxConcurrentSubmits напрямую — calibrator ниже сам находит
+        // безопасный размер (растит и pacerWorkerPool, и
+        // concurrentSubmitPermits в лок-степе).
+        ThreadPoolExecutor pacerWorkerPool = new ThreadPoolExecutor(
+            AdaptiveThreadPoolCalibrator.FLOOR, AdaptiveThreadPoolCalibrator.FLOOR,
+            0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(), r -> {
+                Thread t = new Thread(r, "operator-smpp-pacer-worker");
+                t.setDaemon(true);
+                return t;
+            });
+        AdaptiveThreadPoolCalibrator threadPoolCalibrator = new AdaptiveThreadPoolCalibrator(
+            pacerWorkerPool, concurrentSubmitPermits, client::isActive,
+            maxConcurrentSubmits,
+            Integer.parseInt(env("THREAD_POOL_CALIBRATION_WINDOW_MS", "120000")),
+            Integer.parseInt(env("THREAD_POOL_CALIBRATION_TICK_MS", "10000")));
 
         // Tick-петля пейсера — 20мс (50Hz), тот же Timer-паттерн, что и
         // enquire-link-tick выше. Каждый тик: дренирует протухшие элементы
@@ -155,7 +174,7 @@ public final class Main {
             @Override
             public void run() {
                 runPacerTick(queuesByTier, pacerCore, concurrentSubmitPermits, pacerMetrics,
-                    submitServer, pacerWorkerPool, maxQueueWaitMs);
+                    submitServer, pacerWorkerPool, maxQueueWaitMs, threadPoolCalibrator);
             }
         }, 0, 20);
 
@@ -195,7 +214,8 @@ public final class Main {
      */
     private static void runPacerTick(Map<PriorityTier, ArrayBlockingQueue<QueuedSubmit>> queuesByTier,
                                       PacerCore pacerCore, Semaphore concurrentSubmitPermits, PacerMetrics pacerMetrics,
-                                      OperatorSubmitServer submitServer, ExecutorService pacerWorkerPool, long maxQueueWaitMs) {
+                                      OperatorSubmitServer submitServer, ThreadPoolExecutor pacerWorkerPool, long maxQueueWaitMs,
+                                      AdaptiveThreadPoolCalibrator threadPoolCalibrator) {
         long now = System.currentTimeMillis();
 
         // Safety valve: max-wait-per-item. Протухшие элементы (дольше
@@ -242,8 +262,10 @@ public final class Main {
                 }
                 pacerMetrics.recordDispatched(tier);
                 pacerWorkerPool.submit(() -> {
+                    long startNanos = System.nanoTime();
                     try {
                         submitServer.dispatchOne(queued);
+                        threadPoolCalibrator.recordTaskLatency((System.nanoTime() - startNanos) / 1_000_000);
                     } finally {
                         concurrentSubmitPermits.release();
                     }

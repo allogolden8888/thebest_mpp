@@ -28,9 +28,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
@@ -154,11 +154,25 @@ public final class KafkaIo {
         // там, KafkaProducer тоже потокобезопасен по документации клиента);
         // commit остаётся на ЭТОМ потоке (владеющем KafkaConsumer — сам
         // класс не потокобезопасен даже для commit, не только для poll).
-        ExecutorService pool = Executors.newFixedThreadPool(envInt("BILLING_CONCURRENCY", 128), r -> {
-            Thread t = new Thread(r, "billing-worker");
-            t.setDaemon(true);
-            return t;
-        });
+        // Самокалибрующийся размер пула вместо статического BILLING_CONCURRENCY
+        // (тот путь требовал ручного двоичного поиска заново на каждой новой
+        // машине — 128 vs 450 давало 10-кратную разницу в p95 между AMD
+        // 12-core/15GB и Mac 8-core/7.75GB, см. LATENCY_INVESTIGATION_1500TPS.md
+        // и b713c53). Потолок роста всё ещё настраиваем через env — калибратор
+        // сам находит безопасную рабочую точку НИЖЕ потолка под реальным
+        // трафиком этого конкретного деплоя, не гадает какой потолок нужен.
+        ThreadPoolExecutor pool = new ThreadPoolExecutor(
+            AdaptiveThreadPoolCalibrator.FLOOR, AdaptiveThreadPoolCalibrator.FLOOR,
+            0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(), r -> {
+                Thread t = new Thread(r, "billing-worker");
+                t.setDaemon(true);
+                return t;
+            });
+        AdaptiveThreadPoolCalibrator calibrator = new AdaptiveThreadPoolCalibrator(
+            pool,
+            envInt("BILLING_CONCURRENCY_CEILING", 512),
+            envInt("THREAD_POOL_CALIBRATION_WINDOW_MS", 120_000),
+            envInt("THREAD_POOL_CALIBRATION_TICK_MS", 10_000));
         try {
             while (running.get()) {
                 ConsumerRecords<String, byte[]> records = consumer.poll(Duration.ofSeconds(1));
@@ -188,8 +202,14 @@ public final class KafkaIo {
                 for (ConsumerRecord<String, byte[]> record : records) {
                     byPartition.computeIfAbsent(new TopicPartition(record.topic(), record.partition()), k -> new ArrayList<>()).add(record);
                     futures.put(record, pool.submit(() -> {
+                        long startNanos = System.nanoTime();
                         try {
                             processRecord(record, accountStore, billingService, tariffCache, producer);
+                            // Латентность только успешных обработок — тот же
+                            // сигнал, что двоичный поиск в
+                            // LATENCY_INVESTIGATION_1500TPS.md измерял p95/p99
+                            // по факту (не смешивая с быстрым fail-путём).
+                            calibrator.recordTaskLatency((System.nanoTime() - startNanos) / 1_000_000);
                             return true;
                         } catch (Exception e) {
                             LOG.log(Level.SEVERE, "не удалось обработать stage.billing запись partition=" + record.partition()

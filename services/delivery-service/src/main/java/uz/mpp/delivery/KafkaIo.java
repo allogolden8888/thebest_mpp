@@ -9,9 +9,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
@@ -165,11 +165,21 @@ public final class KafkaIo {
         // OperatorSubmitClient — ManagedChannel в ConcurrentHashMap,
         // KafkaProducer — потокобезопасен по документации клиента) уже были
         // сделаны потокобезопасными в более ранних правках этой сессии.
-        ExecutorService pool = Executors.newFixedThreadPool(envInt("DELIVERY_CONCURRENCY", 128), r -> {
-            Thread t = new Thread(r, "delivery-worker");
-            t.setDaemon(true);
-            return t;
-        });
+        // Самокалибрующийся размер пула вместо статического DELIVERY_CONCURRENCY
+        // — тот же класс фикса, что billing-service/KafkaIo (см. javadoc
+        // AdaptiveThreadPoolCalibrator).
+        ThreadPoolExecutor pool = new ThreadPoolExecutor(
+            AdaptiveThreadPoolCalibrator.FLOOR, AdaptiveThreadPoolCalibrator.FLOOR,
+            0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(), r -> {
+                Thread t = new Thread(r, "delivery-worker");
+                t.setDaemon(true);
+                return t;
+            });
+        AdaptiveThreadPoolCalibrator calibrator = new AdaptiveThreadPoolCalibrator(
+            pool,
+            envInt("DELIVERY_CONCURRENCY_CEILING", 512),
+            envInt("THREAD_POOL_CALIBRATION_WINDOW_MS", 120_000),
+            envInt("THREAD_POOL_CALIBRATION_TICK_MS", 10_000));
         try {
             while (running.get()) {
                 ConsumerRecords<String, byte[]> records = consumer.poll(Duration.ofSeconds(1));
@@ -182,7 +192,9 @@ public final class KafkaIo {
                 for (ConsumerRecord<String, byte[]> record : records) {
                     byPartition.computeIfAbsent(new TopicPartition(record.topic(), record.partition()), k -> new ArrayList<>()).add(record);
                     futures.put(record, pool.submit(() -> {
+                        long startNanos = System.nanoTime();
                         processRecord(record, contextStore, gatewayRegistry, controlSnapshot, submitClient, idempotencyStore, producer);
+                        calibrator.recordTaskLatency((System.nanoTime() - startNanos) / 1_000_000);
                         return null;
                     }));
                 }
