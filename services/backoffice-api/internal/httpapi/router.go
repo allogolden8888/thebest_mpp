@@ -145,6 +145,13 @@ func NewRouter(d Deps) *chi.Mux {
 		r.With(auth.RequirePermission("support:trace", d.IamClient)).
 			Get("/support/messages/search", handleSupportMessagesSearch(d.Postgres))
 
+		// GET /v1/messages — browse/пагинация, тот же messaging.
+		// message_read_model, что search выше, но без обязательного id
+		// (messages.go) — для списка последних сообщений на главном экране
+		// backoffice-ui, а не точечного support-поиска.
+		r.With(auth.RequirePermission("support:trace", d.IamClient)).
+			Get("/messages", handleMessageBrowse(d.Postgres))
+
 		// /v1/incidents/* — luminous-hugging-charm.md Ф7, IncidentService
 		// proxy (incidents.go), backoffice-ui "Incidents". Один gate
 		// incident:manage на все операции — открытие/заметки/закрытие

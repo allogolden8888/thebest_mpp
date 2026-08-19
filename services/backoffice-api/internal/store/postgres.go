@@ -342,3 +342,61 @@ func (p *Postgres) SupportMessageSearch(ctx context.Context, filter SupportMessa
 	}
 	return results, rows.Err()
 }
+
+type MessageBrowseFilter struct {
+	PartnerID     string
+	CurrentStatus string
+	// nil — оба (terminal/не terminal), фильтр не задан.
+	Terminal *bool
+	Limit    int
+	Offset   int
+}
+
+// MessageBrowse — handle_message_browse: список последних сообщений, тот
+// же паттерн, что DlqBrowse/ReconciliationBrowse выше (LIMIT/OFFSET,
+// ORDER BY created_at DESC, id НЕ обязателен) — в отличие от
+// SupportMessageSearch, id здесь не требуется, потому что запрос уже
+// ограничен LIMIT (clampLimit, максимум 200), а не "верни всю таблицу":
+// то же разграничение "поиск по id" vs "browse с пагинацией", что уже
+// проведено выше для DLQ/reconciliation.
+func (p *Postgres) MessageBrowse(ctx context.Context, filter MessageBrowseFilter) ([]SupportMessage, error) {
+	query := `
+		SELECT message_id, partner_id, application_id, trace_id, pipeline_id, pipeline_version, current_status, terminal, created_at, updated_at
+		FROM messaging.message_read_model
+		WHERE true
+	`
+	var args []interface{}
+	if filter.PartnerID != "" {
+		args = append(args, filter.PartnerID)
+		query += fmt.Sprintf(" AND partner_id = $%d", len(args))
+	}
+	if filter.CurrentStatus != "" {
+		args = append(args, filter.CurrentStatus)
+		query += fmt.Sprintf(" AND current_status = $%d", len(args))
+	}
+	if filter.Terminal != nil {
+		args = append(args, *filter.Terminal)
+		query += fmt.Sprintf(" AND terminal = $%d", len(args))
+	}
+	args = append(args, clampLimit(filter.Limit))
+	query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d", len(args))
+	args = append(args, filter.Offset)
+	query += fmt.Sprintf(" OFFSET $%d", len(args))
+
+	rows, err := p.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("message_browse query: %w", err)
+	}
+	defer rows.Close()
+
+	var results []SupportMessage
+	for rows.Next() {
+		var m SupportMessage
+		if err := rows.Scan(&m.MessageID, &m.PartnerID, &m.ApplicationID, &m.TraceID, &m.PipelineID,
+			&m.PipelineVersion, &m.CurrentStatus, &m.Terminal, &m.CreatedAt, &m.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("message_browse scan: %w", err)
+		}
+		results = append(results, m)
+	}
+	return results, rows.Err()
+}
