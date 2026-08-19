@@ -129,6 +129,23 @@ components:
         messages:
           type: array
           items: { $ref: "#/components/schemas/Message" }
+    LifecycleEvent:
+      type: object
+      required: [lifecycle_version, status, event_id, occurred_at, source]
+      properties:
+        lifecycle_version: { type: integer }
+        status: { type: string }
+        event_id: { type: string }
+        occurred_at: { type: string, format: date-time }
+        source: { type: string }
+    MessageDetailResponse:
+      type: object
+      required: [message, history]
+      properties:
+        message: { $ref: "#/components/schemas/Message" }
+        history:
+          type: array
+          items: { $ref: "#/components/schemas/LifecycleEvent" }
     ReplayRequest:
       type: object
       required: [stage_execution_id]
@@ -637,6 +654,20 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/MessagesResponse" }
+  /messages/{message_id}:
+    get:
+      operationId: getMessageDetail
+      parameters:
+        - name: message_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageDetailResponse" }
   /support/messages/search:
     get:
       operationId: searchSupportMessages

@@ -164,6 +164,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/messages/{message_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getMessageDetail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/support/messages/search": {
         parameters: {
             query?: never;
@@ -507,6 +523,18 @@ export interface components {
         };
         MessagesResponse: {
             messages: components["schemas"]["Message"][];
+        };
+        LifecycleEvent: {
+            lifecycle_version: number;
+            status: string;
+            event_id: string;
+            /** Format: date-time */
+            occurred_at: string;
+            source: string;
+        };
+        MessageDetailResponse: {
+            message: components["schemas"]["Message"];
+            history: components["schemas"]["LifecycleEvent"][];
         };
         ReplayRequest: {
             stage_execution_id: string;
@@ -1007,6 +1035,28 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MessagesResponse"];
+                };
+            };
+        };
+    };
+    getMessageDetail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                message_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageDetailResponse"];
                 };
             };
         };
