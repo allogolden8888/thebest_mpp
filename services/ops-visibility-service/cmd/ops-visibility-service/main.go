@@ -91,12 +91,36 @@ func splitCSV(s string) []string {
 	return out
 }
 
-func buildTargets(svcNames []string) []readyz.Target {
+// SERVICE_DNS_SUFFIX — по умолчанию ".mpp.svc" (k8s Service FQDN в
+// пределах namespace). Реальная находка: локальный docker-compose стенд
+// резолвит сервисы по голому имени контейнера (Docker embedded DNS,
+// 127.0.0.11) — с захардкоженным ".mpp.svc" ЛЮБОЙ SERVICES_OVERRIDE всё
+// равно бил в несуществующий хост ("no such host"), даже если сузить сам
+// список сервисов; сама схема URL, не только список имён, должна быть
+// настраиваемой. Пусто — не добавлять суффикс вообще (docker-compose).
+// resolveDNSSuffix — реальная находка: env(key, fallback) (см. выше)
+// трактует ЯВНО заданную пустую строку так же, как "переменная не
+// задана" (os.Getenv возвращает "" в обоих случаях) — SERVICE_DNS_SUFFIX=""
+// в docker-compose молча откатывался на дефолт ".mpp.svc", подтверждено
+// живым /snapshot после редеплоя (generated_at обновлялся, URL — нет).
+// Тот же класс "пустая строка неотличима от unset", что уже есть в этом
+// helper'е повсеместно в кодбейзе — здесь используется явный sentinel
+// "none" вместо попытки переизобрести env() только под этот один случай.
+func resolveDNSSuffix() string {
+	if v := os.Getenv("SERVICE_DNS_SUFFIX"); v == "none" {
+		return ""
+	} else if v != "" {
+		return v
+	}
+	return ".mpp.svc"
+}
+
+func buildTargets(svcNames []string, dnsSuffix string) []readyz.Target {
 	targets := make([]readyz.Target, len(svcNames))
 	for i, name := range svcNames {
 		targets[i] = readyz.Target{
 			Service: name,
-			URL:     fmt.Sprintf("http://%s.mpp.svc:9090/readyz", name),
+			URL:     fmt.Sprintf("http://%s%s:9090/readyz", name, dnsSuffix),
 		}
 	}
 	return targets
@@ -150,7 +174,7 @@ func main() {
 	defer kafkaClient.Close()
 
 	svcNames := resolveServiceList()
-	targets := buildTargets(svcNames)
+	targets := buildTargets(svcNames, resolveDNSSuffix())
 	poller := readyz.NewPoller(readyzRequestTimeout, readyzConcurrency)
 
 	ctx, cancel := context.WithCancel(context.Background())

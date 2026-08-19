@@ -151,6 +151,8 @@ func NewRouter(d Deps) *chi.Mux {
 		// backoffice-ui, а не точечного support-поиска.
 		r.With(auth.RequirePermission("support:trace", d.IamClient)).
 			Get("/messages", handleMessageBrowse(d.Postgres))
+		r.With(auth.RequirePermission("support:trace", d.IamClient)).
+			Get("/messages/{message_id}", handleMessageDetail(d.Postgres))
 
 		// /v1/incidents/* — luminous-hugging-charm.md Ф7, IncidentService
 		// proxy (incidents.go), backoffice-ui "Incidents". Один gate

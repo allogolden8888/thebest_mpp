@@ -107,7 +107,7 @@ func TestResolveServiceListOverrideReplacesDefaultList(t *testing.T) {
 }
 
 func TestBuildTargetsUsesPlatformConvention(t *testing.T) {
-	targets := buildTargets([]string{"iam-service"})
+	targets := buildTargets([]string{"iam-service"}, ".mpp.svc")
 	if len(targets) != 1 {
 		t.Fatalf("buildTargets() len = %d, want 1", len(targets))
 	}
@@ -117,5 +117,46 @@ func TestBuildTargetsUsesPlatformConvention(t *testing.T) {
 	}
 	if targets[0].Service != "iam-service" {
 		t.Errorf("buildTargets()[0].Service = %q, want %q", targets[0].Service, "iam-service")
+	}
+}
+
+// TestBuildTargetsEmptySuffixForLocalCompose — реальная находка: локальный
+// docker-compose резолвит сервисы по голому имени контейнера, без
+// ".mpp.svc" (только k8s Service DNS его добавляет) — пустой suffix
+// должен давать URL без суффикса вообще, не просто короткий список имён.
+func TestBuildTargetsEmptySuffixForLocalCompose(t *testing.T) {
+	targets := buildTargets([]string{"billing-service"}, "")
+	want := "http://billing-service:9090/readyz"
+	if targets[0].URL != want {
+		t.Errorf("buildTargets()[0].URL = %q, want %q", targets[0].URL, want)
+	}
+}
+
+// TestResolveDNSSuffix — реальная находка: env(key, fallback) не отличает
+// SERVICE_DNS_SUFFIX="" (явно задано в пустую строку) от переменной,
+// вообще не заданной — оба читаются как os.Getenv() == "", оба откатывались
+// бы на дефолт ".mpp.svc", если бы resolveDNSSuffix просто звал env()
+// напрямую. Подтверждено живым тестом против реально задеплоенного сервиса
+// до этого фикса (generated_at в /snapshot обновлялся, URL суффикс — нет).
+func TestResolveDNSSuffix(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string
+		set  bool
+		want string
+	}{
+		{"unset falls back to k8s convention", "", false, ".mpp.svc"},
+		{"none sentinel means no suffix", "none", true, ""},
+		{"explicit custom suffix wins", ".custom", true, ".custom"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.set {
+				t.Setenv("SERVICE_DNS_SUFFIX", c.env)
+			}
+			if got := resolveDNSSuffix(); got != c.want {
+				t.Errorf("resolveDNSSuffix() = %q, want %q", got, c.want)
+			}
+		})
 	}
 }

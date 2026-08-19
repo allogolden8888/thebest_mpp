@@ -7,9 +7,11 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -399,4 +401,61 @@ func (p *Postgres) MessageBrowse(ctx context.Context, filter MessageBrowseFilter
 		results = append(results, m)
 	}
 	return results, rows.Err()
+}
+
+type LifecycleEvent struct {
+	LifecycleVersion int64
+	Status           string
+	EventID          string
+	OccurredAt       time.Time
+	Source           string
+}
+
+// ErrMessageNotFound — сентинел, не голый pgx.ErrNoRows наружу пакета
+// (httpapi не должен знать о pgx), тот же класс разграничения слоёв, что
+// уже принят в остальном store.
+var ErrMessageNotFound = errors.New("message not found")
+
+// GetMessageDetail — read-model строка + полная лента статусов из
+// messaging.message_lifecycle_history (ORDER BY lifecycle_version — то
+// же поле, на которое UpdateReadModel полагается для отбрасывания
+// out-of-order redelivery, см. lifecycle-writer/README.md). Это НЕ
+// пер-хоповый SMPP-таймлайн (submit_sm_to_smsc_at и т.п.) — тех данных
+// сегодня нет нигде в платформе, ни в одном топике/таблице — только то,
+// что message.lifecycle реально публикует.
+func (p *Postgres) GetMessageDetail(ctx context.Context, messageID string) (SupportMessage, []LifecycleEvent, error) {
+	var m SupportMessage
+	err := p.pool.QueryRow(ctx, `
+		SELECT message_id, partner_id, application_id, trace_id, pipeline_id, pipeline_version, current_status, terminal, created_at, updated_at
+		FROM messaging.message_read_model
+		WHERE message_id = $1
+	`, messageID).Scan(&m.MessageID, &m.PartnerID, &m.ApplicationID, &m.TraceID, &m.PipelineID,
+		&m.PipelineVersion, &m.CurrentStatus, &m.Terminal, &m.CreatedAt, &m.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SupportMessage{}, nil, ErrMessageNotFound
+	}
+	if err != nil {
+		return SupportMessage{}, nil, fmt.Errorf("get_message_detail query: %w", err)
+	}
+
+	rows, err := p.pool.Query(ctx, `
+		SELECT lifecycle_version, status, event_id, occurred_at, source
+		FROM messaging.message_lifecycle_history
+		WHERE message_id = $1
+		ORDER BY lifecycle_version ASC
+	`, messageID)
+	if err != nil {
+		return SupportMessage{}, nil, fmt.Errorf("get_message_detail history query: %w", err)
+	}
+	defer rows.Close()
+
+	var history []LifecycleEvent
+	for rows.Next() {
+		var e LifecycleEvent
+		if err := rows.Scan(&e.LifecycleVersion, &e.Status, &e.EventID, &e.OccurredAt, &e.Source); err != nil {
+			return SupportMessage{}, nil, fmt.Errorf("get_message_detail history scan: %w", err)
+		}
+		history = append(history, e)
+	}
+	return m, history, rows.Err()
 }

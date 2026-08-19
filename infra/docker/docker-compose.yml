@@ -665,6 +665,23 @@ services:
       REDIS_RUNTIME_PORT: "6379"
       REDIS_RUNTIME_PASSWORD: mpp_local_dev
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      # Дефолт internal/services.List — все 34 production-сервиса по k8s
+      # Service FQDN (name.mpp.svc) — в этом docker-compose стенде почти
+      # никого из них нет, и даже те, что есть, резолвятся по голому имени
+      # контейнера, без .mpp.svc (Docker embedded DNS, не k8s). Реальная
+      # находка: SERVICES_OVERRIDE один не чинил это — buildTargets() жёстко
+      # добавлял .mpp.svc независимо от списка имён, пришлось делать сам
+      # суффикс настраиваемым (SERVICE_DNS_SUFFIX). Список ниже — то, что
+      # реально поднято в этом стенде (см. `docker ps`) минус backoffice-ui/
+      # partner-portal-ui (статичный nginx, нет /readyz).
+      SERVICES_OVERRIDE: "backoffice-api,billing-self-service-api,billing-service,compliance-api,config-event-publisher,configuration-service,credential-issuer-service,delivery-service,destination-resolution-service,iam-service,incident-service,lifecycle-writer,message-state-resolver,operator-smpp-session-manager,ops-visibility-service,partner-notification-service,partner-rest-receiver,partner-self-service-api,pipeline-engine,policy-service,routing-service,scheduler-background-lane,template-management-service"
+      # "none" — реальная находка: этот кодбейз повсеместно использует
+      # env(key, fallback), которое не отличает "явно задано в пустую
+      # строку" от "не задано вообще" — SERVICE_DNS_SUFFIX="" тихо
+      # откатывался на дефолт .mpp.svc, подтверждено живым /snapshot после
+      # редеплоя. Явный sentinel вместо попытки переизобрести env() только
+      # под этот случай.
+      SERVICE_DNS_SUFFIX: none
     depends_on:
       redis-runtime:
         condition: service_healthy
@@ -833,6 +850,27 @@ services:
       - "8091:8080"
     depends_on:
       - backoffice-api
+
+  # Пишет incoming.messages/message.lifecycle/stage.*.dlq в
+  # messaging.message_read_model/message_lifecycle_history/dlq_record —
+  # раньше нигде не был поднят, обе read-model таблицы стояли пустые.
+  # Основа для A2P-браузера сообщений (и в backoffice-ui, и в partner-portal-ui).
+  lifecycle-writer:
+    image: mpp/lifecycle-writer:test
+    ports:
+      - "9114:9090"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: mpp
+      POSTGRES_USER: mpp
+      POSTGRES_PASSWORD: mpp_local_dev
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
 
 volumes:
   postgres_data:
