@@ -72,6 +72,12 @@ const allMenuOptions = [
     adminOnly: true,
     permission: undefined as string | undefined,
   },
+  {
+    label: () => h(RouterLink, { to: "/messages" }, () => "Messages"),
+    key: "messages",
+    adminOnly: false,
+    permission: "support:trace" as string | undefined,
+  },
   { label: () => h(RouterLink, { to: "/dlq" }, () => "DLQ / Replay"), key: "dlq", adminOnly: false, permission: undefined as string | undefined },
   {
     label: () => h(RouterLink, { to: "/reconciliation" }, () => "Reconciliation"),

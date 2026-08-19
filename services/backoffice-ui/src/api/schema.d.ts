@@ -148,6 +148,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/messages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["browseMessages"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/support/messages/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["searchSupportMessages"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/replay": {
         parameters: {
             query?: never;
@@ -458,6 +490,23 @@ export interface components {
         };
         DlqRecordsResponse: {
             records: components["schemas"]["DlqRecord"][];
+        };
+        Message: {
+            message_id: string;
+            partner_id: string;
+            application_id: string;
+            trace_id: string;
+            pipeline_id: string;
+            pipeline_version: string;
+            current_status: string;
+            terminal: boolean;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        MessagesResponse: {
+            messages: components["schemas"]["Message"][];
         };
         ReplayRequest: {
             stage_execution_id: string;
@@ -932,6 +981,55 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DlqRecordsResponse"];
+                };
+            };
+        };
+    };
+    browseMessages: {
+        parameters: {
+            query?: {
+                partner_id?: string;
+                current_status?: string;
+                terminal?: boolean;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessagesResponse"];
+                };
+            };
+        };
+    };
+    searchSupportMessages: {
+        parameters: {
+            query?: {
+                message_id?: string;
+                trace_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessagesResponse"];
                 };
             };
         };

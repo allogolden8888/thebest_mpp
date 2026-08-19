@@ -108,6 +108,27 @@ components:
         records:
           type: array
           items: { $ref: "#/components/schemas/DlqRecord" }
+    Message:
+      type: object
+      required: [message_id, partner_id, application_id, trace_id, pipeline_id, pipeline_version, current_status, terminal, created_at, updated_at]
+      properties:
+        message_id: { type: string }
+        partner_id: { type: string }
+        application_id: { type: string }
+        trace_id: { type: string }
+        pipeline_id: { type: string }
+        pipeline_version: { type: string }
+        current_status: { type: string }
+        terminal: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    MessagesResponse:
+      type: object
+      required: [messages]
+      properties:
+        messages:
+          type: array
+          items: { $ref: "#/components/schemas/Message" }
     ReplayRequest:
       type: object
       required: [stage_execution_id]
@@ -591,6 +612,47 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/DlqRecordsResponse" }
+  /messages:
+    get:
+      operationId: browseMessages
+      parameters:
+        - name: partner_id
+          in: query
+          schema: { type: string }
+        - name: current_status
+          in: query
+          schema: { type: string }
+        - name: terminal
+          in: query
+          schema: { type: boolean }
+        - name: limit
+          in: query
+          schema: { type: integer }
+        - name: offset
+          in: query
+          schema: { type: integer }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessagesResponse" }
+  /support/messages/search:
+    get:
+      operationId: searchSupportMessages
+      parameters:
+        - name: message_id
+          in: query
+          schema: { type: string }
+        - name: trace_id
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessagesResponse" }
   /replay:
     post:
       operationId: requestReplay

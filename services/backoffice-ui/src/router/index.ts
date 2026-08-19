@@ -12,6 +12,7 @@ const router = createRouter({
     { path: "/config", name: "config", component: () => import("../views/ConfigView.vue") },
     { path: "/execution-control", name: "execution-control", component: () => import("../views/ExecutionControlView.vue") },
     { path: "/scheduler", name: "scheduler", component: () => import("../views/SchedulerForceCommandView.vue") },
+    { path: "/messages", name: "messages", component: () => import("../views/MessagesView.vue") },
     { path: "/dlq", name: "dlq", component: () => import("../views/DlqBrowseView.vue") },
     { path: "/reconciliation", name: "reconciliation", component: () => import("../views/ReconciliationView.vue") },
     { path: "/reports", name: "reports", component: () => import("../views/ReportsView.vue") },
