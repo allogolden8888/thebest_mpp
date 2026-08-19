@@ -27,8 +27,26 @@ CO_PARTITIONED — ещё один Kafka Streams-специфичный инва
 число партиций, иначе join невозможен. Здесь это не забыто — стоит явной
 группой, после расчёта естественное (меньшее) число partitions у delivery.status
 принудительно поднимается до числа у stage.completed.
+
+Профили (--profile):
+  production (по умолчанию) — как описано выше, партиции считаются от реальных
+              production-реплик потребителей (REPLICAS из k8s/generate_manifests.py),
+              RF=3, min.insync.replicas=2, 5 брокеров. Запуск без флагов даёт
+              байт-в-байт тот же результат, что и раньше — поведение по умолчанию
+              не изменилось.
+  small       — компактная раскладка для одного dev/staging-узла на слабом железе.
+              RF=1, min.insync.replicas=1, 1 брокер (не формула +2), партиции
+              WORKLOAD-топиков считаются от MIN_REPLICAS (HA floor из
+              k8s/generate_manifests.py = 2), а не от реальных production-реплик,
+              CONTROL_PARTITIONS/DLQ_PARTITIONS пропорционально уменьшены.
+              Пишет в отдельную директорию rendered-small/ — rendered/ (production,
+              источник истины) при этом не трогается.
+              ВНИМАНИЕ: RF=1 и 1 брокер означают ПОЛНОЕ отсутствие replica-level
+              отказоустойчивости — потеря единственного брокера теряет и данные.
+              Только для dev/staging, никогда не для production.
 """
 
+import argparse
 import math
 import sys
 from dataclasses import dataclass, field
@@ -38,12 +56,18 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "k8s"))
-from generate_manifests import SERVICES, replicas_for  # noqa: E402
+from generate_manifests import SERVICES, replicas_for, MIN_REPLICAS  # noqa: E402
 
 REPLICAS = {s.name: replicas_for(s) for s in SERVICES}
 HEADROOM = 1.5
+
+# Профиль-зависимые константы — назначаются в main() по --profile ДО вызова любой
+# функции, которая их читает. Значения ниже — production-дефолты (совпадают с
+# поведением до появления --profile, чтобы запуск без флагов был байт-в-байт тем же).
 REPLICATION_FACTOR = 3
 MIN_INSYNC_REPLICAS = 2  # acks=all + at-least-once (архитектурный принцип с самого HLD) требует >1 ISR
+CLUSTER_BROKER_REPLICAS = REPLICATION_FACTOR + 2  # 5 брокеров — RF=3 переживает потерю 1 зоны из 3 с запасом
+USE_MIN_REPLICAS_FLOOR = False  # small: WORKLOAD-партиции от MIN_REPLICAS вместо реальных REPLICAS[consumer]
 
 
 class TopicCategory(Enum):
@@ -123,7 +147,14 @@ def compute_partitions() -> dict[str, int]:
 
     for t in TOPICS:
         if t.category == TopicCategory.WORKLOAD:
-            max_replicas = max(REPLICAS[c] for c in t.consumers)
+            if USE_MIN_REPLICAS_FLOOR:
+                # small-профиль: считаем от HA floor (MIN_REPLICAS), не от
+                # реальных production-реплик потребителя — компактная
+                # раскладка для одного dev/staging-узла, не масштаб под
+                # 20 000 msg/s.
+                max_replicas = MIN_REPLICAS
+            else:
+                max_replicas = max(REPLICAS[c] for c in t.consumers)
             partitions[t.name] = math.ceil(max_replicas * HEADROOM)
         elif t.category == TopicCategory.CONTROL:
             partitions[t.name] = CONTROL_PARTITIONS
@@ -175,7 +206,7 @@ def build_kafka_cluster_crd() -> dict:
         "spec": {
             "kafka": {
                 "version": "3.9.0",
-                "replicas": REPLICATION_FACTOR + 2,  # 5 брокеров — RF=3 переживает потерю 1 зоны из 3 с запасом
+                "replicas": CLUSTER_BROKER_REPLICAS,
                 "listeners": [
                     {"name": "plain", "port": 9092, "type": "internal", "tls": False},
                     {"name": "tls", "port": 9093, "type": "internal", "tls": True},
@@ -201,7 +232,30 @@ def build_kafka_cluster_crd() -> dict:
 
 
 def main():
-    out_dir = Path(__file__).parent / "rendered"
+    global REPLICATION_FACTOR, MIN_INSYNC_REPLICAS, CLUSTER_BROKER_REPLICAS, USE_MIN_REPLICAS_FLOOR
+    global CONTROL_PARTITIONS, DLQ_PARTITIONS
+
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "--profile", choices=["production", "small"], default="production",
+        help="production (default, без изменений) | small (компактно для одного dev/staging-узла, см. docstring модуля)",
+    )
+    args = parser.parse_args()
+
+    if args.profile == "small":
+        # Только для dev/staging — см. предупреждение в docstring модуля и
+        # SMALL_DEPLOYMENT_RUNBOOK.md. Никогда не использовать в production:
+        # RF=1 + 1 брокер = полное отсутствие replica-level отказоустойчивости.
+        REPLICATION_FACTOR = 1
+        MIN_INSYNC_REPLICAS = 1
+        CLUSTER_BROKER_REPLICAS = 1
+        USE_MIN_REPLICAS_FLOOR = True
+        CONTROL_PARTITIONS = 2
+        DLQ_PARTITIONS = 1
+        out_dir = Path(__file__).parent / "rendered-small"
+    else:
+        out_dir = Path(__file__).parent / "rendered"
+
     out_dir.mkdir(exist_ok=True)
     for f in out_dir.glob("*.yaml"):
         f.unlink()
@@ -215,6 +269,7 @@ def main():
     path = out_dir / "kafka-topics.yaml"
     path.write_text(yaml.dump_all(docs, sort_keys=False))
 
+    print(f"profile={args.profile}  RF={REPLICATION_FACTOR}  brokers={CLUSTER_BROKER_REPLICAS}")
     print(f"{len(TOPICS)} топиков + 1 Kafka CR -> {path}")
     for t in TOPICS:
         print(f"  {t.name:42s} {t.category.name:10s} partitions={partitions[t.name]}")
