@@ -47,6 +47,10 @@ public final class KafkaIo {
     public static final String TOPIC_LIFECYCLE = "message.lifecycle";
     public static final String TOPIC_CHANGELOG = "message-state.changelog";
 
+    // 10с — как и в billing-service/partner-smpp-gateway/delivery-reconciliation-service
+    // (тот же класс риска, см. buildTransactionalProducer ниже).
+    private static final Duration PRODUCER_SEND_TIMEOUT = Duration.ofSeconds(10);
+
     public static KafkaConsumer<String, byte[]> buildConsumer(String bootstrapServers, String groupId) {
         Properties props = new Properties();
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
@@ -76,6 +80,31 @@ public final class KafkaIo {
         props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
         props.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, transactionalId);
         props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true");
+        // Тот же баг, что нашли и исправили в billing-service/KafkaIo
+        // (buildProducer), partner-smpp-gateway/IncomingPublisher и
+        // delivery-reconciliation-service/StageCompletedPublisher: без явной
+        // настройки KafkaProducer работает на дефолтах — buffer.memory=32MB,
+        // max.block.ms=60000мс. max.block.ms здесь не только ограничивает
+        // producer.send() внутри processRecord() — тот же таймаут применяется
+        // KafkaProducer'ом к initTransactions()/beginTransaction()/
+        // commitTransaction()/abortTransaction() при ожидании метаданных или
+        // координатора транзакций (это отдельный класс блокировки от
+        // transaction.timeout.ms, который управляет тем, сколько брокер ждёт
+        // саму транзакцию открытой, а не тем, сколько локально блокируется
+        // вызывающий поток при выполнении этих API-вызовов). run() крутит
+        // единственный обрабатывающий поток в цикле poll/beginTransaction/
+        // send/commitTransaction — если что-то из этого молча зависнет на 60с
+        // под backpressure/недоступностью координатора, встаёт вся обработка.
+        // Фикс: 1) buffer.memory поднят; 2) max.block.ms снижен до
+        // PRODUCER_SEND_TIMEOUT — под backpressure вызовы бросают исключение
+        // за 10с вместо блокировки на минуту.
+        props.put(ProducerConfig.BUFFER_MEMORY_CONFIG, 67_108_864L); // 64MB (было 32MB по умолчанию)
+        props.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, PRODUCER_SEND_TIMEOUT.toMillis()); // 10s (было 60s по умолчанию)
+        // linger.ms=0 по умолчанию — каждый send() внутри транзакции уходит
+        // брокеру отдельным запросом. 5мс даёт клиенту собрать пачку без
+        // заметного вклада в латентность одной транзакции; commitTransaction()
+        // всё равно ждёт подтверждения всех отправленных в неё записей.
+        props.put(ProducerConfig.LINGER_MS_CONFIG, 5);
         KafkaProducer<String, byte[]> producer = new KafkaProducer<>(props);
         producer.initTransactions();
         return producer;
