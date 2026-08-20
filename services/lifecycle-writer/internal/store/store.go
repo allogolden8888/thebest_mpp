@@ -5,6 +5,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -18,6 +19,54 @@ type Store struct {
 
 func New(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
+}
+
+// EnsurePartition — реальный, воспроизведённый вживую баг (не гипотеза):
+// `messaging.message_lifecycle_history` (V005) партиционирована по часам,
+// `V015__partition_maintenance.sql` создаёт партиции только на момент
+// применения миграций и явно документирует, что
+// `messaging.create_lifecycle_history_partition` дальше вызывается любым
+// внешним планировщиком (k8s CronJob/pg_cron) раз в час — но такой
+// планировщик нигде в репозитории не заведён (grep по
+// create_lifecycle_history_partition/CronJob — пусто). На практике это
+// значит: как только текущий час выходит за пределы бутстрап-окна,
+// BatchInsertLifecycleHistory начинает падать с "no partition of relation
+// found for row" НА КАЖДОМ flush — а поскольку flush коммитит офсеты
+// ТОЛЬКО после того, как отработают все четыре batch-шага (insert/update/
+// history/dlq), эта постоянная ошибка блокирует commit офсетов для ВСЕХ
+// трёх топиков разом (incoming.messages/message.lifecycle/DLQ), не только
+// для history. Consumer перестаёт продвигаться вообще — именно это и
+// выглядит как "current_status застревает": сервис живой, буфер растёт,
+// но ничего не коммитится, и при любом рестарте начинается replay с
+// давно устаревшего офсета.
+//
+// Тот же принцип самообслуживания, что уже применён в
+// dlr-correlation-writer/internal/writer/pg_writer.go::EnsurePartition
+// (этот сервис — единственный писатель в таблицу, он и берёт на себя
+// то, для чего не завели внешний планировщик) — вызывается перед каждым
+// flush в cmd/lifecycle-writer/main.go, дешёвый идемпотентный вызов
+// (CREATE TABLE IF NOT EXISTS внутри функции).
+func (s *Store) EnsurePartition(ctx context.Context, hourStart time.Time) error {
+	_, err := s.pool.Exec(ctx, "SELECT messaging.create_lifecycle_history_partition($1)", hourStart.Truncate(time.Hour))
+	if err != nil {
+		return fmt.Errorf("messaging.create_lifecycle_history_partition: %w", err)
+	}
+	return nil
+}
+
+// DropOldPartitions — та же логика, что dlr-correlation-writer's
+// DropOldPartitions: messaging.drop_old_lifecycle_history_partitions
+// (V015) была определена, но нигде не вызывалась — партиции росли бы
+// неограниченно. Вызывается реже, чем EnsurePartition (см. main.go —
+// раз в час, не на каждый flush: DROP TABLE, не дешёвый idempotent
+// CREATE IF NOT EXISTS).
+func (s *Store) DropOldPartitions(ctx context.Context, retainHours int) (int, error) {
+	var dropped int
+	err := s.pool.QueryRow(ctx, "SELECT messaging.drop_old_lifecycle_history_partitions($1)", retainHours).Scan(&dropped)
+	if err != nil {
+		return 0, fmt.Errorf("messaging.drop_old_lifecycle_history_partitions: %w", err)
+	}
+	return dropped, nil
 }
 
 // InsertReadModel — первая строка read model (INSERT, ON CONFLICT DO NOTHING
@@ -91,12 +140,73 @@ func (s *Store) UpdateReadModel(ctx context.Context, update core.ReadModelUpdate
 
 // BatchUpdateReadModel — batch-версия UpdateReadModel, та же
 // lifecycle_version-защита от out-of-order/дубликатов.
-func (s *Store) BatchUpdateReadModel(ctx context.Context, updates []core.ReadModelUpdate) error {
+//
+// **Реальная гонка, найденная при разборе "current_status застревает",
+// не гипотеза**: incoming.messages и message.lifecycle — РАЗНЫЕ топики
+// одного consumer'а (main.go), PollFetches ничего не гарантирует про
+// порядок между ними. Если самое первое message.lifecycle-событие для
+// message_id (обычно SUBMITTED) обрабатывается раньше, чем
+// incoming.messages создаст строку read model для этого же message_id
+// (совсем не гипотетически — под нагрузкой/при replay огромного backlog'а
+// после рестарта, см. EnsurePartition выше, это НЕ редкий случай), то
+// `WHERE message_id = $1 AND lifecycle_version < $5` находит НОЛЬ строк —
+// не ошибка, просто 0 affected rows, молча. Раньше это событие терялось
+// НАВСЕГДА: строка потом создаётся через INSERT со status='RECEIVED', и
+// раз обновление уже "было" и пропало, ничто больше не пере-присылает тот
+// же SUBMITTED — сообщение виснет на RECEIVED навечно, даже если реально
+// давно DELIVERED.
+//
+// Исправление — не наивный UPSERT (у ReadModelUpdate нет
+// partner_id/application_id/trace_id/created_at, INSERT ими не
+// заполнить), а различение ДВУХ разных причин "0 affected rows":
+// (а) строки для message_id ещё не существует — гонка, обновление нужно
+// повторить, когда INSERT доедет (см. main.go: возвращённые здесь missing
+// кладутся обратно в буфер на следующий tick); (б) строка существует, но
+// lifecycle_version уже не новее — легитимный дубликат/устаревшая
+// редоставка, ретраить НЕ нужно (иначе copilo растил бы буфер вечно).
+// Отсюда — сначала проверяем, какие message_id вообще существуют, и
+// применяем UPDATE только к существующим; остальные возвращаем вызывающей
+// стороне как missing.
+func (s *Store) BatchUpdateReadModel(ctx context.Context, updates []core.ReadModelUpdate) (missing []core.ReadModelUpdate, err error) {
 	if len(updates) == 0 {
-		return nil
+		return nil, nil
 	}
+
+	ids := make([]string, len(updates))
+	for i, u := range updates {
+		ids[i] = u.MessageID
+	}
+	rows, err := s.pool.Query(ctx, `SELECT message_id FROM messaging.message_read_model WHERE message_id = ANY($1)`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("select existing message_read_model rows: %w", err)
+	}
+	existing := make(map[string]bool, len(updates))
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan message_id: %w", err)
+		}
+		existing[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate existing message_read_model rows: %w", err)
+	}
+
+	applicable := make([]core.ReadModelUpdate, 0, len(updates))
+	for _, u := range updates {
+		if existing[u.MessageID] {
+			applicable = append(applicable, u)
+		} else {
+			missing = append(missing, u)
+		}
+	}
+	if len(applicable) == 0 {
+		return missing, nil
+	}
+
 	batch := &pgx.Batch{}
-	for _, update := range updates {
+	for _, update := range applicable {
 		batch.Queue(`
 			UPDATE messaging.message_read_model
 			SET current_status = $2, terminal = $3, updated_at = $4, lifecycle_version = $5
@@ -105,12 +215,12 @@ func (s *Store) BatchUpdateReadModel(ctx context.Context, updates []core.ReadMod
 	}
 	br := s.pool.SendBatch(ctx, batch)
 	defer br.Close()
-	for range updates {
+	for range applicable {
 		if _, err := br.Exec(); err != nil {
-			return fmt.Errorf("batch update message_read_model: %w", err)
+			return nil, fmt.Errorf("batch update message_read_model: %w", err)
 		}
 	}
-	return nil
+	return missing, nil
 }
 
 // BatchInsertLifecycleHistory — COPY-стиль batch insert через pgx.Batch.

@@ -157,12 +157,15 @@ func TestBatchInsertReadModelAndBatchUpdateReadModel(t *testing.T) {
 		t.Fatalf("BatchInsertReadModel failed: %v", err)
 	}
 
-	err = s.BatchUpdateReadModel(ctx, []core.ReadModelUpdate{
+	missing, err := s.BatchUpdateReadModel(ctx, []core.ReadModelUpdate{
 		{MessageID: id1, CurrentStatus: "DELIVERED", Terminal: true, UpdatedAt: time.Now(), LifecycleVersion: 1},
 		{MessageID: id2, CurrentStatus: "FAILED", Terminal: true, UpdatedAt: time.Now(), LifecycleVersion: 1},
 	})
 	if err != nil {
 		t.Fatalf("BatchUpdateReadModel failed: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("ожидали 0 missing (обе строки read model уже существуют), получили %d", len(missing))
 	}
 
 	for id, want := range map[string]string{id1: "DELIVERED", id2: "FAILED"} {
@@ -176,6 +179,79 @@ func TestBatchInsertReadModelAndBatchUpdateReadModel(t *testing.T) {
 	}
 }
 
+// TestBatchUpdateReadModelReturnsMissingForRaceWithInsert — прямое
+// доказательство реального бага "current_status застревает на RECEIVED"
+// (не гипотеза, см. javadoc BatchUpdateReadModel): incoming.messages и
+// message.lifecycle — разные топики одного consumer'а, ничто не
+// гарантирует порядок между ними. Если update приходит РАНЬШЕ, чем
+// строка read model создана — раньше это был молчаливый no-op (0 affected
+// rows), обновление терялось навсегда. Теперь такое обновление
+// возвращается вызывающей стороне как missing, не отбрасывается.
+func TestBatchUpdateReadModelReturnsMissingForRaceWithInsert(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	s := New(pool)
+	ctx := context.Background()
+	neverInserted := uniqueMessageID(t)
+
+	missing, err := s.BatchUpdateReadModel(ctx, []core.ReadModelUpdate{
+		{MessageID: neverInserted, CurrentStatus: "SUBMITTED", Terminal: false, UpdatedAt: time.Now(), LifecycleVersion: 1},
+	})
+	if err != nil {
+		t.Fatalf("BatchUpdateReadModel failed: %v", err)
+	}
+	if len(missing) != 1 || missing[0].MessageID != neverInserted {
+		t.Fatalf("ожидали ровно 1 missing для message_id=%s (строка ещё не создана), получили %+v", neverInserted, missing)
+	}
+
+	var count int
+	pool.QueryRow(ctx, `SELECT count(*) FROM messaging.message_read_model WHERE message_id = $1`, neverInserted).Scan(&count)
+	if count != 0 {
+		t.Fatalf("update для несуществующего message_id не должен был создать строку сам по себе, найдено %d", count)
+	}
+}
+
+// TestBatchUpdateReadModelStaleVersionIsNotMissing — вторая половина той
+// же гарантии: строка СУЩЕСТВУЕТ, но lifecycle_version уже не новее (
+// легитимный дубликат/устаревшая редоставка) — это НЕ гонка, retry не
+// нужен, иначе буфер рос бы вечно на заведомо неприменимых обновлениях.
+func TestBatchUpdateReadModelStaleVersionIsNotMissing(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	s := New(pool)
+	ctx := context.Background()
+	id := uniqueMessageID(t)
+
+	if err := s.BatchInsertReadModel(ctx, []core.ReadModelRow{
+		{MessageID: id, PartnerID: "acme", ApplicationID: "app", TraceID: uniqueMessageID(t), CurrentStatus: "RECEIVED", Timestamp: time.Now()},
+	}); err != nil {
+		t.Fatalf("BatchInsertReadModel failed: %v", err)
+	}
+	if _, err := s.BatchUpdateReadModel(ctx, []core.ReadModelUpdate{
+		{MessageID: id, CurrentStatus: "DELIVERED", Terminal: true, UpdatedAt: time.Now(), LifecycleVersion: 2},
+	}); err != nil {
+		t.Fatalf("BatchUpdateReadModel (v2) failed: %v", err)
+	}
+
+	// Устаревшее редоставленное событие (lifecycle_version=1, уже позади
+	// применённого v2) — строка существует, просто guard его отклоняет.
+	missing, err := s.BatchUpdateReadModel(ctx, []core.ReadModelUpdate{
+		{MessageID: id, CurrentStatus: "SUBMITTED", Terminal: false, UpdatedAt: time.Now(), LifecycleVersion: 1},
+	})
+	if err != nil {
+		t.Fatalf("BatchUpdateReadModel (stale v1) failed: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("устаревшая версия для существующей строки не должна считаться missing, получили %+v", missing)
+	}
+
+	var status string
+	pool.QueryRow(ctx, `SELECT current_status FROM messaging.message_read_model WHERE message_id = $1`, id).Scan(&status)
+	if status != "DELIVERED" {
+		t.Fatalf("устаревшее обновление не должно было откатить статус назад: %s", status)
+	}
+}
+
 func TestBatchInsertLifecycleHistory(t *testing.T) {
 	pool := testPool(t)
 	defer pool.Close()
@@ -183,6 +259,15 @@ func TestBatchInsertLifecycleHistory(t *testing.T) {
 	ctx := context.Background()
 	messageID := uniqueMessageID(t)
 	now := time.Now()
+
+	// EnsurePartition — без него этот INSERT падает с "no partition of
+	// relation found for row" на любой машине, где партиция текущего часа
+	// ещё не создана бутстрап-окном V015 (см. javadoc EnsurePartition) —
+	// тот же принцип, что уже применяется в dlr-correlation-writer's
+	// pg_writer_test.go.
+	if err := s.EnsurePartition(ctx, now); err != nil {
+		t.Fatalf("EnsurePartition: %v", err)
+	}
 
 	rows := []core.LifecycleHistoryRow{
 		{MessageID: messageID, LifecycleVersion: 1, Status: "SUBMITTED", EventID: uniqueMessageID(t), OccurredAt: now, Source: "message.lifecycle"},
@@ -196,6 +281,53 @@ func TestBatchInsertLifecycleHistory(t *testing.T) {
 	pool.QueryRow(ctx, `SELECT count(*) FROM messaging.message_lifecycle_history WHERE message_id = $1`, messageID).Scan(&count)
 	if count != 2 {
 		t.Fatalf("ожидали 2 строки истории, получили %d", count)
+	}
+}
+
+// TestInsertPastBootstrapWindowFailsWithoutEnsurePartition — прямое
+// доказательство самого бага "current_status застревает" (не гипотеза):
+// достаточно далёкий в будущем час заведомо не создан бутстрап-окном
+// V015 — без EnsurePartition вставка в него падает ровно так, как падала
+// в реальной эксплуатации (см. package doc store.go EnsurePartition).
+func TestInsertPastBootstrapWindowFailsWithoutEnsurePartition(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	s := New(pool)
+	ctx := context.Background()
+	messageID := uniqueMessageID(t)
+	future := time.Now().Add(365 * 24 * time.Hour)
+
+	rows := []core.LifecycleHistoryRow{
+		{MessageID: messageID, LifecycleVersion: 1, Status: "SUBMITTED", EventID: uniqueMessageID(t), OccurredAt: future, Source: "message.lifecycle"},
+	}
+	if err := s.BatchInsertLifecycleHistory(ctx, rows); err == nil {
+		t.Fatal("ожидали ошибку insert в несуществующую партицию БЕЗ EnsurePartition — если тест прошёл, партиция уже существовала по другой причине")
+	}
+
+	if err := s.EnsurePartition(ctx, future); err != nil {
+		t.Fatalf("EnsurePartition: %v", err)
+	}
+	if err := s.BatchInsertLifecycleHistory(ctx, rows); err != nil {
+		t.Fatalf("BatchInsertLifecycleHistory после EnsurePartition должен пройти: %v", err)
+	}
+}
+
+func TestDropOldPartitions(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	s := New(pool)
+	ctx := context.Background()
+
+	// Не проверяем конкретное число удалённых партиций (зависит от
+	// состояния БД на момент прогона других тестов) — только что вызов
+	// не падает и возвращает неотрицательное число, тот же уровень
+	// проверки, что и у dlr-correlation-writer's эквивалентного теста.
+	dropped, err := s.DropOldPartitions(ctx, 72)
+	if err != nil {
+		t.Fatalf("DropOldPartitions: %v", err)
+	}
+	if dropped < 0 {
+		t.Fatalf("dropped не должен быть отрицательным: %d", dropped)
 	}
 }
 

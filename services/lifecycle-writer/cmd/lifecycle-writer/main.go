@@ -41,6 +41,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -243,12 +244,43 @@ func runConsumeLoop(ctx context.Context, client *kgo.Client, buf *buffer) {
 func runFlushLoop(ctx context.Context, db *store.Store, client *kgo.Client, buf *buffer) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
+
+	// retentionInterval/retainHours — тот же принцип, что
+	// dlr-correlation-writer/cmd/dlr-correlation-writer/main.go: DROP TABLE
+	// не такой дешёвый, как CREATE IF NOT EXISTS, поэтому реже, чем на
+	// каждый flush. 72ч по умолчанию — та же граница, что уже
+	// задокументирована в migrations/V015 (не решено окончательно,
+	// development_plan.md 5.6).
+	retentionInterval := time.Hour
+	if v := env("RETENTION_CHECK_INTERVAL", ""); v != "" {
+		if parsed, err := time.ParseDuration(v); err == nil {
+			retentionInterval = parsed
+		}
+	}
+	retainHours := 72
+	if v := env("LIFECYCLE_HISTORY_RETAIN_HOURS", ""); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			retainHours = parsed
+		}
+	}
+	retentionTicker := time.NewTicker(retentionInterval)
+	defer retentionTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			flush(ctx, db, client, buf)
+		case <-retentionTicker.C:
+			dropped, err := db.DropOldPartitions(ctx, retainHours)
+			if err != nil {
+				log.Printf("drop_old_lifecycle_history_partitions failed: %v", err)
+				continue
+			}
+			if dropped > 0 {
+				log.Printf("drop_old_lifecycle_history_partitions: удалено %d устаревших партиций", dropped)
+			}
 		}
 	}
 }
@@ -262,6 +294,27 @@ func flush(ctx context.Context, db *store.Store, client *kgo.Client, buf *buffer
 	if buf.empty() {
 		return
 	}
+
+	// EnsurePartition — см. store.Store.EnsurePartition: без этого вызова
+	// BatchInsertLifecycleHistory рано или поздно начинает падать на
+	// каждом tick'е, как только текущий час выходит за пределы
+	// бутстрап-окна V015 — и поскольку commit офсетов ниже происходит
+	// только после успеха ВСЕХ шагов flush, эта постоянная ошибка
+	// блокирует продвижение consumer'а целиком, для всех трёх топиков, не
+	// только для history. Дешёвый идемпотентный вызов — не жаль делать на
+	// каждый tick, не только раз в час. И текущий, и следующий час —
+	// буфер может пересечь границу часа между первой записью в него и
+	// flush'ем.
+	now := time.Now()
+	if err := db.EnsurePartition(ctx, now); err != nil {
+		log.Printf("ensure_partition(now) failed, flush отложен: %v", err)
+		return
+	}
+	if err := db.EnsurePartition(ctx, now.Add(time.Hour)); err != nil {
+		log.Printf("ensure_partition(now+1h) failed, flush отложен: %v", err)
+		return
+	}
+
 	inserts, updates, history, dlq, records := buf.drain()
 
 	if err := db.BatchInsertReadModel(ctx, inserts); err != nil {
@@ -269,9 +322,22 @@ func flush(ctx context.Context, db *store.Store, client *kgo.Client, buf *buffer
 		buf.restore(inserts, updates, history, dlq, records)
 		return
 	}
-	if err := db.BatchUpdateReadModel(ctx, updates); err != nil {
+	missing, err := db.BatchUpdateReadModel(ctx, updates)
+	if err != nil {
 		log.Printf("flush_batch (message_read_model update) failed, будет повторено: %v", err)
 		buf.restore(nil, updates, history, dlq, records)
+		return
+	}
+	if len(missing) > 0 {
+		// Реальная гонка incoming.messages/message.lifecycle (см. javadoc
+		// store.Store.BatchUpdateReadModel) — строка read model для этих
+		// message_id ещё не создана INSERT'ом. НЕ отбрасываем эти
+		// обновления (иначе сообщение виснет на RECEIVED навсегда) —
+		// кладём обратно в буфер, INSERT почти наверняка доедет к
+		// следующему tick'у (секунда). Тот же принцип "коммитим офсеты
+		// только когда всё применилось", что и у остальных веток ниже.
+		log.Printf("flush_batch: %d update(s) опережают ещё не применённый insert (гонка incoming.messages/message.lifecycle), будет повторено", len(missing))
+		buf.restore(nil, missing, history, dlq, records)
 		return
 	}
 	if err := db.BatchInsertLifecycleHistory(ctx, history); err != nil {
