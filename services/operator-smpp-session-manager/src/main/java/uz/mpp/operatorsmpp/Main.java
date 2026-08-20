@@ -7,6 +7,7 @@ import uz.mpp.operatorsmpp.client.OperatorSmppClient;
 import uz.mpp.operatorsmpp.client.SmppConnectionSupervisor;
 import uz.mpp.operatorsmpp.core.AdaptiveThreadPoolCalibrator;
 import uz.mpp.operatorsmpp.core.AdaptiveThreadPoolCalibrator.ResizableSemaphore;
+import uz.mpp.operatorsmpp.core.DeliveryReceiptParser;
 import uz.mpp.operatorsmpp.core.PacerCore;
 import uz.mpp.operatorsmpp.core.PacerMetrics;
 import uz.mpp.operatorsmpp.core.PriorityGate;
@@ -57,10 +58,40 @@ public final class Main {
         OperatorRouteRegistry routeRegistry = new OperatorRouteRegistry(redisUri, env("HOSTNAME", "operator-smpp-session-manager-0"), Duration.ofSeconds(30));
 
         OperatorSmppClient client = new OperatorSmppClient(dlrPdu -> {
+            String rawReceipt = new String(dlrPdu.shortMessage());
+            // smsc_message_id — ЕДИНСТВЕННЫЙ ключ корреляции DLR с
+            // message_id (dlr-manager джойнит по нему dlr.dlr_correlation).
+            // Раньше здесь он не заполнялся вообще — dlr-manager отбрасывал
+            // каждый DLR с "OperatorDlr без smsc_message_id", delivery.status
+            // оставался пустым, и любое сообщение навсегда застревало в
+            // SUBMITTED. См. DeliveryReceiptParser javadoc.
             OperatorDlr dlr = OperatorDlr.newBuilder()
                 .setOperatorId(operatorId)
                 .setProtocol(Protocol.PROTOCOL_SMPP)
-                .setRawStatus(new String(dlrPdu.shortMessage()))
+                .setSmscMessageId(DeliveryReceiptParser.extractSmscMessageId(rawReceipt))
+                // segment_id: у одиночного (не multipart) receipt'а сегмент
+                // всегда 1 — это же значение проставляет delivery-service при
+                // публикации operator.submit.accepted для односегментных
+                // сообщений, так что ключ корреляции сходится. Реального
+                // per-segment DLR из PDU здесь не достать: SMPP-receipt не
+                // несёт номер сегмента как отдельное поле.
+                .setSegmentId(1)
+                // raw_status по контракту operator_events.proto — это КОД
+                // статуса в терминологии оператора ("DELIVRD"), а не весь
+                // текст receipt'а: dlr-manager делает по нему прямой lookup
+                // в словаре SMPP v3.4 §4.7.3 (см. dlr/parser.go
+                // normalizedStatusByRawSMPPStat). Раньше сюда клался весь
+                // receipt целиком — lookup не находил его никогда, и
+                // dlr-manager отбрасывал КАЖДЫЙ DLR с "нераспознанный
+                // raw_status", даже когда корреляция уже находилась.
+                //
+                // Полный текст receipt'а при этом теряется — под него в
+                // proto нет отдельного поля. Для "delivery snippet" в UI
+                // (см. BACKOFFICE_DESIGN_SPEC.md, блок C карточки
+                // сообщения) нужно добавить отдельное поле raw_receipt в
+                // OperatorDlr — отдельная правка с регенерацией protobuf,
+                // сюда не мешается.
+                .setRawStatus(DeliveryReceiptParser.extractStatus(rawReceipt))
                 .setReceivedAt(toTimestamp(Instant.now()))
                 .build();
             eventPublisher.publishDlr(dlr);

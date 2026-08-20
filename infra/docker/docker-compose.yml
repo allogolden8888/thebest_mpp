@@ -851,6 +851,61 @@ services:
     depends_on:
       - backoffice-api
 
+  # --- Цепочка DLR. Реальная находка 2026-08-19: ни один из этих двух
+  # сервисов не был заведён в этот compose, при том что operator.dlr уже
+  # содержал 78k реальных DLR от SMSC, а operator.submit.accepted — 78k
+  # submit'ов. Некому было их коррелировать -> delivery.status оставался
+  # ПУСТЫМ (0 сообщений) -> message-state-resolver никогда не получал
+  # исход доставки -> ЛЮБОЕ сообщение навсегда застревало в статусе
+  # SUBMITTED и в message_read_model, и в UI. Это и была причина
+  # "залипших статусов", не lifecycle-writer.
+
+  # dlr-correlation-writer: operator.submit.accepted -> dlr.dlr_correlation
+  # (Postgres). Строит таблицу соответствия smsc_message_id -> message_id,
+  # без которой dlr-manager не может понять, к какому сообщению относится
+  # пришедший DLR.
+  dlr-correlation-writer:
+    image: mpp/dlr-correlation-writer:test
+    ports:
+      - "9115:9090"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: mpp
+      POSTGRES_USER: mpp
+      POSTGRES_PASSWORD: mpp_local_dev
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  # dlr-manager: operator.dlr + dlr.dlr_correlation -> delivery.status.
+  # Нормализует операторский код в платформенный статус и публикует исход,
+  # который message-state-resolver джойнит со stage.completed.
+  dlr-manager:
+    image: mpp/dlr-manager:test
+    ports:
+      - "9116:9090"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: mpp
+      POSTGRES_USER: mpp
+      POSTGRES_PASSWORD: mpp_local_dev
+      REDIS_RUNTIME_HOST: redis-runtime
+      REDIS_RUNTIME_PORT: "6379"
+      REDIS_RUNTIME_PASSWORD: mpp_local_dev
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis-runtime:
+        condition: service_healthy
+
   # Пишет incoming.messages/message.lifecycle/stage.*.dlq в
   # messaging.message_read_model/message_lifecycle_history/dlq_record —
   # раньше нигде не был поднят, обе read-model таблицы стояли пустые.
