@@ -43,7 +43,7 @@
 
 **Что строим:**
 1. `GET /v1/operators/routes` — read-only снимок текущих `operator_route:*` ключей из Redis (кто сейчас держит какой route, когда последний heartbeat) — новый маленький read-only эндпоинт в backoffice-api, **1 день**.
-2. Route config (primary/reserve/failover) — снова через `GET/POST /v1/config/versions?entity_type=route_table` — уже работает как API, нужен только UI.
+2. Route config (primary/reserve/failover) — ✅ то же самое, что банворды выше: `entity_type=route_table` через уже рабочий `ConfigView.vue`, ничего нового строить не нужно.
 3. Новый оператор "с нуля" (новый SMPP-коннекшен, креды, лимиты) — сегодня это ручное добавление сервиса в `docker-compose.yml`/k8s-манифест + route_table конфиг. Полноценный self-service "добавить оператора через UI" — отдельная, немаленькая задача (нужен provisioning-слой, которого нет), не оцениваю как "1 день", честно отдельная фаза.
 
 ### 3. Spam / Banwords
@@ -51,7 +51,7 @@
 **Данные, которые реально есть:**
 - `policy_ruleset.banwords.words[]` + normalization-настройки (nfkc/homoglyph_fold/strip_separators) — часть того же `policy_ruleset` config-version объекта, что уже редактируется через `/v1/config/versions?entity_type=policy_ruleset`.
 
-**Что строим:** UI-экран поверх уже существующего API — backend не нужен, только форма редактирования banwords-массива внутри уже версионируемого JSON. **0 дней backend, только UI.**
+**✅ Уже функционально возможно сегодня, без единой новой строки кода.** `ConfigView.vue` (экран "Configuration", дефолтный маршрут `/`) — это уже полностью универсальный редактор `entity_type`/`entity_id`: список версий, создание, архивирование, `validate`, `diff` — `entity_type` там свободное текстовое поле, не хардкод. Указав `entity_type=policy_ruleset` и нужный `entity_id`, banwords/antispam/time_of_day/sender_validation редактируются прямо сейчас через сырой JSON-textarea. Специализированная форма (тег-инпуты для банвордов, чекбоксы для нормализации, как на референс-дизайне) — это UX-полировка поверх уже рабочей функциональности, не закрытие пробела. Не делаю отдельным заходом, если явно не попросите — приоритетнее закрыть экраны, которых вообще нет.
 
 ### 4. Blacklist
 
@@ -89,19 +89,24 @@
 
 ---
 
-## Известные баги (чиню сейчас/следующим шагом)
+## Известные баги
 
-**`current_status`/лента истории застревают на первом статусе.** `lifecycle-writer` (пишет `message_read_model`/`message_lifecycle_history`) периодически залипает на пустой Postgres-партиции для `message_lifecycle_history` — та же причина, что уже чинил раньше сегодня, судя по всему возвращается. Расследую прямо сейчас, отдельно от этого документа.
+**✅ Исправлено: `current_status`/лента истории застревали на первом статусе.** Два реальных, независимых бага в `lifecycle-writer`, оба воспроизведены живьём (не гипотеза) в логах реально работающего контейнера:
+1. `messaging.create_lifecycle_history_partition` никогда не вызывался ни одним планировщиком — как только текущий час выходил за бутстрап-окно V015, `BatchInsertLifecycleHistory` падал КАЖДЫЙ tick, что блокировало commit офсетов для ВСЕХ топиков (`incoming.messages`/`message.lifecycle`/DLQ), не только history. Фикс — тот же паттерн, что уже был решён для `dlr-correlation-writer` (`EnsurePartition` перед каждым flush).
+2. Реальная гонка `incoming.messages`/`message.lifecycle` (разные топики, порядок не гарантирован) — если update приходил раньше insert'а, `UPDATE ... WHERE lifecycle_version < $5` молча не находил строку и терял событие навсегда.
+
+Перезапущен реальный контейнер `docker-lifecycle-writer-1` с фиксом — consumer lag подтверждённо вернулся к 0, сообщения в проде БД реально доходят до DELIVERED/FAILED. Подробности — коммит `856625d`.
 
 ---
 
 ## Приоритет (моя рекомендация, не финальное решение)
 
-1. **Fix lifecycle-writer** (блокирует Messages, уже частично сломан) — сейчас.
-2. **Billing ledger browse** + **Blacklist proxy** — оба почти бесплатны (данные и часть API уже есть), высокая видимая ценность.
-3. **Spam/banwords UI** + **Route config UI** — оба нулевой backend, чистый UI поверх уже работающего generic config-version API.
-4. **Operator routes read-only view** — маленький новый эндпоинт, быстро.
-5. **Template moderation workflow** — самая большая новая фича, делать осознанно отдельным заходом, не между делом.
-6. **Dashboard** — в конце, после того как остальные экраны дадут данные, которые он агрегирует.
+1. ~~Fix lifecycle-writer~~ ✅ готово.
+2. ~~Spam/banwords UI~~ / ~~Route config UI~~ — **оказались уже функционально готовы**: `ConfigView.vue` — универсальный редактор любого `entity_type`, уже покрывает `policy_ruleset`/`route_table` сегодня (см. разделы 2/3 выше). Специализированные формы вместо сырого JSON — полировка, не пробел, отложено.
+3. **Billing ledger browse UI** — backend уже готов (`GET /v1/billing/ledger`/`/billing/summary` уже в `router.go`), строю экран сейчас.
+4. **Blacklist proxy** — почти бесплатно (данные и часть API уже есть), высокая видимая ценность.
+5. **Operator routes read-only view** — маленький новый эндпоинт, быстро.
+6. **Template moderation workflow** — самая большая новая фича, делать осознанно отдельным заходом, не между делом.
+7. **Dashboard** — в конце, после того как остальные экраны дадут данные, которые он агрегирует.
 
 Скажите, что переставить местами — список открыт для правок, это не приказ сверху.
