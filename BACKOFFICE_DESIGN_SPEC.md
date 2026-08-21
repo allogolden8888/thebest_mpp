@@ -84,7 +84,7 @@ Base URL: `/v1` · Auth: `Authorization: Bearer <JWT>` · Все таймста�
 - DLQ pending (счётчик) — ✅ `GET /v1/dlq?replay_status=pending`
 - Reconciliation open (счётчик) — ✅ `GET /v1/reconciliation`
 
-⚠️ **Важно для дизайна:** ClickHouse (источник всех графиков) сейчас не поднят в стенде. Тайлы KPI и графики нужно рисовать с состоянием «нет данных / источник недоступен», это будет реальным состоянием какое-то время.
+✅ ClickHouse поднят — графики имеют источник. Состояние «нет данных» всё равно закладывайте: свежий стенд стартует с пустой аналитикой.
 
 ⚠️ **`sender_id` (alpha-name) в аналитике сегодня НЕТ** — `analytics.stage_events` хранит `message_id, partner_id, stage_name, outcome, reason_code, lifecycle_status, occurred_at`. Топ alpha-имён требует добавления `sender_id` в схему ClickHouse (🔨 ~1 день: поле в analytics-writer + миграция таблицы). Заложите тайл в дизайн, я добавлю поле.
 
@@ -133,57 +133,50 @@ Base URL: `/v1` · Auth: `Authorization: Bearer <JWT>` · Все таймста�
 `sender_id` (alpha-name) · `msisdn` (получатель) · `category` · `segment_count` · `operator_id` · `route_id` · `sandbox` (флаг тестовой отправки) · `priority_flag`
 
 ### Блок B. Хронология стадий — «где и сколько провело» ⭐
-**Статус: 🔨 строю (~1-2 дня). Данные ЕСТЬ** в `analytics.stage_events` (ClickHouse): по каждому `message_id` есть строка на каждую стадию с `stage_name`, `outcome`, `reason_code`, `occurred_at`. Длительность = разница между соседними `occurred_at`.
-
-Планируемый API: `GET /v1/messages/{message_id}/timeline`
+**Статус: ✅ РАБОТАЕТ** — `GET /v1/messages/{message_id}/timeline`. ClickHouse и analytics-writer подняты, пер-стадийные события пишутся по-настоящему.
+Реальный ответ (не пример — снят с живого сообщения):
 ```json
 {
-  "message_id": "uuid",
-  "received_at": "2026-08-19T11:31:36.622Z",
-  "total_duration_ms": 2145,
+  "message_id": "d55f6a96-b4a5-479a-80f4-522b8569188a",
+  "total_duration_ms": 385,
   "stages": [
-    {
-      "stage_name": "DESTINATION_RESOLUTION",
-      "outcome": "SUCCEEDED",
-      "reason_code": "",
-      "started_at": "2026-08-19T11:31:36.622Z",
-      "completed_at": "2026-08-19T11:31:36.701Z",
-      "duration_ms": 79,
-      "attempt": 1
-    },
-    { "stage_name": "POLICY",   "outcome": "SUCCEEDED", "duration_ms": 34, "…": "…" },
-    { "stage_name": "BILLING",  "outcome": "SUCCEEDED", "duration_ms": 51, "…": "…" },
-    { "stage_name": "ROUTING",  "outcome": "SUCCEEDED", "duration_ms": 12, "…": "…" },
-    { "stage_name": "DELIVERY", "outcome": "SUCCEEDED", "duration_ms": 1969, "…": "…" }
+    { "stage_name": "DESTINATION_RESOLUTION", "outcome": "SUCCEEDED", "reason_code": "",
+      "occurred_at": "2026-08-21T06:13:32.896Z", "duration_ms": null },
+    { "stage_name": "POLICY",   "outcome": "SUCCEEDED", "reason_code": "",
+      "occurred_at": "2026-08-21T06:13:32.921Z", "duration_ms": 25 },
+    { "stage_name": "BILLING",  "outcome": "SUCCEEDED", "reason_code": "",
+      "occurred_at": "2026-08-21T06:13:33.086Z", "duration_ms": 165 },
+    { "stage_name": "ROUTING",  "outcome": "SUCCEEDED", "reason_code": "",
+      "occurred_at": "2026-08-21T06:13:33.115Z", "duration_ms": 29 },
+    { "stage_name": "DELIVERY", "outcome": "SUCCEEDED", "reason_code": "",
+      "occurred_at": "2026-08-21T06:13:33.281Z", "duration_ms": 166 }
   ]
 }
 ```
+📌 Точные поля, на которые можно верстать: `stage_name`, `outcome`, `reason_code`, `occurred_at`, `duration_ms`, `total_duration_ms`.
+📌 `duration_ms` у **первой** стадии всегда `null` (а не 0) — момент старта пайплайна лежит в другом источнике, и 0 означал бы «стадия прошла мгновенно». Рисуйте первый шаг без длительности.
+📌 Полей `started_at`/`attempt` в ответе **нет**.
 **Дизайн:** горизонтальный степпер (как на вашем скрине «Part #1») с длительностью под каждым шагом; узкое место подсвечивать (самая долгая стадия). Учтите состояния: стадия провалена (красный шаг, дальше обрыв), retry (тот же шаг с `attempt: 2`), сообщение ещё в полёте (последние шаги серые).
 
 ### Блок C. SMPP/операторские действия ⭐
-**Статус: 🔨 строю (~1-2 дня). Данные ЕСТЬ** в `dlr.dlr_correlation` (Postgres) + топики `operator.submit.accepted` / `operator.dlr`.
-
-Планируемый API: `GET /v1/messages/{message_id}/operator-events`
+**Статус: ✅ РАБОТАЕТ** — `GET /v1/messages/{message_id}/operator-events`. Реальный ответ ниже (поля `dlr` пока нет — см. ограничение в конце блока).
+Реальный ответ (снят с живого сообщения):
 ```json
 {
+  "message_id": "62c42054-8035-427d-b2c9-4332fb887983",
   "segments": [
     {
       "segment_id": 1,
       "operator_id": "beeline_uz",
-      "protocol": "SMPP",
-      "smsc_message_id": "dkr87lit9o7b",
-      "submitted_at": "2026-08-19T11:31:36.701Z",
-      "correlation_expires_at": "2026-08-19T15:31:36.701Z",
-      "dlr": {
-        "received_at": "2026-08-19T11:31:38.482Z",
-        "raw_operator_status": "id:dkr87lit9o7b sub:001 dlvrd:001 stat:DELIVRD err:0",
-        "normalized_status": "DELIVERED",
-        "latency_ms": 1781
-      }
+      "smsc_message_id": "dktovgt75e8g",
+      "stage_execution_id": "aeff6f54-b2b8-40f2-be78-9bed5cf10517",
+      "submitted_at": "2026-08-20T10:12:09.727Z",
+      "dlr_expires_at": "2026-08-20T14:12:09.727Z"
     }
   ]
 }
 ```
+📌 Вложенного объекта `dlr` (время прихода, сырой текст, latency) в ответе **нет**. Факт и время доставки берутся из ленты статусов (Блок D): переход в `DELIVERED`. Сырой текст receipt'а не сохраняется нигде — в proto-контракте `OperatorDlr` нет поля под него, только нормализованный код статуса. Чтобы показать «delivery snippet» как на вашем скрине, нужно добавить поле `raw_receipt` в контракт (отдельная правка с регенерацией protobuf).
 **Дизайн:** таблица/аккордеон по сегментам (многосегментные SMS = несколько строк). Показать сырой DLR-текст моноширинным (как на вашем скрине). Состояния: DLR ещё не пришёл (ждём, показать дедлайн `correlation_expires_at`), DLR просрочен, DLR пришёл поздно.
 
 ⚠️ **Чего в этом блоке НЕ будет** (данных не существует нигде в платформе): пер-PDU таймстампы вида `submit_sm_to_smsc_at` / `submit_sm_resp_from_smsc_at` / `deliver_sm_to_client_at` — как на вашем 2-м скрине. Есть только: момент submit, момент прихода DLR, сырой текст DLR. Чтобы получить пер-PDU детализацию, нужна новая инструментация в `operator-smpp-session-manager` (публиковать таймстамп на каждый PDU) — это отдельная задача, ~2-3 дня, скажите если нужно.
@@ -239,7 +232,7 @@ Base URL: `/v1` · Auth: `Authorization: Bearer <JWT>` · Все таймста�
 ## Экран 5. Биллинг
 
 ### 5.1. Лента списаний (ledger)
-**Статус: 🔨 строю (~1 день). Данные ЕСТЬ** — `billing.billing_ledger`.
+**Статус: ✅ РАБОТАЕТ** — `billing.billing_ledger` теперь наполняется реальными списаниями (transactional outbox достроен).
 
 `GET /v1/billing/ledger?partner_id=&entry_type=&from=&to=&limit=&offset=`
 ```json
@@ -256,7 +249,7 @@ Base URL: `/v1` · Auth: `Authorization: Bearer <JWT>` · Все таймста�
 **Дизайн:** компенсации визуально связать с исходным списанием (`source_charge_id`), отрицательные суммы — другим цветом.
 
 ### 5.2. Сводка по партнёрам
-**Статус: 🔨 строю (~1 день), агрегат по тому же ledger.**
+**Статус: ✅ РАБОТАЕТ.**
 
 `GET /v1/billing/summary?from=&to=&group_by=partner|category|day`
 ```json
