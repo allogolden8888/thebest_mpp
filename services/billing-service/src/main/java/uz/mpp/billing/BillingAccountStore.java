@@ -85,6 +85,29 @@ public final class BillingAccountStore {
         return readAccount(connection.sync(), "billing:account:" + accountId);
     }
 
+    /**
+     * Валюта по умолчанию — та же, что в billing_tariff.valid.json. Реальный
+     * per-partner тариф несёт свою currency; сюда она приходит параметром из
+     * KafkaIo, эта константа — только фоллбэк для старой сигнатуры метода.
+     */
+    static final String DEFAULT_CURRENCY_CODE = "UZS";
+
+    /**
+     * Шард outbox-стрима. Ключ шардируется по charge_id (а не по account_id):
+     * billing-outbox-publisher читает все шарды одинаково, а равномерность
+     * важнее локальности — при шардировании по account_id один активный
+     * партнёр забивал бы один шард, оставляя остальные пустыми.
+     * OUTBOX_NUM_SHARDS по умолчанию 4 — то же значение, что дефолт у
+     * publisher'а (Main.java), значения обязаны совпадать.
+     */
+    private static final int OUTBOX_NUM_SHARDS =
+        Integer.parseInt(System.getenv().getOrDefault("OUTBOX_NUM_SHARDS", "4"));
+
+    private static String outboxKey(String chargeId) {
+        int shard = Math.floorMod(chargeId.hashCode(), OUTBOX_NUM_SHARDS);
+        return "billing:outbox:" + shard;
+    }
+
     private static String chargesKey(String accountId) {
         return "billing:account:" + accountId + ":charges";
     }
@@ -113,11 +136,27 @@ public final class BillingAccountStore {
      */
     @SuppressWarnings("unchecked")
     public ChargeResult applyChargeAtomically(String accountId, String chargeId, long amount, long expectedEpoch) {
+        return applyChargeAtomically(accountId, chargeId, amount, expectedEpoch, accountId, DEFAULT_CURRENCY_CODE);
+    }
+
+    /**
+     * Перегрузка с partner_id/currency для transactional outbox: скрипт
+     * теперь пишет запись о списании в {@code billing:outbox:{shard}} в том
+     * же неделимом шаге (см. apply_atomic_charge.lua — до этого не писал
+     * вообще, из-за чего billing.ledger был пуст всегда). partner_id обычно
+     * совпадает с account_id (Фаза 5a сделала account_id = partner_id), но
+     * контракт стрима различает эти поля, поэтому передаются оба явно, а не
+     * дублируются молча.
+     */
+    public ChargeResult applyChargeAtomically(String accountId, String chargeId, long amount, long expectedEpoch,
+                                              String partnerId, String currencyCode) {
         String key = "billing:account:" + accountId;
         RedisCommands<String, String> commands = connection.sync();
         List<Object> result = (List<Object>) commands.eval(
-            SCRIPT, ScriptOutputType.MULTI, new String[] {key, chargesKey(accountId)},
-            chargeId, String.valueOf(amount), String.valueOf(expectedEpoch));
+            SCRIPT, ScriptOutputType.MULTI,
+            new String[] {key, chargesKey(accountId), outboxKey(chargeId)},
+            chargeId, String.valueOf(amount), String.valueOf(expectedEpoch),
+            accountId, partnerId, currencyCode, String.valueOf(System.currentTimeMillis()));
 
         String outcomeName = (String) result.get(0);
         long balance = Long.parseLong((String) result.get(1));

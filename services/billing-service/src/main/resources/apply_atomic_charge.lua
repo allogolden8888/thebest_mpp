@@ -24,18 +24,43 @@
 --           100% CPU при ~300 ops/sec просто на O(n) скан+перезапись
 --           растущей строки. SADD/SISMEMBER — нативный O(1) hash-set на
 --           стороне Redis, без этого роста стоимости на операцию.
+-- KEYS[3] = billing:outbox:{shard} — transactional outbox. Реальная
+--           находка: раньше скрипт списывал баланс, но НИЧЕГО не писал в
+--           outbox, при том что billing-outbox-publisher (который читает
+--           этот стрим и публикует в топик billing.ledger) существовал и
+--           был написан целиком. В результате billing.ledger был пуст
+--           всегда, billing.billing_ledger не наполнялся ни одной реальной
+--           строкой, и финансовая отчётность показывала только то, что
+--           тесты писали в Postgres напрямую — деньги списывались, а
+--           запись о списании не появлялась нигде.
+--
+--           XADD делается ЗДЕСЬ, внутри той же Lua-функции, а не отдельным
+--           вызовом из Java — в этом весь смысл transactional outbox:
+--           списание и запись о нём атомарны. Отдельный XADD после
+--           EVAL мог бы не выполниться (падение процесса между вызовами),
+--           и деньги ушли бы без следа в реестре.
+--
 -- ARGV[1] = charge_id
 -- ARGV[2] = amount (minor units, integer as string)
 -- ARGV[3] = expected_epoch (integer as string)
+-- ARGV[4] = account_id
+-- ARGV[5] = partner_id
+-- ARGV[6] = currency_code
+-- ARGV[7] = created_at_epoch_ms
 --
 -- Возврат: {outcome, balance, state, epoch} — все элементы строки/числа,
 -- разбирается на Java-стороне (BillingAccountStore.java).
 
 local key = KEYS[1]
 local charges_key = KEYS[2]
+local outbox_key = KEYS[3]
 local charge_id = ARGV[1]
 local amount = tonumber(ARGV[2])
 local expected_epoch = tonumber(ARGV[3])
+local account_id = ARGV[4]
+local partner_id = ARGV[5]
+local currency_code = ARGV[6]
+local created_at_epoch_ms = ARGV[7]
 
 local state = redis.call('HGET', key, 'state')
 local balance_raw = redis.call('HGET', key, 'balance')
@@ -68,5 +93,23 @@ local new_balance = balance - amount
 
 redis.call('HSET', key, 'state', state, 'balance', tostring(new_balance), 'epoch', tostring(epoch))
 redis.call('SADD', charges_key, charge_id)
+
+-- Transactional outbox: запись о списании появляется ровно тогда же, когда
+-- само списание, в одном неделимом шаге. Имена полей — контракт
+-- billing-outbox-publisher's OutboxStreamReader.toStreamEntry, менять
+-- только вместе с ним. source_charge_id намеренно пустой: это списание
+-- (entry_type=charge), а не компенсация — Postgres-констрейнт
+-- billing_ledger_charge_source_forbidden требует NULL для charge, и
+-- LedgerEventBuilder трактует пустую строку именно так.
+redis.call('XADD', outbox_key, '*',
+    'charge_id', charge_id,
+    'account_id', account_id,
+    'partner_id', partner_id,
+    'amount_minor_units', tostring(amount),
+    'currency_code', currency_code,
+    'entry_type', 'charge',
+    'source_charge_id', '',
+    'reason', '',
+    'created_at_epoch_ms', created_at_epoch_ms)
 
 return {'APPLIED', tostring(new_balance), state, tostring(epoch)}

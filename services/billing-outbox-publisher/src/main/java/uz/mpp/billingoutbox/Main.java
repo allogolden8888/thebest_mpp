@@ -26,7 +26,11 @@ public final class Main {
         HealthServer health = new HealthServer();
         health.start();
 
-        String redisUri = "redis://" + env("REDIS_BILLING_HOST", "localhost") + ":" + env("REDIS_BILLING_PORT", "6379");
+        // Раньше URI собирался здесь вручную и БЕЗ пароля — сервис не мог
+        // подключиться к защищённому requirepass Redis (а он защищён и
+        // локально, и в проде), поэтому биллинговый outbox не вычитывался
+        // вообще. См. RedisUrl javadoc.
+        String redisUri = RedisUrl.buildBillingUrl();
         int numShards = Integer.parseInt(env("OUTBOX_NUM_SHARDS", "4"));
         OutboxStreamReader streamReader = new OutboxStreamReader(redisUri, "billing-outbox-publisher", env("HOSTNAME", "billing-outbox-publisher-0"), numShards);
 

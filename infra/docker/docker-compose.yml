@@ -834,6 +834,8 @@ services:
       IAM_SERVICE_ADDR: iam-service:9000
       INCIDENT_SERVICE_ADDR: incident-service:9000
       OPS_VISIBILITY_SERVICE_ADDR: ops-visibility-service:9090
+      COMPLIANCE_API_ADDR: compliance-api:8080
+      COMPLIANCE_API_HEALTH_ADDR: compliance-api:9090
     depends_on:
       postgres:
         condition: service_healthy
@@ -850,6 +852,47 @@ services:
       - "8091:8080"
     depends_on:
       - backoffice-api
+
+  # --- Цепочка биллингового ledger. Та же находка, что и с DLR ниже: оба
+  # сервиса отсутствовали в compose, поэтому billing.ledger был пуст (0
+  # сообщений), а billing.billing_ledger содержал только строки, которые
+  # тесты писали напрямую в Postgres — реальные списания пайплайна в
+  # финансовую отчётность не попадали вообще.
+  #
+  # billing-service списывает в Redis и кладёт запись в outbox-стрим ->
+  # billing-outbox-publisher читает стрим и публикует в billing.ledger ->
+  # billing-ledger-writer пишет в billing.billing_ledger (Postgres).
+  billing-outbox-publisher:
+    image: mpp/billing-outbox-publisher:test
+    ports:
+      - "9117:9090"
+    environment:
+      REDIS_BILLING_HOST: redis-billing
+      REDIS_BILLING_PORT: "6379"
+      REDIS_BILLING_PASSWORD: mpp_local_dev
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      redis-billing:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  billing-ledger-writer:
+    image: mpp/billing-ledger-writer:test
+    ports:
+      - "9118:9090"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: mpp
+      POSTGRES_USER: mpp
+      POSTGRES_PASSWORD: mpp_local_dev
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
 
   # --- Цепочка DLR. Реальная находка 2026-08-19: ни один из этих двух
   # сервисов не был заведён в этот compose, при том что operator.dlr уже

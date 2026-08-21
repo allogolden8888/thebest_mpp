@@ -326,7 +326,8 @@ public final class KafkaIo {
         // (см. javadoc BillingAccountStore.peekEpoch).
         ChargeResult chargeResult = command.getSandbox()
             ? new ChargeResult(BillingAccountState.Account.fresh(0), BillingAccountState.ChargeOutcome.APPLIED)
-            : accountStore.applyChargeAtomically(accountId, command.getStageExecutionId(), tariff.amountMinorUnits(), accountStore.peekEpoch(accountId));
+            : accountStore.applyChargeAtomically(accountId, command.getStageExecutionId(), tariff.amountMinorUnits(),
+                accountStore.peekEpoch(accountId), ext.getPartnerId(), tariff.currencyCode());
         StageCompletedEvent event = billingService.buildEvent(command, ext.getCategory(), tariff, chargeResult);
 
         producer.send(new ProducerRecord<>(OUTPUT_TOPIC, event.getMessageId(), event.toByteArray()))
