@@ -91,7 +91,7 @@
 
 Коротко по категориям:
 - **Уже закрыто, пересекается с экранами 1-20** (Senders/Patterns/Partners = Экраны 12/7/12, Roles = Экран 16 другим UI-паттерном, Blacklist numbers = Экран 13 c тем же архитектурным барьером на browse-список): Senders, Patterns, Partners, Roles, Blacklist numbers.
-- **Маленький новый backend, не архитектурное решение**: Partner Users (экран 35, `iam.partner_portal_role_assignments` уже используется partner-self-service-api, не хватает только админского CRUD).
+- ~~Маленький новый backend~~ ✅ Partner Users (экран 35) готово — новые RPC в IamService + `/v1/iam/partner-portal-assignments` + экран.
 - **Требуют вашего решения, прежде чем оценивать объём** (см. полный список открытых вопросов в `BACKOFFICE_DESIGN_SPEC.md` ЧАСТЬ 3): CTN (экран 23, чужая для этой платформы концепция), Categories vs `policy_template` (экран 32), Spam Patterns vs уже существующие banwords (экран 37), Regex Patterns как отдельный реестр (экран 36), Admin users/LDAP (экран 33, вероятно уже закрыто Экраном 16).
 - **Реальная новая фича, оценивать отдельно**: Chat админ↔партнёр (экран 27, ничего похожего нет нигде), MT Sessions Disconnect (экран 30, новый write-путь), Requests (экран 25, тот же backend, что уже оценённая Модерация шаблонов — 3-4 дня), TPS/Statistics (экраны 29/31, тот же ClickHouse-источник, что Reports, другая нарезка), A2P/P2A/DLRs с raw SMPP-логами (экраны 38-40, уже оценено ~2-3 дня для per-PDU + отдельная фаза для P2A), Guides CMS (экран 41).
 

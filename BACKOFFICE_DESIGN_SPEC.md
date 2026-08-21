@@ -621,7 +621,7 @@ Base URL: `/v1` · Auth: `Authorization: Bearer <JWT>` · Все таймста�
 
 ## Экран 35. Partner Users
 
-**Статус: 🔨 backend почти готов, эндпоинта управления нет.** `iam.partner_portal_role_assignments` (миграция V025) уже реально используется — `partner-self-service-api`'s JWT-слой читает роль партнёрского пользователя оттуда, `partner-portal-ui` уже имеет рабочий логин поверх этого. Но администратору назначать/отзывать эти роли неоткуда — ноль хендлеров в `backoffice-api`/`iam-service` для этой таблицы сегодня. Нужен маленький новый CRUD: `GET/POST/DELETE /v1/iam/partner-portal-assignments`, тот же паттерн, что уже работающий `/v1/iam/staff-assignments` (Экран 16) — **не архитектурное решение, конкретный маленький эндпоинт**.
+**Статус: ✅ есть** — `GET/POST/DELETE /v1/iam/partner-portal-assignments` (право `iam:manage`, тот же паттерн, что `/v1/iam/staff-assignments`, Экран 16), новые RPC в `IamService` (`ListPartnerPortalAssignments`/`AssignPartnerPortalRole`/`RevokePartnerPortalRole`), экран `PartnerUsersView.vue` — отдельный от "Users & Roles" (другая таблица, фиксированный набор ролей `partner-admin`/`partner-viewer`, не открытый каталог `iam.roles`). `external_id` — FK на `iam.partner_portal_users`, назначение неизвестному пользователю → 404. Живьём проверено: assign → list → revoke → идемпотентный повторный revoke, плюс оба негативных пути (неизвестный пользователь → 404, невалидная роль → 400).
 
 ## Экран 36. Regex Patterns
 
