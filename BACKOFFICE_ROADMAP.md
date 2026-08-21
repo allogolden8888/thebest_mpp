@@ -42,7 +42,7 @@
 - Статический route table (`route_table.valid.json`) — конфиг per-operator (primary/reserve endpoints, failover) — уже версионируется через тот же generic config-version механизм, что policy_template.
 
 **Что строим:**
-1. `GET /v1/operators/routes` — read-only снимок текущих `operator_route:*` ключей из Redis (кто сейчас держит какой route, когда последний heartbeat) — новый маленький read-only эндпоинт в backoffice-api, **1 день**.
+1. ✅ `GET /v1/operators/routes` — read-only снимок текущих `operator_route:*` ключей из Redis (кто сейчас держит какой route, когда последний heartbeat), + экран `OperatorRoutesView.vue`. SCAN обязателен (нет источника "список всех operator_id" у backoffice-api), тот же cursor-loop паттерн, что уже в `consent-cache-projector`. Живьём проверено — виден реальный `beeline_uz` SMPP route, который сейчас держит `operator-smpp-session-manager`.
 2. Route config (primary/reserve/failover) — ✅ то же самое, что банворды выше: `entity_type=route_table` через уже рабочий `ConfigView.vue`, ничего нового строить не нужно.
 3. Новый оператор "с нуля" (новый SMPP-коннекшен, креды, лимиты) — сегодня это ручное добавление сервиса в `docker-compose.yml`/k8s-манифест + route_table конфиг. Полноценный self-service "добавить оператора через UI" — отдельная, немаленькая задача (нужен provisioning-слой, которого нет), не оцениваю как "1 день", честно отдельная фаза.
 
@@ -103,7 +103,7 @@
 2. ~~Spam/banwords UI~~ / ~~Route config UI~~ — **оказались уже функционально готовы**: `ConfigView.vue` — универсальный редактор любого `entity_type`, уже покрывает `policy_ruleset`/`route_table` сегодня (см. разделы 2/3 выше). Специализированные формы вместо сырого JSON — полировка, не пробел, отложено.
 3. ~~Billing ledger browse UI~~ ✅ готово.
 4. ~~Blacklist proxy~~ ✅ готово (по пути починены configuration-service schema drift и отсутствующий в compose consent-cache-projector — см. раздел 4 выше).
-5. **Operator routes read-only view** — маленький новый эндпоинт, быстро.
+5. ~~Operator routes read-only view~~ ✅ готово.
 6. **Template moderation workflow** — самая большая новая фича, делать осознанно отдельным заходом, не между делом.
 7. **Dashboard** — в конце, после того как остальные экраны дадут данные, которые он агрегирует.
 
