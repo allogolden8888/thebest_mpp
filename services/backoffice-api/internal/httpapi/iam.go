@@ -194,7 +194,136 @@ func writeIamGRPCError(w http.ResponseWriter, context string, err error) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case codes.AlreadyExists:
 		http.Error(w, err.Error(), http.StatusConflict)
+	// codes.InvalidArgument — AssignPartnerPortalRole (role не входит в
+	// CHECK-набор partner-admin/partner-viewer), единственный из четырёх
+	// handleIam* мутирующих RPC, где store-уровень (не только HTTP-body
+	// декодирование выше) может вернуть эту ошибку.
+	case codes.InvalidArgument:
+		http.Error(w, err.Error(), http.StatusBadRequest)
 	default:
 		internalError(w, http.StatusInternalServerError, context+": gRPC-вызов IAM Service не удался", err)
+	}
+}
+
+type iamPartnerPortalAssignmentResponse struct {
+	ID         int64  `json:"id"`
+	ExternalID string `json:"external_id"`
+	Role       string `json:"role"`
+	GrantedBy  string `json:"granted_by"`
+	GrantedAt  string `json:"granted_at"`
+}
+
+func toIamPartnerPortalAssignmentResponse(a *grpcv1.PartnerPortalAssignment) iamPartnerPortalAssignmentResponse {
+	return iamPartnerPortalAssignmentResponse{
+		ID:         a.GetId(),
+		ExternalID: a.GetExternalId(),
+		Role:       a.GetRole(),
+		GrantedBy:  a.GetGrantedBy(),
+		GrantedAt:  formatTimestamp(a.GetGrantedAt()),
+	}
+}
+
+// handleIamListPartnerPortalAssignments — GET
+// /v1/iam/partner-portal-assignments?external_id= (BACKOFFICE_DESIGN_SPEC.md
+// Экран 35 "Partner Users"), тот же необязательный-фильтр passthrough, что
+// handleIamListStaffAssignments.
+func handleIamListPartnerPortalAssignments(client grpcv1.IamServiceClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		resp, err := client.ListPartnerPortalAssignments(r.Context(), &grpcv1.ListPartnerPortalAssignmentsRequest{
+			ExternalId: r.URL.Query().Get("external_id"),
+		})
+		if err != nil {
+			internalError(w, http.StatusBadGateway, "iam_list_partner_portal_assignments: gRPC-вызов IAM Service не удался", err)
+			return
+		}
+
+		assignments := make([]iamPartnerPortalAssignmentResponse, 0, len(resp.GetAssignments()))
+		for _, a := range resp.GetAssignments() {
+			assignments = append(assignments, toIamPartnerPortalAssignmentResponse(a))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(struct {
+			Assignments []iamPartnerPortalAssignmentResponse `json:"assignments"`
+		}{Assignments: assignments})
+	}
+}
+
+type assignPartnerPortalRoleRequestBody struct {
+	ExternalID string `json:"external_id"`
+	Role       string `json:"role"`
+}
+
+// handleIamAssignPartnerPortalRole — POST /v1/iam/partner-portal-assignments.
+// granted_by — claims.Subject, НЕ из тела (см. package doc).
+func handleIamAssignPartnerPortalRole(client grpcv1.IamServiceClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := auth.ClaimsFromContext(r.Context())
+		if !ok {
+			http.Error(w, "нет claims в контексте", http.StatusInternalServerError)
+			return
+		}
+
+		var body assignPartnerPortalRoleRequestBody
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "неверное тело запроса: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if body.ExternalID == "" {
+			http.Error(w, "требуется external_id", http.StatusBadRequest)
+			return
+		}
+		if body.Role == "" {
+			http.Error(w, "требуется role", http.StatusBadRequest)
+			return
+		}
+
+		resp, err := client.AssignPartnerPortalRole(r.Context(), &grpcv1.AssignPartnerPortalRoleRequest{
+			ExternalId: body.ExternalID,
+			Role:       body.Role,
+			GrantedBy:  claims.Subject,
+		})
+		if err != nil {
+			writeIamGRPCError(w, "iam_assign_partner_portal_role", err)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(struct {
+			Assignment iamPartnerPortalAssignmentResponse `json:"assignment"`
+		}{Assignment: toIamPartnerPortalAssignmentResponse(resp.GetAssignment())})
+	}
+}
+
+// handleIamRevokePartnerPortalRole — DELETE
+// /v1/iam/partner-portal-assignments/{external_id}/{role}. revoked_by —
+// claims.Subject, НЕ из тела (см. package doc). revoked=false — НЕ ошибка,
+// тот же идемпотентный контракт, что handleIamRevokeStaffRole.
+func handleIamRevokePartnerPortalRole(client grpcv1.IamServiceClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := auth.ClaimsFromContext(r.Context())
+		if !ok {
+			http.Error(w, "нет claims в контексте", http.StatusInternalServerError)
+			return
+		}
+
+		externalID := chi.URLParam(r, "external_id")
+		role := chi.URLParam(r, "role")
+
+		resp, err := client.RevokePartnerPortalRole(r.Context(), &grpcv1.RevokePartnerPortalRoleRequest{
+			ExternalId: externalID,
+			Role:       role,
+			RevokedBy:  claims.Subject,
+		})
+		if err != nil {
+			writeIamGRPCError(w, "iam_revoke_partner_portal_role", err)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(struct {
+			Revoked bool `json:"revoked"`
+		}{Revoked: resp.GetRevoked()})
 	}
 }

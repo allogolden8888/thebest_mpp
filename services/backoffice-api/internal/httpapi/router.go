@@ -133,6 +133,15 @@ func NewRouter(d Deps) *chi.Mux {
 			r.Get("/staff-assignments", handleIamListStaffAssignments(d.IamClient))
 			r.Post("/staff-assignments", handleIamAssignStaffRole(d.IamClient))
 			r.Delete("/staff-assignments/{external_id}/{role}", handleIamRevokeStaffRole(d.IamClient))
+			// BACKOFFICE_DESIGN_SPEC.md Экран 35 "Partner Users" —
+			// iam.partner_portal_role_assignments (V025) уже реально
+			// используется (partner-self-service-api), но не имело
+			// админского эндпоинта до сих пор. Тот же gate iam:manage —
+			// один экран/одна административная способность, не отдельное
+			// право.
+			r.Get("/partner-portal-assignments", handleIamListPartnerPortalAssignments(d.IamClient))
+			r.Post("/partner-portal-assignments", handleIamAssignPartnerPortalRole(d.IamClient))
+			r.Delete("/partner-portal-assignments/{external_id}/{role}", handleIamRevokePartnerPortalRole(d.IamClient))
 		})
 
 		// /v1/partners/{partner_id}/... — CredentialIssuerService proxy

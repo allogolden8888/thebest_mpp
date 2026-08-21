@@ -19,11 +19,14 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	IamService_CheckPermission_FullMethodName      = "/mpp.grpc.v1.IamService/CheckPermission"
-	IamService_ListRoles_FullMethodName            = "/mpp.grpc.v1.IamService/ListRoles"
-	IamService_ListStaffAssignments_FullMethodName = "/mpp.grpc.v1.IamService/ListStaffAssignments"
-	IamService_AssignStaffRole_FullMethodName      = "/mpp.grpc.v1.IamService/AssignStaffRole"
-	IamService_RevokeStaffRole_FullMethodName      = "/mpp.grpc.v1.IamService/RevokeStaffRole"
+	IamService_CheckPermission_FullMethodName              = "/mpp.grpc.v1.IamService/CheckPermission"
+	IamService_ListRoles_FullMethodName                    = "/mpp.grpc.v1.IamService/ListRoles"
+	IamService_ListStaffAssignments_FullMethodName         = "/mpp.grpc.v1.IamService/ListStaffAssignments"
+	IamService_AssignStaffRole_FullMethodName              = "/mpp.grpc.v1.IamService/AssignStaffRole"
+	IamService_RevokeStaffRole_FullMethodName              = "/mpp.grpc.v1.IamService/RevokeStaffRole"
+	IamService_ListPartnerPortalAssignments_FullMethodName = "/mpp.grpc.v1.IamService/ListPartnerPortalAssignments"
+	IamService_AssignPartnerPortalRole_FullMethodName      = "/mpp.grpc.v1.IamService/AssignPartnerPortalRole"
+	IamService_RevokePartnerPortalRole_FullMethodName      = "/mpp.grpc.v1.IamService/RevokePartnerPortalRole"
 )
 
 // IamServiceClient is the client API for IamService service.
@@ -50,6 +53,19 @@ type IamServiceClient interface {
 	ListStaffAssignments(ctx context.Context, in *ListStaffAssignmentsRequest, opts ...grpc.CallOption) (*ListStaffAssignmentsResponse, error)
 	AssignStaffRole(ctx context.Context, in *AssignStaffRoleRequest, opts ...grpc.CallOption) (*AssignStaffRoleResponse, error)
 	RevokeStaffRole(ctx context.Context, in *RevokeStaffRoleRequest, opts ...grpc.CallOption) (*RevokeStaffRoleResponse, error)
+	// BACKOFFICE_DESIGN_SPEC.md Экран 35 "Partner Users" — iam.
+	// partner_portal_role_assignments (V025) уже реально используется
+	// (partner-self-service-api читает роль партнёрского пользователя из
+	// JWT-claim'а, не отсюда — эта таблица заведена заранее под будущее
+	// использование, см. V025 комментарий), но ни одного RPC управлять ей
+	// административно не было. Тот же shape, что Staff* выше, с двумя
+	// структурными отличиями: role — не FK на iam.roles (открытый каталог),
+	// а CHECK-ограниченный литерал ровно из двух значений
+	// ('partner-admin'/'partner-viewer'); external_id — FK на
+	// iam.partner_portal_users(external_id), не свободная строка.
+	ListPartnerPortalAssignments(ctx context.Context, in *ListPartnerPortalAssignmentsRequest, opts ...grpc.CallOption) (*ListPartnerPortalAssignmentsResponse, error)
+	AssignPartnerPortalRole(ctx context.Context, in *AssignPartnerPortalRoleRequest, opts ...grpc.CallOption) (*AssignPartnerPortalRoleResponse, error)
+	RevokePartnerPortalRole(ctx context.Context, in *RevokePartnerPortalRoleRequest, opts ...grpc.CallOption) (*RevokePartnerPortalRoleResponse, error)
 }
 
 type iamServiceClient struct {
@@ -110,6 +126,36 @@ func (c *iamServiceClient) RevokeStaffRole(ctx context.Context, in *RevokeStaffR
 	return out, nil
 }
 
+func (c *iamServiceClient) ListPartnerPortalAssignments(ctx context.Context, in *ListPartnerPortalAssignmentsRequest, opts ...grpc.CallOption) (*ListPartnerPortalAssignmentsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListPartnerPortalAssignmentsResponse)
+	err := c.cc.Invoke(ctx, IamService_ListPartnerPortalAssignments_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *iamServiceClient) AssignPartnerPortalRole(ctx context.Context, in *AssignPartnerPortalRoleRequest, opts ...grpc.CallOption) (*AssignPartnerPortalRoleResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AssignPartnerPortalRoleResponse)
+	err := c.cc.Invoke(ctx, IamService_AssignPartnerPortalRole_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *iamServiceClient) RevokePartnerPortalRole(ctx context.Context, in *RevokePartnerPortalRoleRequest, opts ...grpc.CallOption) (*RevokePartnerPortalRoleResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RevokePartnerPortalRoleResponse)
+	err := c.cc.Invoke(ctx, IamService_RevokePartnerPortalRole_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // IamServiceServer is the server API for IamService service.
 // All implementations must embed UnimplementedIamServiceServer
 // for forward compatibility.
@@ -134,6 +180,19 @@ type IamServiceServer interface {
 	ListStaffAssignments(context.Context, *ListStaffAssignmentsRequest) (*ListStaffAssignmentsResponse, error)
 	AssignStaffRole(context.Context, *AssignStaffRoleRequest) (*AssignStaffRoleResponse, error)
 	RevokeStaffRole(context.Context, *RevokeStaffRoleRequest) (*RevokeStaffRoleResponse, error)
+	// BACKOFFICE_DESIGN_SPEC.md Экран 35 "Partner Users" — iam.
+	// partner_portal_role_assignments (V025) уже реально используется
+	// (partner-self-service-api читает роль партнёрского пользователя из
+	// JWT-claim'а, не отсюда — эта таблица заведена заранее под будущее
+	// использование, см. V025 комментарий), но ни одного RPC управлять ей
+	// административно не было. Тот же shape, что Staff* выше, с двумя
+	// структурными отличиями: role — не FK на iam.roles (открытый каталог),
+	// а CHECK-ограниченный литерал ровно из двух значений
+	// ('partner-admin'/'partner-viewer'); external_id — FK на
+	// iam.partner_portal_users(external_id), не свободная строка.
+	ListPartnerPortalAssignments(context.Context, *ListPartnerPortalAssignmentsRequest) (*ListPartnerPortalAssignmentsResponse, error)
+	AssignPartnerPortalRole(context.Context, *AssignPartnerPortalRoleRequest) (*AssignPartnerPortalRoleResponse, error)
+	RevokePartnerPortalRole(context.Context, *RevokePartnerPortalRoleRequest) (*RevokePartnerPortalRoleResponse, error)
 	mustEmbedUnimplementedIamServiceServer()
 }
 
@@ -158,6 +217,15 @@ func (UnimplementedIamServiceServer) AssignStaffRole(context.Context, *AssignSta
 }
 func (UnimplementedIamServiceServer) RevokeStaffRole(context.Context, *RevokeStaffRoleRequest) (*RevokeStaffRoleResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RevokeStaffRole not implemented")
+}
+func (UnimplementedIamServiceServer) ListPartnerPortalAssignments(context.Context, *ListPartnerPortalAssignmentsRequest) (*ListPartnerPortalAssignmentsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListPartnerPortalAssignments not implemented")
+}
+func (UnimplementedIamServiceServer) AssignPartnerPortalRole(context.Context, *AssignPartnerPortalRoleRequest) (*AssignPartnerPortalRoleResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AssignPartnerPortalRole not implemented")
+}
+func (UnimplementedIamServiceServer) RevokePartnerPortalRole(context.Context, *RevokePartnerPortalRoleRequest) (*RevokePartnerPortalRoleResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RevokePartnerPortalRole not implemented")
 }
 func (UnimplementedIamServiceServer) mustEmbedUnimplementedIamServiceServer() {}
 func (UnimplementedIamServiceServer) testEmbeddedByValue()                    {}
@@ -270,6 +338,60 @@ func _IamService_RevokeStaffRole_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _IamService_ListPartnerPortalAssignments_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListPartnerPortalAssignmentsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IamServiceServer).ListPartnerPortalAssignments(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IamService_ListPartnerPortalAssignments_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IamServiceServer).ListPartnerPortalAssignments(ctx, req.(*ListPartnerPortalAssignmentsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IamService_AssignPartnerPortalRole_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AssignPartnerPortalRoleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IamServiceServer).AssignPartnerPortalRole(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IamService_AssignPartnerPortalRole_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IamServiceServer).AssignPartnerPortalRole(ctx, req.(*AssignPartnerPortalRoleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IamService_RevokePartnerPortalRole_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RevokePartnerPortalRoleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IamServiceServer).RevokePartnerPortalRole(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IamService_RevokePartnerPortalRole_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IamServiceServer).RevokePartnerPortalRole(ctx, req.(*RevokePartnerPortalRoleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // IamService_ServiceDesc is the grpc.ServiceDesc for IamService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -296,6 +418,18 @@ var IamService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RevokeStaffRole",
 			Handler:    _IamService_RevokeStaffRole_Handler,
+		},
+		{
+			MethodName: "ListPartnerPortalAssignments",
+			Handler:    _IamService_ListPartnerPortalAssignments_Handler,
+		},
+		{
+			MethodName: "AssignPartnerPortalRole",
+			Handler:    _IamService_AssignPartnerPortalRole_Handler,
+		},
+		{
+			MethodName: "RevokePartnerPortalRole",
+			Handler:    _IamService_RevokePartnerPortalRole_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
