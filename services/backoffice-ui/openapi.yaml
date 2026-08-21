@@ -258,6 +258,25 @@ components:
         entity_id: { type: string }
         version: { type: integer }
         status: { type: string }
+    OperatorRoute:
+      type: object
+      required: [operator_id, route_id, protocol, owning_instance_id, endpoint, route_epoch, heartbeat, ttl_seconds]
+      properties:
+        operator_id: { type: string }
+        route_id: { type: string }
+        protocol: { type: string }
+        owning_instance_id: { type: string }
+        endpoint: { type: string }
+        route_epoch: { type: integer }
+        heartbeat: { type: string, format: date-time }
+        ttl_seconds: { type: integer }
+    OperatorRoutesResponse:
+      type: object
+      required: [routes]
+      properties:
+        routes:
+          type: array
+          items: { $ref: "#/components/schemas/OperatorRoute" }
     OperatorEventSegment:
       type: object
       required: [segment_id, operator_id, smsc_message_id, stage_execution_id, submitted_at, dlr_expires_at]
@@ -914,6 +933,15 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ManualConsentResponse" }
+  /operators/routes:
+    get:
+      operationId: listOperatorRoutes
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorRoutesResponse" }
   /me:
     get:
       operationId: getMe

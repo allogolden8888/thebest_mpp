@@ -17,6 +17,7 @@ const router = createRouter({
     { path: "/reconciliation", name: "reconciliation", component: () => import("../views/ReconciliationView.vue") },
     { path: "/billing", name: "billing", component: () => import("../views/BillingView.vue") },
     { path: "/blacklist", name: "blacklist", component: () => import("../views/BlacklistView.vue") },
+    { path: "/operator-routes", name: "operator-routes", component: () => import("../views/OperatorRoutesView.vue") },
     { path: "/reports", name: "reports", component: () => import("../views/ReportsView.vue") },
     { path: "/access-control", name: "access-control", component: () => import("../views/AccessControlView.vue") },
     { path: "/audit", name: "audit", component: () => import("../views/AuditLogView.vue") },

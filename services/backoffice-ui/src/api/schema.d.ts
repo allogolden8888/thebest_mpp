@@ -308,6 +308,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/operators/routes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listOperatorRoutes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/me": {
         parameters: {
             query?: never;
@@ -682,6 +698,20 @@ export interface components {
             entity_id: string;
             version: number;
             status: string;
+        };
+        OperatorRoute: {
+            operator_id: string;
+            route_id: string;
+            protocol: string;
+            owning_instance_id: string;
+            endpoint: string;
+            route_epoch: number;
+            /** Format: date-time */
+            heartbeat: string;
+            ttl_seconds: number;
+        };
+        OperatorRoutesResponse: {
+            routes: components["schemas"]["OperatorRoute"][];
         };
         OperatorEventSegment: {
             segment_id: number;
@@ -1399,6 +1429,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ManualConsentResponse"];
+                };
+            };
+        };
+    };
+    listOperatorRoutes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OperatorRoutesResponse"];
                 };
             };
         };

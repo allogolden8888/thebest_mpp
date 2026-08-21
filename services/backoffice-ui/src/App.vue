@@ -130,6 +130,15 @@ const allMenuOptions = [
     adminOnly: false,
     permission: "ops:read" as string | undefined,
   },
+  {
+    label: () => h(RouterLink, { to: "/operator-routes" }, () => "Operator Routes"),
+    key: "operator-routes",
+    adminOnly: false,
+    // backoffice-api/internal/httpapi/router.go: GET /v1/operators/routes
+    // гейтится ops:read — та же видимость живого инфраструктурного
+    // состояния, что Ops Health, не отдельное operators:read право.
+    permission: "ops:read" as string | undefined,
+  },
 ];
 
 const menuOptions = computed(() =>
