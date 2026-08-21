@@ -103,3 +103,44 @@ func (c *ClickHouse) Report(ctx context.Context, filter ReportFilter) ([]ReportR
 	}
 	return results, rows.Err()
 }
+
+// StageTimelineEntry — одна стадия в хронологии сообщения.
+type StageTimelineEntry struct {
+	StageName  string
+	Outcome    string
+	ReasonCode string
+	OccurredAt time.Time
+}
+
+// MessageStageTimeline — пер-стадийная хронология одного сообщения:
+// "на какой стадии сколько провело". Длительность стадии вычисляется
+// вызывающей стороной как разница между соседними occurred_at — здесь
+// намеренно возвращаются сырые точки, а не готовые дельты: у первой
+// стадии нет предшественника, и что считать её началом (приём сообщения
+// или её собственное завершение) — решение уровня API, не хранилища.
+//
+// FINAL — та же цена корректности, что и в Report выше: stage_events это
+// ReplacingMergeTree, без FINAL redelivered-дубликаты дали бы лишние
+// точки в хронологии одного сообщения.
+func (c *ClickHouse) MessageStageTimeline(ctx context.Context, messageID string) ([]StageTimelineEntry, error) {
+	rows, err := c.conn.Query(ctx, `
+		SELECT stage_name, outcome, reason_code, occurred_at
+		FROM analytics.stage_events FINAL
+		WHERE message_id = ? AND event_type = 'stage_completed'
+		ORDER BY occurred_at ASC
+	`, messageID)
+	if err != nil {
+		return nil, fmt.Errorf("message_stage_timeline query: %w", err)
+	}
+	defer rows.Close()
+
+	var out []StageTimelineEntry
+	for rows.Next() {
+		var e StageTimelineEntry
+		if err := rows.Scan(&e.StageName, &e.Outcome, &e.ReasonCode, &e.OccurredAt); err != nil {
+			return nil, fmt.Errorf("message_stage_timeline scan: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}

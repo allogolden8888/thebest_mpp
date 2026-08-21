@@ -201,7 +201,9 @@ func runConsumeLoop(ctx context.Context, client *kgo.Client, buf *buffer) {
 					log.Printf("decode stage.completed failed: %v", err)
 					return
 				}
-				normalized = core.FromStageCompleted(event)
+				// rec.Timestamp — fallback на случай незаполненного
+				// completed_at в payload (см. core.FromStageCompletedAt).
+				normalized = core.FromStageCompletedAt(event, rec.Timestamp)
 			case "message.lifecycle":
 				event, err := kafkaio.DecodeLifecycleEvent(rec.Value)
 				if err != nil {

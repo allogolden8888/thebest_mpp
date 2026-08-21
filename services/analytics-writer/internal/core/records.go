@@ -117,6 +117,33 @@ func FromIncomingMessage(msg *eventsv1.IncomingMessage) NormalizedRecord {
 }
 
 func FromStageCompleted(event *commonv1.StageCompletedEvent) NormalizedRecord {
+	return FromStageCompletedAt(event, time.Time{})
+}
+
+// FromStageCompletedAt — то же, но с fallback-временем (таймстамп самой
+// Kafka-записи), когда payload не несёт completed_at.
+//
+// Реальная находка, подтверждённая живым прогоном: НИ ОДИН из шести
+// сервисов-стадий (destination-resolution/policy/billing/routing/delivery/
+// delivery-reconciliation) не заполняет StageCompletedEvent.completed_at —
+// поле объявлено в контракте и остаётся protobuf-нулём. В ClickHouse все
+// пер-стадийные строки ложились с occurred_at = 1970-01-01, из-за чего
+// пер-стадийная хронология сообщения ("на какой стадии сколько провело")
+// не вычислялась в принципе: все разницы между стадиями были нулевыми.
+//
+// Таймстамп Kafka-записи ставится продюсером в момент отправки события,
+// то есть в пределах миллисекунд от фактического завершения стадии — для
+// измерения длительности стадий этого достаточно. Это ЯВНЫЙ fallback, а
+// не замена: правильное исправление — заполнить completed_at во всех
+// шести продюсерах, тогда эта ветка перестанет срабатывать сама собой
+// (payload-значение всегда имеет приоритет).
+func FromStageCompletedAt(event *commonv1.StageCompletedEvent, fallback time.Time) NormalizedRecord {
+	occurredAt := event.GetCompletedAt().AsTime()
+	// protobuf-ноль -> 1970-01-01. Именно его и подменяем; любое реальное
+	// значение из payload побеждает fallback.
+	if occurredAt.Unix() <= 0 && !fallback.IsZero() {
+		occurredAt = fallback
+	}
 	return NormalizedRecord{
 		EventType:  "stage_completed",
 		EventID:    event.GetEventId(),
@@ -124,7 +151,7 @@ func FromStageCompleted(event *commonv1.StageCompletedEvent) NormalizedRecord {
 		StageName:  stageNameString(event.GetStageName()),
 		Outcome:    outcomeString(event.GetOutcome()),
 		ReasonCode: event.GetReasonCode(),
-		OccurredAt: event.GetCompletedAt().AsTime(),
+		OccurredAt: occurredAt,
 	}
 }
 

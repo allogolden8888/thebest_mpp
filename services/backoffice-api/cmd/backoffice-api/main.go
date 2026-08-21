@@ -230,6 +230,15 @@ func main() {
 	opsVisibilityURL := "http://" + env("OPS_VISIBILITY_SERVICE_ADDR", "ops-visibility-service.mpp.svc:9090")
 	opsHTTPClient := &http.Client{Timeout: 10 * time.Second}
 
+	// complianceAPIURL/complianceHealthURL — BACKOFFICE_ROADMAP.md §4
+	// "Blacklist" (internal/httpapi/compliance.go). compliance-api тоже не
+	// gRPC — тот же класс зависимости, что ops-visibility-service выше, но
+	// с раздельными business/health портами (compliance-api/cmd/main.go:
+	// :8080 business, :9090 health — в отличие от ops-visibility-service, у
+	// которого оба на одном порту), поэтому два отдельных env var.
+	complianceAPIURL := "http://" + env("COMPLIANCE_API_ADDR", "compliance-api.mpp.svc:8080")
+	complianceHealthURL := "http://" + env("COMPLIANCE_API_HEALTH_ADDR", "compliance-api.mpp.svc:9090")
+
 	tp := telemetry.NewProvider(sdktrace.NewBatchSpanProcessor(noopExporter{}))
 	defer func() { _ = telemetry.Shutdown(context.Background(), tp) }()
 
@@ -246,6 +255,7 @@ func main() {
 		IncidentClient:         grpcv1.NewIncidentServiceClient(incidentConn),
 		HTTPClient:             opsHTTPClient,
 		OpsVisibilityURL:       opsVisibilityURL,
+		ComplianceAPIURL:       complianceAPIURL,
 		TracerProvider:         tp,
 	})
 
@@ -276,6 +286,7 @@ func main() {
 		"credential-issuer-service": grpcConnCheck(credentialIssuerConn),
 		"incident-service":          grpcConnCheck(incidentConn),
 		"ops-visibility-service":    httpPingCheck(opsHTTPClient, opsVisibilityURL+"/healthz"),
+		"compliance-api":            httpPingCheck(opsHTTPClient, complianceHealthURL+"/healthz"),
 	})
 	healthState.SetReady(true)
 	log.Println("backoffice-api готов")

@@ -791,6 +791,39 @@ services:
       iam-service:
         condition: service_started
 
+  # Отсутствовал в локальном compose целиком (проверено — deployed в k8s,
+  # см. k8s/rendered/consent-cache-projector.yaml) — тот же класс находки,
+  # что "docker-compose: restore 13 local self-service services": без него
+  # POST /v1/compliance/consent (compliance-api) структурно записывает
+  # config.changes через configuration-service, но реальный
+  # blocked_categories/blocked_senders в Runtime Redis никогда не
+  # обновляется, GET /v1/compliance/consent lookup молча остаётся пустым
+  # навсегда — обнаружено живой проверкой (не гипотеза) BACKOFFICE_ROADMAP.md
+  # §4 Blacklist. RESYNC_ON_START default true — POSTGRES_* нужны для
+  # startup-ресинка (не hot path — сам consume config.changes чисто
+  # Kafka->Redis).
+  consent-cache-projector:
+    image: mpp/consent-cache-projector:test
+    ports:
+      - "9120:9090"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: mpp
+      POSTGRES_USER: mpp
+      POSTGRES_PASSWORD: mpp_local_dev
+      REDIS_RUNTIME_HOST: redis-runtime
+      REDIS_RUNTIME_PORT: "6379"
+      REDIS_RUNTIME_PASSWORD: mpp_local_dev
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis-runtime:
+        condition: service_healthy
+
   partner-portal-ui:
     image: mpp/partner-portal-ui:test
     ports:
@@ -800,13 +833,18 @@ services:
       - billing-self-service-api
 
   # Админка (backoffice) — RBAC/аудит через iam-service, ротация credentials,
-  # инциденты, ops-видимость. EXECUTION_CONTROL_SERVICE_ADDR/REPLAY_SERVICE_ADDR/
-  # CLICKHOUSE_* оставлены на дефолтах (недостижимы в этом локальном стеке —
-  # execution-control-service/replay-service/ClickHouse сюда не заведены) —
-  # некритично: gRPC-клиенты здесь лениво коннектятся (grpc.NewClient не
-  # блокирует и не падает на недостижимом таргете), соответствующие
-  # health-проверки просто покажут unhealthy, остальной функционал (RBAC/
-  # аудит/credentials/incidents/config) не затронут.
+  # инциденты, ops-видимость. EXECUTION_CONTROL_SERVICE_ADDR/REPLAY_SERVICE_ADDR
+  # оставлены на дефолтах (эти два сервиса сюда не заведены) — некритично:
+  # gRPC-клиенты лениво коннектятся (grpc.NewClient не блокирует и не падает
+  # на недостижимом таргете), их health-проверки покажут unhealthy, остальное
+  # не затронуто.
+  #
+  # CLICKHOUSE_* теперь задан по-настоящему: ClickHouse поднят выше, и от него
+  # зависят GET /v1/reports (все графики/отчёты) и
+  # GET /v1/messages/{id}/timeline (пер-стадийная хронология сообщения).
+  # Раньше readyz честно висел not-ready именно из-за недостижимого
+  # ClickHouse — это была не ложная тревога, а реально отсутствующая
+  # зависимость.
   backoffice-api:
     image: mpp/backoffice-api:test
     ports:
@@ -832,6 +870,11 @@ services:
       CONFIGURATION_SERVICE_ADDR: configuration-service:9000
       CREDENTIAL_ISSUER_SERVICE_ADDR: credential-issuer-service:9000
       IAM_SERVICE_ADDR: iam-service:9000
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "9000"
+      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_USER: mpp
+      CLICKHOUSE_PASSWORD: mpp_local_dev
       INCIDENT_SERVICE_ADDR: incident-service:9000
       OPS_VISIBILITY_SERVICE_ADDR: ops-visibility-service:9090
       COMPLIANCE_API_ADDR: compliance-api:8080
@@ -852,6 +895,56 @@ services:
       - "8091:8080"
     depends_on:
       - backoffice-api
+
+  # --- Аналитика. ClickHouse — источник ВСЕХ графиков/отчётов админки
+  # (GET /v1/reports) и, главное, пер-стадийной хронологии сообщения
+  # (analytics.stage_events: message_id + stage_name + outcome + occurred_at
+  # -> "на какой стадии сколько провело"). Ни ClickHouse, ни
+  # analytics-writer не были заведены, поэтому отчётность и таймлайн не
+  # имели источника данных вообще.
+  #
+  # Порт 8125:8123 (HTTP) — 8123 на хосте может быть занят локальным
+  # clickhouse-server (см. .gitignore: access/, preprocessed_configs/ —
+  # мусор от запуска clickhouse из корня репозитория). 9002:9000 по той же
+  # причине: 9000 занят gRPC operator-smpp-session-manager.
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    ports:
+      - "8125:8123"
+      - "9002:9000"
+    environment:
+      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_USER: mpp
+      CLICKHOUSE_PASSWORD: mpp_local_dev
+      # Без этого пользователь mpp не может создавать таблицы — а
+      # analytics-writer создаёт схему сам при старте (createTableDDL).
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  analytics-writer:
+    image: mpp/analytics-writer:test
+    ports:
+      - "9119:9090"
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "9000"
+      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_USER: mpp
+      CLICKHOUSE_PASSWORD: mpp_local_dev
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
 
   # --- Цепочка биллингового ledger. Та же находка, что и с DLR ниже: оба
   # сервиса отсутствовали в compose, поэтому billing.ledger был пуст (0

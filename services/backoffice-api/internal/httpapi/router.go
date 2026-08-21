@@ -33,6 +33,10 @@ type Deps struct {
 	// HTTP-клиент, не сгенерированный gRPC stub, как у остальных полей выше.
 	HTTPClient       *http.Client
 	OpsVisibilityURL string
+	// ComplianceAPIURL — BACKOFFICE_ROADMAP.md §4 "Blacklist" (compliance.go).
+	// compliance-api тоже плоский HTTP, не gRPC — reuse d.HTTPClient, тот же
+	// класс зависимости, что OpsVisibilityURL выше.
+	ComplianceAPIURL string
 	TracerProvider   trace.TracerProvider
 }
 
@@ -157,6 +161,10 @@ func NewRouter(d Deps) *chi.Mux {
 		// оператору, dlr.dlr_correlation (billing.go).
 		r.With(auth.RequirePermission("support:trace", d.IamClient)).
 			Get("/messages/{message_id}/operator-events", handleMessageOperatorEvents(d.Postgres))
+		// Пер-стадийная хронология ("где сколько провело") — ClickHouse,
+		// analytics.stage_events (timeline.go).
+		r.With(auth.RequirePermission("support:trace", d.IamClient)).
+			Get("/messages/{message_id}/timeline", handleMessageTimeline(d.ClickHouse))
 
 		// /v1/billing/* — лента списаний и сводка (billing.go). Читают
 		// billing.billing_ledger напрямую. Право audit:read, а не
@@ -188,6 +196,17 @@ func NewRouter(d Deps) *chi.Mux {
 		// "Ops Health".
 		r.With(auth.RequirePermission("ops:read", d.IamClient)).
 			Get("/ops/snapshot", handleOpsSnapshot(d.HTTPClient, d.OpsVisibilityURL))
+
+		// /v1/compliance/consent — BACKOFFICE_ROADMAP.md §4 "Blacklist",
+		// плоский HTTP-прокси в compliance-api (compliance.go). GET без
+		// gate — то же решение, что compliance-api само уже приняло для
+		// своего /v1/compliance/consent (read открыт любому валидному
+		// токену realm'а); POST — compliance:write, зеркалит гейт
+		// compliance-api, чтобы отклонять без права здесь, а не только
+		// получать 403 после похода в сеть.
+		r.Get("/compliance/consent", handleConsentLookup(d.HTTPClient, d.ComplianceAPIURL))
+		r.With(auth.RequirePermission("compliance:write", d.IamClient)).
+			Post("/compliance/consent", handleManualConsent(d.HTTPClient, d.ComplianceAPIURL))
 	})
 
 	return r
