@@ -879,6 +879,9 @@ services:
       OPS_VISIBILITY_SERVICE_ADDR: ops-visibility-service:9090
       COMPLIANCE_API_ADDR: compliance-api:8080
       COMPLIANCE_API_HEALTH_ADDR: compliance-api:9090
+      REDIS_RUNTIME_HOST: redis-runtime
+      REDIS_RUNTIME_PORT: "6379"
+      REDIS_RUNTIME_PASSWORD: mpp_local_dev
     depends_on:
       postgres:
         condition: service_healthy
@@ -888,6 +891,8 @@ services:
         condition: service_started
       configuration-service:
         condition: service_started
+      redis-runtime:
+        condition: service_healthy
 
   backoffice-ui:
     image: mpp/backoffice-ui:test

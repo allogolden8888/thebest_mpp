@@ -239,6 +239,15 @@ func main() {
 	complianceAPIURL := "http://" + env("COMPLIANCE_API_ADDR", "compliance-api.mpp.svc:8080")
 	complianceHealthURL := "http://" + env("COMPLIANCE_API_HEALTH_ADDR", "compliance-api.mpp.svc:9090")
 
+	// redisRuntime — BACKOFFICE_ROADMAP.md §2 "Операторы" (internal/httpapi/
+	// operators.go, internal/store/redis.go). Единственное прямое Redis-
+	// подключение backoffice-api — тот же env var naming, что уже
+	// используют operator-smpp-session-manager/compliance-api для того же
+	// Runtime Redis instance.
+	redisRuntimeAddr := env("REDIS_RUNTIME_HOST", "localhost") + ":" + env("REDIS_RUNTIME_PORT", "6379")
+	redisRuntime := store.NewRedis(redisRuntimeAddr, env("REDIS_RUNTIME_PASSWORD", ""))
+	defer redisRuntime.Close()
+
 	tp := telemetry.NewProvider(sdktrace.NewBatchSpanProcessor(noopExporter{}))
 	defer func() { _ = telemetry.Shutdown(context.Background(), tp) }()
 
@@ -256,6 +265,7 @@ func main() {
 		HTTPClient:             opsHTTPClient,
 		OpsVisibilityURL:       opsVisibilityURL,
 		ComplianceAPIURL:       complianceAPIURL,
+		RedisRuntime:           redisRuntime,
 		TracerProvider:         tp,
 	})
 
@@ -287,6 +297,7 @@ func main() {
 		"incident-service":          grpcConnCheck(incidentConn),
 		"ops-visibility-service":    httpPingCheck(opsHTTPClient, opsVisibilityURL+"/healthz"),
 		"compliance-api":            httpPingCheck(opsHTTPClient, complianceHealthURL+"/healthz"),
+		"redis-runtime":             redisRuntime.Ping,
 	})
 	healthState.SetReady(true)
 	log.Println("backoffice-api готов")

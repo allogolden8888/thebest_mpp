@@ -37,7 +37,13 @@ type Deps struct {
 	// compliance-api тоже плоский HTTP, не gRPC — reuse d.HTTPClient, тот же
 	// класс зависимости, что OpsVisibilityURL выше.
 	ComplianceAPIURL string
-	TracerProvider   trace.TracerProvider
+	// RedisRuntime — BACKOFFICE_ROADMAP.md §2 "Операторы" (operators.go),
+	// read-only снимок operator_route:* (store/redis.go). Единственное
+	// прямое Redis-чтение в backoffice-api — тот же класс решения, что
+	// прямое чтение чужих Postgres-схем (Postgres/ClickHouse выше, см.
+	// store/postgres.go package doc), не проксирование через gRPC.
+	RedisRuntime   *store.Redis
+	TracerProvider trace.TracerProvider
 }
 
 // maxRequestBodyBytes — CODE_REVIEW.md Low finding: ни один мутирующий
@@ -207,6 +213,13 @@ func NewRouter(d Deps) *chi.Mux {
 		r.Get("/compliance/consent", handleConsentLookup(d.HTTPClient, d.ComplianceAPIURL))
 		r.With(auth.RequirePermission("compliance:write", d.IamClient)).
 			Post("/compliance/consent", handleManualConsent(d.HTTPClient, d.ComplianceAPIURL))
+
+		// GET /v1/operators/routes — BACKOFFICE_ROADMAP.md §2, живой снимок
+		// operator_route:* из Runtime Redis (operators.go). ops:read — тот
+		// же класс видимости живого инфраструктурного состояния, что уже
+		// гейтит /v1/ops/snapshot, не отдельное operators:read право.
+		r.With(auth.RequirePermission("ops:read", d.IamClient)).
+			Get("/operators/routes", handleOperatorRoutesList(d.RedisRuntime))
 	})
 
 	return r
