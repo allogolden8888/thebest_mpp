@@ -26,6 +26,9 @@ type Store interface {
 	ListStaffAssignments(ctx context.Context, externalID string) ([]store.StaffAssignment, error)
 	AssignStaffRole(ctx context.Context, externalID, role, grantedBy string) (store.StaffAssignment, error)
 	RevokeStaffRole(ctx context.Context, externalID, role, revokedBy string) (bool, error)
+	ListPartnerPortalAssignments(ctx context.Context, externalID string) ([]store.PartnerPortalAssignment, error)
+	AssignPartnerPortalRole(ctx context.Context, externalID, role, grantedBy string) (store.PartnerPortalAssignment, error)
+	RevokePartnerPortalRole(ctx context.Context, externalID, role, revokedBy string) (bool, error)
 }
 
 type Server struct {
@@ -127,6 +130,71 @@ func (s *Server) RevokeStaffRole(ctx context.Context, req *grpcv1.RevokeStaffRol
 
 func toProtoAssignment(a store.StaffAssignment) *grpcv1.StaffAssignment {
 	return &grpcv1.StaffAssignment{
+		Id:         a.ID,
+		ExternalId: a.ExternalID,
+		Role:       a.Role,
+		GrantedBy:  a.GrantedBy,
+		GrantedAt:  timestamppb.New(a.GrantedAt),
+	}
+}
+
+func (s *Server) ListPartnerPortalAssignments(ctx context.Context, req *grpcv1.ListPartnerPortalAssignmentsRequest) (*grpcv1.ListPartnerPortalAssignmentsResponse, error) {
+	assignments, err := s.store.ListPartnerPortalAssignments(ctx, req.GetExternalId())
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	resp := &grpcv1.ListPartnerPortalAssignmentsResponse{Assignments: make([]*grpcv1.PartnerPortalAssignment, 0, len(assignments))}
+	for _, a := range assignments {
+		resp.Assignments = append(resp.Assignments, toProtoPartnerPortalAssignment(a))
+	}
+	return resp, nil
+}
+
+func (s *Server) AssignPartnerPortalRole(ctx context.Context, req *grpcv1.AssignPartnerPortalRoleRequest) (*grpcv1.AssignPartnerPortalRoleResponse, error) {
+	if req.GetExternalId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "external_id обязателен")
+	}
+	if req.GetRole() == "" {
+		return nil, status.Error(codes.InvalidArgument, "role обязателен")
+	}
+	if req.GetGrantedBy() == "" {
+		return nil, status.Error(codes.InvalidArgument, "granted_by обязателен для аудита")
+	}
+
+	a, err := s.store.AssignPartnerPortalRole(ctx, req.GetExternalId(), req.GetRole(), req.GetGrantedBy())
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrInvalidPartnerPortalRole):
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		case errors.Is(err, store.ErrPartnerPortalUserNotFound):
+			return nil, status.Error(codes.NotFound, err.Error())
+		default:
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+	}
+	return &grpcv1.AssignPartnerPortalRoleResponse{Assignment: toProtoPartnerPortalAssignment(a)}, nil
+}
+
+func (s *Server) RevokePartnerPortalRole(ctx context.Context, req *grpcv1.RevokePartnerPortalRoleRequest) (*grpcv1.RevokePartnerPortalRoleResponse, error) {
+	if req.GetExternalId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "external_id обязателен")
+	}
+	if req.GetRole() == "" {
+		return nil, status.Error(codes.InvalidArgument, "role обязателен")
+	}
+	if req.GetRevokedBy() == "" {
+		return nil, status.Error(codes.InvalidArgument, "revoked_by обязателен для аудита")
+	}
+
+	revoked, err := s.store.RevokePartnerPortalRole(ctx, req.GetExternalId(), req.GetRole(), req.GetRevokedBy())
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &grpcv1.RevokePartnerPortalRoleResponse{Revoked: revoked}, nil
+}
+
+func toProtoPartnerPortalAssignment(a store.PartnerPortalAssignment) *grpcv1.PartnerPortalAssignment {
+	return &grpcv1.PartnerPortalAssignment{
 		Id:         a.ID,
 		ExternalId: a.ExternalID,
 		Role:       a.Role,

@@ -653,6 +653,380 @@ func (x *RevokeStaffRoleResponse) GetRevoked() bool {
 	return false
 }
 
+type PartnerPortalAssignment struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	ExternalId    string                 `protobuf:"bytes,2,opt,name=external_id,json=externalId,proto3" json:"external_id,omitempty"` // FK -> iam.partner_portal_users(external_id)
+	Role          string                 `protobuf:"bytes,3,opt,name=role,proto3" json:"role,omitempty"`                               // 'partner-admin' | 'partner-viewer'
+	GrantedBy     string                 `protobuf:"bytes,4,opt,name=granted_by,json=grantedBy,proto3" json:"granted_by,omitempty"`
+	GrantedAt     *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=granted_at,json=grantedAt,proto3" json:"granted_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PartnerPortalAssignment) Reset() {
+	*x = PartnerPortalAssignment{}
+	mi := &file_grpc_iam_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PartnerPortalAssignment) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PartnerPortalAssignment) ProtoMessage() {}
+
+func (x *PartnerPortalAssignment) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PartnerPortalAssignment.ProtoReflect.Descriptor instead.
+func (*PartnerPortalAssignment) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *PartnerPortalAssignment) GetId() int64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *PartnerPortalAssignment) GetExternalId() string {
+	if x != nil {
+		return x.ExternalId
+	}
+	return ""
+}
+
+func (x *PartnerPortalAssignment) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *PartnerPortalAssignment) GetGrantedBy() string {
+	if x != nil {
+		return x.GrantedBy
+	}
+	return ""
+}
+
+func (x *PartnerPortalAssignment) GetGrantedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.GrantedAt
+	}
+	return nil
+}
+
+type ListPartnerPortalAssignmentsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Пусто — все активные назначения; заполнено — фильтр по конкретному
+	// партнёрскому пользователю.
+	ExternalId    string `protobuf:"bytes,1,opt,name=external_id,json=externalId,proto3" json:"external_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListPartnerPortalAssignmentsRequest) Reset() {
+	*x = ListPartnerPortalAssignmentsRequest{}
+	mi := &file_grpc_iam_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListPartnerPortalAssignmentsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListPartnerPortalAssignmentsRequest) ProtoMessage() {}
+
+func (x *ListPartnerPortalAssignmentsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListPartnerPortalAssignmentsRequest.ProtoReflect.Descriptor instead.
+func (*ListPartnerPortalAssignmentsRequest) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *ListPartnerPortalAssignmentsRequest) GetExternalId() string {
+	if x != nil {
+		return x.ExternalId
+	}
+	return ""
+}
+
+type ListPartnerPortalAssignmentsResponse struct {
+	state         protoimpl.MessageState     `protogen:"open.v1"`
+	Assignments   []*PartnerPortalAssignment `protobuf:"bytes,1,rep,name=assignments,proto3" json:"assignments,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListPartnerPortalAssignmentsResponse) Reset() {
+	*x = ListPartnerPortalAssignmentsResponse{}
+	mi := &file_grpc_iam_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListPartnerPortalAssignmentsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListPartnerPortalAssignmentsResponse) ProtoMessage() {}
+
+func (x *ListPartnerPortalAssignmentsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListPartnerPortalAssignmentsResponse.ProtoReflect.Descriptor instead.
+func (*ListPartnerPortalAssignmentsResponse) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *ListPartnerPortalAssignmentsResponse) GetAssignments() []*PartnerPortalAssignment {
+	if x != nil {
+		return x.Assignments
+	}
+	return nil
+}
+
+type AssignPartnerPortalRoleRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ExternalId    string                 `protobuf:"bytes,1,opt,name=external_id,json=externalId,proto3" json:"external_id,omitempty"`
+	Role          string                 `protobuf:"bytes,2,opt,name=role,proto3" json:"role,omitempty"`
+	GrantedBy     string                 `protobuf:"bytes,3,opt,name=granted_by,json=grantedBy,proto3" json:"granted_by,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AssignPartnerPortalRoleRequest) Reset() {
+	*x = AssignPartnerPortalRoleRequest{}
+	mi := &file_grpc_iam_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AssignPartnerPortalRoleRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AssignPartnerPortalRoleRequest) ProtoMessage() {}
+
+func (x *AssignPartnerPortalRoleRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AssignPartnerPortalRoleRequest.ProtoReflect.Descriptor instead.
+func (*AssignPartnerPortalRoleRequest) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *AssignPartnerPortalRoleRequest) GetExternalId() string {
+	if x != nil {
+		return x.ExternalId
+	}
+	return ""
+}
+
+func (x *AssignPartnerPortalRoleRequest) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *AssignPartnerPortalRoleRequest) GetGrantedBy() string {
+	if x != nil {
+		return x.GrantedBy
+	}
+	return ""
+}
+
+type AssignPartnerPortalRoleResponse struct {
+	state         protoimpl.MessageState   `protogen:"open.v1"`
+	Assignment    *PartnerPortalAssignment `protobuf:"bytes,1,opt,name=assignment,proto3" json:"assignment,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AssignPartnerPortalRoleResponse) Reset() {
+	*x = AssignPartnerPortalRoleResponse{}
+	mi := &file_grpc_iam_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AssignPartnerPortalRoleResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AssignPartnerPortalRoleResponse) ProtoMessage() {}
+
+func (x *AssignPartnerPortalRoleResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AssignPartnerPortalRoleResponse.ProtoReflect.Descriptor instead.
+func (*AssignPartnerPortalRoleResponse) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *AssignPartnerPortalRoleResponse) GetAssignment() *PartnerPortalAssignment {
+	if x != nil {
+		return x.Assignment
+	}
+	return nil
+}
+
+type RevokePartnerPortalRoleRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ExternalId    string                 `protobuf:"bytes,1,opt,name=external_id,json=externalId,proto3" json:"external_id,omitempty"`
+	Role          string                 `protobuf:"bytes,2,opt,name=role,proto3" json:"role,omitempty"`
+	RevokedBy     string                 `protobuf:"bytes,3,opt,name=revoked_by,json=revokedBy,proto3" json:"revoked_by,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RevokePartnerPortalRoleRequest) Reset() {
+	*x = RevokePartnerPortalRoleRequest{}
+	mi := &file_grpc_iam_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokePartnerPortalRoleRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokePartnerPortalRoleRequest) ProtoMessage() {}
+
+func (x *RevokePartnerPortalRoleRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokePartnerPortalRoleRequest.ProtoReflect.Descriptor instead.
+func (*RevokePartnerPortalRoleRequest) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *RevokePartnerPortalRoleRequest) GetExternalId() string {
+	if x != nil {
+		return x.ExternalId
+	}
+	return ""
+}
+
+func (x *RevokePartnerPortalRoleRequest) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *RevokePartnerPortalRoleRequest) GetRevokedBy() string {
+	if x != nil {
+		return x.RevokedBy
+	}
+	return ""
+}
+
+type RevokePartnerPortalRoleResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Revoked       bool                   `protobuf:"varint,1,opt,name=revoked,proto3" json:"revoked,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RevokePartnerPortalRoleResponse) Reset() {
+	*x = RevokePartnerPortalRoleResponse{}
+	mi := &file_grpc_iam_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokePartnerPortalRoleResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokePartnerPortalRoleResponse) ProtoMessage() {}
+
+func (x *RevokePartnerPortalRoleResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokePartnerPortalRoleResponse.ProtoReflect.Descriptor instead.
+func (*RevokePartnerPortalRoleResponse) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *RevokePartnerPortalRoleResponse) GetRevoked() bool {
+	if x != nil {
+		return x.Revoked
+	}
+	return false
+}
+
 var File_grpc_iam_proto protoreflect.FileDescriptor
 
 const file_grpc_iam_proto_rawDesc = "" +
@@ -706,14 +1080,49 @@ const file_grpc_iam_proto_rawDesc = "" +
 	"\n" +
 	"revoked_by\x18\x03 \x01(\tR\trevokedBy\"3\n" +
 	"\x17RevokeStaffRoleResponse\x12\x18\n" +
-	"\arevoked\x18\x01 \x01(\bR\arevoked2\xdf\x03\n" +
+	"\arevoked\x18\x01 \x01(\bR\arevoked\"\xb8\x01\n" +
+	"\x17PartnerPortalAssignment\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x1f\n" +
+	"\vexternal_id\x18\x02 \x01(\tR\n" +
+	"externalId\x12\x12\n" +
+	"\x04role\x18\x03 \x01(\tR\x04role\x12\x1d\n" +
+	"\n" +
+	"granted_by\x18\x04 \x01(\tR\tgrantedBy\x129\n" +
+	"\n" +
+	"granted_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tgrantedAt\"F\n" +
+	"#ListPartnerPortalAssignmentsRequest\x12\x1f\n" +
+	"\vexternal_id\x18\x01 \x01(\tR\n" +
+	"externalId\"n\n" +
+	"$ListPartnerPortalAssignmentsResponse\x12F\n" +
+	"\vassignments\x18\x01 \x03(\v2$.mpp.grpc.v1.PartnerPortalAssignmentR\vassignments\"t\n" +
+	"\x1eAssignPartnerPortalRoleRequest\x12\x1f\n" +
+	"\vexternal_id\x18\x01 \x01(\tR\n" +
+	"externalId\x12\x12\n" +
+	"\x04role\x18\x02 \x01(\tR\x04role\x12\x1d\n" +
+	"\n" +
+	"granted_by\x18\x03 \x01(\tR\tgrantedBy\"g\n" +
+	"\x1fAssignPartnerPortalRoleResponse\x12D\n" +
+	"\n" +
+	"assignment\x18\x01 \x01(\v2$.mpp.grpc.v1.PartnerPortalAssignmentR\n" +
+	"assignment\"t\n" +
+	"\x1eRevokePartnerPortalRoleRequest\x12\x1f\n" +
+	"\vexternal_id\x18\x01 \x01(\tR\n" +
+	"externalId\x12\x12\n" +
+	"\x04role\x18\x02 \x01(\tR\x04role\x12\x1d\n" +
+	"\n" +
+	"revoked_by\x18\x03 \x01(\tR\trevokedBy\";\n" +
+	"\x1fRevokePartnerPortalRoleResponse\x12\x18\n" +
+	"\arevoked\x18\x01 \x01(\bR\arevoked2\xd1\x06\n" +
 	"\n" +
 	"IamService\x12\\\n" +
 	"\x0fCheckPermission\x12#.mpp.grpc.v1.CheckPermissionRequest\x1a$.mpp.grpc.v1.CheckPermissionResponse\x12J\n" +
 	"\tListRoles\x12\x1d.mpp.grpc.v1.ListRolesRequest\x1a\x1e.mpp.grpc.v1.ListRolesResponse\x12k\n" +
 	"\x14ListStaffAssignments\x12(.mpp.grpc.v1.ListStaffAssignmentsRequest\x1a).mpp.grpc.v1.ListStaffAssignmentsResponse\x12\\\n" +
 	"\x0fAssignStaffRole\x12#.mpp.grpc.v1.AssignStaffRoleRequest\x1a$.mpp.grpc.v1.AssignStaffRoleResponse\x12\\\n" +
-	"\x0fRevokeStaffRole\x12#.mpp.grpc.v1.RevokeStaffRoleRequest\x1a$.mpp.grpc.v1.RevokeStaffRoleResponseBJ\n" +
+	"\x0fRevokeStaffRole\x12#.mpp.grpc.v1.RevokeStaffRoleRequest\x1a$.mpp.grpc.v1.RevokeStaffRoleResponse\x12\x83\x01\n" +
+	"\x1cListPartnerPortalAssignments\x120.mpp.grpc.v1.ListPartnerPortalAssignmentsRequest\x1a1.mpp.grpc.v1.ListPartnerPortalAssignmentsResponse\x12t\n" +
+	"\x17AssignPartnerPortalRole\x12+.mpp.grpc.v1.AssignPartnerPortalRoleRequest\x1a,.mpp.grpc.v1.AssignPartnerPortalRoleResponse\x12t\n" +
+	"\x17RevokePartnerPortalRole\x12+.mpp.grpc.v1.RevokePartnerPortalRoleRequest\x1a,.mpp.grpc.v1.RevokePartnerPortalRoleResponseBJ\n" +
 	" uz.mpp.platformcontracts.grpc.v1P\x01Z$mpp/platformcontracts/grpc/v1;grpcv1b\x06proto3"
 
 var (
@@ -728,42 +1137,58 @@ func file_grpc_iam_proto_rawDescGZIP() []byte {
 	return file_grpc_iam_proto_rawDescData
 }
 
-var file_grpc_iam_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_grpc_iam_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_grpc_iam_proto_goTypes = []any{
-	(*CheckPermissionRequest)(nil),       // 0: mpp.grpc.v1.CheckPermissionRequest
-	(*CheckPermissionResponse)(nil),      // 1: mpp.grpc.v1.CheckPermissionResponse
-	(*Role)(nil),                         // 2: mpp.grpc.v1.Role
-	(*ListRolesRequest)(nil),             // 3: mpp.grpc.v1.ListRolesRequest
-	(*ListRolesResponse)(nil),            // 4: mpp.grpc.v1.ListRolesResponse
-	(*StaffAssignment)(nil),              // 5: mpp.grpc.v1.StaffAssignment
-	(*ListStaffAssignmentsRequest)(nil),  // 6: mpp.grpc.v1.ListStaffAssignmentsRequest
-	(*ListStaffAssignmentsResponse)(nil), // 7: mpp.grpc.v1.ListStaffAssignmentsResponse
-	(*AssignStaffRoleRequest)(nil),       // 8: mpp.grpc.v1.AssignStaffRoleRequest
-	(*AssignStaffRoleResponse)(nil),      // 9: mpp.grpc.v1.AssignStaffRoleResponse
-	(*RevokeStaffRoleRequest)(nil),       // 10: mpp.grpc.v1.RevokeStaffRoleRequest
-	(*RevokeStaffRoleResponse)(nil),      // 11: mpp.grpc.v1.RevokeStaffRoleResponse
-	(*timestamppb.Timestamp)(nil),        // 12: google.protobuf.Timestamp
+	(*CheckPermissionRequest)(nil),               // 0: mpp.grpc.v1.CheckPermissionRequest
+	(*CheckPermissionResponse)(nil),              // 1: mpp.grpc.v1.CheckPermissionResponse
+	(*Role)(nil),                                 // 2: mpp.grpc.v1.Role
+	(*ListRolesRequest)(nil),                     // 3: mpp.grpc.v1.ListRolesRequest
+	(*ListRolesResponse)(nil),                    // 4: mpp.grpc.v1.ListRolesResponse
+	(*StaffAssignment)(nil),                      // 5: mpp.grpc.v1.StaffAssignment
+	(*ListStaffAssignmentsRequest)(nil),          // 6: mpp.grpc.v1.ListStaffAssignmentsRequest
+	(*ListStaffAssignmentsResponse)(nil),         // 7: mpp.grpc.v1.ListStaffAssignmentsResponse
+	(*AssignStaffRoleRequest)(nil),               // 8: mpp.grpc.v1.AssignStaffRoleRequest
+	(*AssignStaffRoleResponse)(nil),              // 9: mpp.grpc.v1.AssignStaffRoleResponse
+	(*RevokeStaffRoleRequest)(nil),               // 10: mpp.grpc.v1.RevokeStaffRoleRequest
+	(*RevokeStaffRoleResponse)(nil),              // 11: mpp.grpc.v1.RevokeStaffRoleResponse
+	(*PartnerPortalAssignment)(nil),              // 12: mpp.grpc.v1.PartnerPortalAssignment
+	(*ListPartnerPortalAssignmentsRequest)(nil),  // 13: mpp.grpc.v1.ListPartnerPortalAssignmentsRequest
+	(*ListPartnerPortalAssignmentsResponse)(nil), // 14: mpp.grpc.v1.ListPartnerPortalAssignmentsResponse
+	(*AssignPartnerPortalRoleRequest)(nil),       // 15: mpp.grpc.v1.AssignPartnerPortalRoleRequest
+	(*AssignPartnerPortalRoleResponse)(nil),      // 16: mpp.grpc.v1.AssignPartnerPortalRoleResponse
+	(*RevokePartnerPortalRoleRequest)(nil),       // 17: mpp.grpc.v1.RevokePartnerPortalRoleRequest
+	(*RevokePartnerPortalRoleResponse)(nil),      // 18: mpp.grpc.v1.RevokePartnerPortalRoleResponse
+	(*timestamppb.Timestamp)(nil),                // 19: google.protobuf.Timestamp
 }
 var file_grpc_iam_proto_depIdxs = []int32{
 	2,  // 0: mpp.grpc.v1.ListRolesResponse.roles:type_name -> mpp.grpc.v1.Role
-	12, // 1: mpp.grpc.v1.StaffAssignment.granted_at:type_name -> google.protobuf.Timestamp
+	19, // 1: mpp.grpc.v1.StaffAssignment.granted_at:type_name -> google.protobuf.Timestamp
 	5,  // 2: mpp.grpc.v1.ListStaffAssignmentsResponse.assignments:type_name -> mpp.grpc.v1.StaffAssignment
 	5,  // 3: mpp.grpc.v1.AssignStaffRoleResponse.assignment:type_name -> mpp.grpc.v1.StaffAssignment
-	0,  // 4: mpp.grpc.v1.IamService.CheckPermission:input_type -> mpp.grpc.v1.CheckPermissionRequest
-	3,  // 5: mpp.grpc.v1.IamService.ListRoles:input_type -> mpp.grpc.v1.ListRolesRequest
-	6,  // 6: mpp.grpc.v1.IamService.ListStaffAssignments:input_type -> mpp.grpc.v1.ListStaffAssignmentsRequest
-	8,  // 7: mpp.grpc.v1.IamService.AssignStaffRole:input_type -> mpp.grpc.v1.AssignStaffRoleRequest
-	10, // 8: mpp.grpc.v1.IamService.RevokeStaffRole:input_type -> mpp.grpc.v1.RevokeStaffRoleRequest
-	1,  // 9: mpp.grpc.v1.IamService.CheckPermission:output_type -> mpp.grpc.v1.CheckPermissionResponse
-	4,  // 10: mpp.grpc.v1.IamService.ListRoles:output_type -> mpp.grpc.v1.ListRolesResponse
-	7,  // 11: mpp.grpc.v1.IamService.ListStaffAssignments:output_type -> mpp.grpc.v1.ListStaffAssignmentsResponse
-	9,  // 12: mpp.grpc.v1.IamService.AssignStaffRole:output_type -> mpp.grpc.v1.AssignStaffRoleResponse
-	11, // 13: mpp.grpc.v1.IamService.RevokeStaffRole:output_type -> mpp.grpc.v1.RevokeStaffRoleResponse
-	9,  // [9:14] is the sub-list for method output_type
-	4,  // [4:9] is the sub-list for method input_type
-	4,  // [4:4] is the sub-list for extension type_name
-	4,  // [4:4] is the sub-list for extension extendee
-	0,  // [0:4] is the sub-list for field type_name
+	19, // 4: mpp.grpc.v1.PartnerPortalAssignment.granted_at:type_name -> google.protobuf.Timestamp
+	12, // 5: mpp.grpc.v1.ListPartnerPortalAssignmentsResponse.assignments:type_name -> mpp.grpc.v1.PartnerPortalAssignment
+	12, // 6: mpp.grpc.v1.AssignPartnerPortalRoleResponse.assignment:type_name -> mpp.grpc.v1.PartnerPortalAssignment
+	0,  // 7: mpp.grpc.v1.IamService.CheckPermission:input_type -> mpp.grpc.v1.CheckPermissionRequest
+	3,  // 8: mpp.grpc.v1.IamService.ListRoles:input_type -> mpp.grpc.v1.ListRolesRequest
+	6,  // 9: mpp.grpc.v1.IamService.ListStaffAssignments:input_type -> mpp.grpc.v1.ListStaffAssignmentsRequest
+	8,  // 10: mpp.grpc.v1.IamService.AssignStaffRole:input_type -> mpp.grpc.v1.AssignStaffRoleRequest
+	10, // 11: mpp.grpc.v1.IamService.RevokeStaffRole:input_type -> mpp.grpc.v1.RevokeStaffRoleRequest
+	13, // 12: mpp.grpc.v1.IamService.ListPartnerPortalAssignments:input_type -> mpp.grpc.v1.ListPartnerPortalAssignmentsRequest
+	15, // 13: mpp.grpc.v1.IamService.AssignPartnerPortalRole:input_type -> mpp.grpc.v1.AssignPartnerPortalRoleRequest
+	17, // 14: mpp.grpc.v1.IamService.RevokePartnerPortalRole:input_type -> mpp.grpc.v1.RevokePartnerPortalRoleRequest
+	1,  // 15: mpp.grpc.v1.IamService.CheckPermission:output_type -> mpp.grpc.v1.CheckPermissionResponse
+	4,  // 16: mpp.grpc.v1.IamService.ListRoles:output_type -> mpp.grpc.v1.ListRolesResponse
+	7,  // 17: mpp.grpc.v1.IamService.ListStaffAssignments:output_type -> mpp.grpc.v1.ListStaffAssignmentsResponse
+	9,  // 18: mpp.grpc.v1.IamService.AssignStaffRole:output_type -> mpp.grpc.v1.AssignStaffRoleResponse
+	11, // 19: mpp.grpc.v1.IamService.RevokeStaffRole:output_type -> mpp.grpc.v1.RevokeStaffRoleResponse
+	14, // 20: mpp.grpc.v1.IamService.ListPartnerPortalAssignments:output_type -> mpp.grpc.v1.ListPartnerPortalAssignmentsResponse
+	16, // 21: mpp.grpc.v1.IamService.AssignPartnerPortalRole:output_type -> mpp.grpc.v1.AssignPartnerPortalRoleResponse
+	18, // 22: mpp.grpc.v1.IamService.RevokePartnerPortalRole:output_type -> mpp.grpc.v1.RevokePartnerPortalRoleResponse
+	15, // [15:23] is the sub-list for method output_type
+	7,  // [7:15] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_grpc_iam_proto_init() }
@@ -777,7 +1202,7 @@ func file_grpc_iam_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_grpc_iam_proto_rawDesc), len(file_grpc_iam_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   12,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

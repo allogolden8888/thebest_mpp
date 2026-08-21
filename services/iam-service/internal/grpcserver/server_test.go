@@ -28,6 +28,14 @@ type fakeStore struct {
 	lastAssignedExt string
 	lastAssignedRol string
 	lastGrantedBy   string
+
+	ppAssignments     []store.PartnerPortalAssignment
+	ppAssignErr       error
+	ppRevokeResult    bool
+	ppRevokeErr       error
+	ppLastAssignedExt string
+	ppLastAssignedRol string
+	ppLastGrantedBy   string
 }
 
 func (f *fakeStore) CheckPermission(_ context.Context, _, _ string) (bool, []string, error) {
@@ -52,6 +60,22 @@ func (f *fakeStore) AssignStaffRole(_ context.Context, externalID, role, granted
 
 func (f *fakeStore) RevokeStaffRole(_ context.Context, _, _, _ string) (bool, error) {
 	return f.revokeResult, f.revokeErr
+}
+
+func (f *fakeStore) ListPartnerPortalAssignments(_ context.Context, _ string) ([]store.PartnerPortalAssignment, error) {
+	return f.ppAssignments, nil
+}
+
+func (f *fakeStore) AssignPartnerPortalRole(_ context.Context, externalID, role, grantedBy string) (store.PartnerPortalAssignment, error) {
+	f.ppLastAssignedExt, f.ppLastAssignedRol, f.ppLastGrantedBy = externalID, role, grantedBy
+	if f.ppAssignErr != nil {
+		return store.PartnerPortalAssignment{}, f.ppAssignErr
+	}
+	return store.PartnerPortalAssignment{ID: 1, ExternalID: externalID, Role: role, GrantedBy: grantedBy, GrantedAt: time.Unix(0, 0)}, nil
+}
+
+func (f *fakeStore) RevokePartnerPortalRole(_ context.Context, _, _, _ string) (bool, error) {
+	return f.ppRevokeResult, f.ppRevokeErr
 }
 
 func grpcCode(t *testing.T, err error) codes.Code {
@@ -175,5 +199,83 @@ func TestListRolesTranslatesStoreRolesToProto(t *testing.T) {
 	}
 	if len(resp.GetRoles()) != 1 || resp.GetRoles()[0].GetName() != "ops-viewer" || len(resp.GetRoles()[0].GetPermissions()) != 1 {
 		t.Errorf("неожиданный ответ: %+v", resp)
+	}
+}
+
+func TestAssignPartnerPortalRoleValidatesRequiredFields(t *testing.T) {
+	s := New(&fakeStore{})
+
+	cases := []*grpcv1.AssignPartnerPortalRoleRequest{
+		{Role: "partner-admin", GrantedBy: "admin"},
+		{ExternalId: "u1", GrantedBy: "admin"},
+		{ExternalId: "u1", Role: "partner-admin"},
+	}
+	for _, req := range cases {
+		if _, err := s.AssignPartnerPortalRole(context.Background(), req); grpcCode(t, err) != codes.InvalidArgument {
+			t.Errorf("запрос %+v должен давать InvalidArgument, получили %v", req, err)
+		}
+	}
+}
+
+func TestAssignPartnerPortalRoleMapsStoreErrorsToGrpcCodes(t *testing.T) {
+	cases := []struct {
+		name     string
+		storeErr error
+		want     codes.Code
+	}{
+		{"invalid role", store.ErrInvalidPartnerPortalRole, codes.InvalidArgument},
+		{"unknown partner user", store.ErrPartnerPortalUserNotFound, codes.NotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(&fakeStore{ppAssignErr: tc.storeErr})
+			_, err := s.AssignPartnerPortalRole(context.Background(), &grpcv1.AssignPartnerPortalRoleRequest{ExternalId: "pu1", Role: "partner-admin", GrantedBy: "admin"})
+			if grpcCode(t, err) != tc.want {
+				t.Errorf("ожидали код %v, получили %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestAssignPartnerPortalRolePassesThroughToStore(t *testing.T) {
+	fs := &fakeStore{}
+	s := New(fs)
+
+	resp, err := s.AssignPartnerPortalRole(context.Background(), &grpcv1.AssignPartnerPortalRoleRequest{ExternalId: "pu1", Role: "partner-viewer", GrantedBy: "admin-1"})
+	if err != nil {
+		t.Fatalf("AssignPartnerPortalRole: %v", err)
+	}
+	if fs.ppLastAssignedExt != "pu1" || fs.ppLastAssignedRol != "partner-viewer" || fs.ppLastGrantedBy != "admin-1" {
+		t.Errorf("store не получил ожидаемые аргументы: ext=%q role=%q grantedBy=%q", fs.ppLastAssignedExt, fs.ppLastAssignedRol, fs.ppLastGrantedBy)
+	}
+	if resp.GetAssignment().GetExternalId() != "pu1" || resp.GetAssignment().GetRole() != "partner-viewer" {
+		t.Errorf("неожиданный ответ: %+v", resp)
+	}
+}
+
+func TestRevokePartnerPortalRoleValidatesRequiredFields(t *testing.T) {
+	s := New(&fakeStore{})
+
+	cases := []*grpcv1.RevokePartnerPortalRoleRequest{
+		{Role: "partner-admin", RevokedBy: "admin"},
+		{ExternalId: "pu1", RevokedBy: "admin"},
+		{ExternalId: "pu1", Role: "partner-admin"},
+	}
+	for _, req := range cases {
+		if _, err := s.RevokePartnerPortalRole(context.Background(), req); grpcCode(t, err) != codes.InvalidArgument {
+			t.Errorf("запрос %+v должен давать InvalidArgument, получили %v", req, err)
+		}
+	}
+}
+
+func TestRevokePartnerPortalRoleReturnsFalseWithoutErrorWhenNothingToRevoke(t *testing.T) {
+	s := New(&fakeStore{ppRevokeResult: false})
+
+	resp, err := s.RevokePartnerPortalRole(context.Background(), &grpcv1.RevokePartnerPortalRoleRequest{ExternalId: "pu1", Role: "partner-admin", RevokedBy: "admin"})
+	if err != nil {
+		t.Fatalf("RevokePartnerPortalRole: %v", err)
+	}
+	if resp.GetRevoked() {
+		t.Errorf("ожидали revoked=false, не ошибку, когда нечего отзывать")
 	}
 }

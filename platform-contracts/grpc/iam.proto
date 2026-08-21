@@ -29,6 +29,20 @@ service IamService {
   rpc ListStaffAssignments(ListStaffAssignmentsRequest) returns (ListStaffAssignmentsResponse);
   rpc AssignStaffRole(AssignStaffRoleRequest) returns (AssignStaffRoleResponse);
   rpc RevokeStaffRole(RevokeStaffRoleRequest) returns (RevokeStaffRoleResponse);
+
+  // BACKOFFICE_DESIGN_SPEC.md Экран 35 "Partner Users" — iam.
+  // partner_portal_role_assignments (V025) уже реально используется
+  // (partner-self-service-api читает роль партнёрского пользователя из
+  // JWT-claim'а, не отсюда — эта таблица заведена заранее под будущее
+  // использование, см. V025 комментарий), но ни одного RPC управлять ей
+  // административно не было. Тот же shape, что Staff* выше, с двумя
+  // структурными отличиями: role — не FK на iam.roles (открытый каталог),
+  // а CHECK-ограниченный литерал ровно из двух значений
+  // ('partner-admin'/'partner-viewer'); external_id — FK на
+  // iam.partner_portal_users(external_id), не свободная строка.
+  rpc ListPartnerPortalAssignments(ListPartnerPortalAssignmentsRequest) returns (ListPartnerPortalAssignmentsResponse);
+  rpc AssignPartnerPortalRole(AssignPartnerPortalRoleRequest) returns (AssignPartnerPortalRoleResponse);
+  rpc RevokePartnerPortalRole(RevokePartnerPortalRoleRequest) returns (RevokePartnerPortalRoleResponse);
 }
 
 message CheckPermissionRequest {
@@ -94,5 +108,43 @@ message RevokeStaffRoleRequest {
 }
 
 message RevokeStaffRoleResponse {
+  bool revoked = 1;
+}
+
+message PartnerPortalAssignment {
+  int64 id = 1;
+  string external_id = 2; // FK -> iam.partner_portal_users(external_id)
+  string role = 3;        // 'partner-admin' | 'partner-viewer'
+  string granted_by = 4;
+  google.protobuf.Timestamp granted_at = 5;
+}
+
+message ListPartnerPortalAssignmentsRequest {
+  // Пусто — все активные назначения; заполнено — фильтр по конкретному
+  // партнёрскому пользователю.
+  string external_id = 1;
+}
+
+message ListPartnerPortalAssignmentsResponse {
+  repeated PartnerPortalAssignment assignments = 1;
+}
+
+message AssignPartnerPortalRoleRequest {
+  string external_id = 1;
+  string role = 2;
+  string granted_by = 3;
+}
+
+message AssignPartnerPortalRoleResponse {
+  PartnerPortalAssignment assignment = 1;
+}
+
+message RevokePartnerPortalRoleRequest {
+  string external_id = 1;
+  string role = 2;
+  string revoked_by = 3;
+}
+
+message RevokePartnerPortalRoleResponse {
   bool revoked = 1;
 }

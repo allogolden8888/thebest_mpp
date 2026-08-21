@@ -44,6 +44,26 @@ func cleanupAssignments(t *testing.T, pool *pgxpool.Pool, externalID string) {
 	})
 }
 
+// createPartnerPortalUser — iam.partner_portal_role_assignments.external_id
+// FK-ит на iam.partner_portal_users (в отличие от staff_role_assignments,
+// где external_id — свободная строка), так что тесты на назначение роли
+// партнёрскому пользователю сначала должны завести саму строку пользователя.
+func createPartnerPortalUser(t *testing.T, pool *pgxpool.Pool, externalID string) {
+	t.Helper()
+	ctx := context.Background()
+	_, err := pool.Exec(ctx, `
+		INSERT INTO iam.partner_portal_users (external_id, partner_id, display_name)
+		VALUES ($1, 'test-partner', 'Test User')`, externalID)
+	if err != nil {
+		t.Fatalf("createPartnerPortalUser: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM iam.partner_portal_role_assignments WHERE external_id = $1`, externalID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM iam.identity_audit WHERE target LIKE $1`, externalID+":%")
+		_, _ = pool.Exec(context.Background(), `DELETE FROM iam.partner_portal_users WHERE external_id = $1`, externalID)
+	})
+}
+
 func TestListRolesSeedDataHasBackofficeAdminWithAllPermissions(t *testing.T) {
 	pool := testPool(t)
 	pg := NewPostgres(pool)
@@ -214,5 +234,101 @@ func TestListStaffAssignmentsFiltersByExternalID(t *testing.T) {
 	}
 	if found != 2 {
 		t.Errorf("ожидали найти оба тестовых назначения без фильтра, нашли %d из 2", found)
+	}
+}
+
+func TestAssignCheckAndRevokePartnerPortalRoleRoundTrip(t *testing.T) {
+	pool := testPool(t)
+	pg := NewPostgres(pool)
+	ctx := context.Background()
+	externalID := "test-pp-" + uuid.NewString()
+	createPartnerPortalUser(t, pool, externalID)
+
+	assignment, err := pg.AssignPartnerPortalRole(ctx, externalID, "partner-admin", "admin-1")
+	if err != nil {
+		t.Fatalf("AssignPartnerPortalRole: %v", err)
+	}
+	if assignment.ExternalID != externalID || assignment.Role != "partner-admin" || assignment.GrantedBy != "admin-1" {
+		t.Errorf("неожиданный assignment: %+v", assignment)
+	}
+
+	listed, err := pg.ListPartnerPortalAssignments(ctx, externalID)
+	if err != nil {
+		t.Fatalf("ListPartnerPortalAssignments: %v", err)
+	}
+	if len(listed) != 1 || listed[0].Role != "partner-admin" {
+		t.Fatalf("ожидали одно активное назначение partner-admin, получили %+v", listed)
+	}
+
+	revoked, err := pg.RevokePartnerPortalRole(ctx, externalID, "partner-admin", "admin-2")
+	if err != nil {
+		t.Fatalf("RevokePartnerPortalRole: %v", err)
+	}
+	if !revoked {
+		t.Fatalf("ожидали revoked=true для активного назначения")
+	}
+
+	listed, err = pg.ListPartnerPortalAssignments(ctx, externalID)
+	if err != nil {
+		t.Fatalf("ListPartnerPortalAssignments (после отзыва): %v", err)
+	}
+	if len(listed) != 0 {
+		t.Errorf("ожидали 0 активных назначений после отзыва, получили %+v", listed)
+	}
+
+	// Повторный отзыв — идемпотентно, revoked=false, не ошибка.
+	revoked, err = pg.RevokePartnerPortalRole(ctx, externalID, "partner-admin", "admin-2")
+	if err != nil {
+		t.Fatalf("RevokePartnerPortalRole (повторный): %v", err)
+	}
+	if revoked {
+		t.Errorf("повторный отзыв уже отозванной роли должен вернуть revoked=false")
+	}
+}
+
+func TestAssignPartnerPortalRoleRejectsInvalidRole(t *testing.T) {
+	pool := testPool(t)
+	pg := NewPostgres(pool)
+	externalID := "test-pp-" + uuid.NewString()
+	createPartnerPortalUser(t, pool, externalID)
+
+	_, err := pg.AssignPartnerPortalRole(context.Background(), externalID, "super-admin", "admin-1")
+	if err != ErrInvalidPartnerPortalRole {
+		t.Errorf("ожидали ErrInvalidPartnerPortalRole, получили %v", err)
+	}
+}
+
+func TestAssignPartnerPortalRoleUnknownUserReturnsErrPartnerPortalUserNotFound(t *testing.T) {
+	pool := testPool(t)
+	pg := NewPostgres(pool)
+	externalID := "test-pp-does-not-exist-" + uuid.NewString()
+
+	_, err := pg.AssignPartnerPortalRole(context.Background(), externalID, "partner-admin", "admin-1")
+	if err != ErrPartnerPortalUserNotFound {
+		t.Errorf("ожидали ErrPartnerPortalUserNotFound (FK violation на iam.partner_portal_users), получили %v", err)
+	}
+}
+
+func TestAssignPartnerPortalRoleWritesIdentityAudit(t *testing.T) {
+	pool := testPool(t)
+	pg := NewPostgres(pool)
+	ctx := context.Background()
+	externalID := "test-pp-" + uuid.NewString()
+	createPartnerPortalUser(t, pool, externalID)
+
+	if _, err := pg.AssignPartnerPortalRole(ctx, externalID, "partner-viewer", "admin-1"); err != nil {
+		t.Fatalf("AssignPartnerPortalRole: %v", err)
+	}
+
+	var count int
+	err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM iam.identity_audit
+		WHERE actor = 'admin-1' AND action = 'PARTNER_PORTAL_ROLE_GRANTED' AND target = $1`,
+		externalID+":partner-viewer").Scan(&count)
+	if err != nil {
+		t.Fatalf("readback identity_audit: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("ожидали ровно одну PARTNER_PORTAL_ROLE_GRANTED запись в iam.identity_audit, получили %d", count)
 	}
 }
