@@ -95,6 +95,16 @@ const allMenuOptions = [
     // IAM-схемы на фронте).
     permission: "audit:read" as string | undefined,
   },
+  {
+    label: () => h(RouterLink, { to: "/blacklist" }, () => "Blacklist"),
+    key: "blacklist",
+    adminOnly: false,
+    // backoffice-api/internal/httpapi/router.go: GET /v1/compliance/consent
+    // без gate (compliance-api само уже так решило для read) — сам экран
+    // виден всем, ручная блокировка внутри него отдельно гейтится
+    // compliance:write (RequirePermission внутри BlacklistView.vue).
+    permission: undefined as string | undefined,
+  },
   { label: () => h(RouterLink, { to: "/reports" }, () => "Reports"), key: "reports", adminOnly: false, permission: undefined as string | undefined },
   {
     label: () => h(RouterLink, { to: "/access-control" }, () => "Users & Roles"),

@@ -292,6 +292,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/compliance/consent": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["lookupConsent"];
+        put?: never;
+        post: operations["submitManualConsent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/me": {
         parameters: {
             query?: never;
@@ -646,6 +662,26 @@ export interface components {
             currency: string;
             group_by: string;
             rows: components["schemas"]["LedgerSummaryRow"][];
+        };
+        ConsentStatus: {
+            msisdn: string;
+            blocked_categories: string[];
+            blocked_senders: string[];
+        };
+        ManualConsentRequest: {
+            msisdn: string;
+            /** @enum {string} */
+            scope_type: "CATEGORY" | "SENDER";
+            scope_value: string;
+            channel: string;
+            /** @enum {string} */
+            action: "block" | "unblock";
+            reason: string;
+        };
+        ManualConsentResponse: {
+            entity_id: string;
+            version: number;
+            status: string;
         };
         OperatorEventSegment: {
             segment_id: number;
@@ -1317,6 +1353,52 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LedgerSummaryResponse"];
+                };
+            };
+        };
+    };
+    lookupConsent: {
+        parameters: {
+            query: {
+                msisdn: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsentStatus"];
+                };
+            };
+        };
+    };
+    submitManualConsent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManualConsentRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManualConsentResponse"];
                 };
             };
         };

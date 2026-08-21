@@ -230,6 +230,34 @@ components:
         rows:
           type: array
           items: { $ref: "#/components/schemas/LedgerSummaryRow" }
+    ConsentStatus:
+      type: object
+      required: [msisdn, blocked_categories, blocked_senders]
+      properties:
+        msisdn: { type: string }
+        blocked_categories:
+          type: array
+          items: { type: string }
+        blocked_senders:
+          type: array
+          items: { type: string }
+    ManualConsentRequest:
+      type: object
+      required: [msisdn, scope_type, scope_value, channel, action, reason]
+      properties:
+        msisdn: { type: string }
+        scope_type: { type: string, enum: [CATEGORY, SENDER] }
+        scope_value: { type: string }
+        channel: { type: string }
+        action: { type: string, enum: [block, unblock] }
+        reason: { type: string }
+    ManualConsentResponse:
+      type: object
+      required: [entity_id, version, status]
+      properties:
+        entity_id: { type: string }
+        version: { type: integer }
+        status: { type: string }
     OperatorEventSegment:
       type: object
       required: [segment_id, operator_id, smsc_message_id, stage_execution_id, submitted_at, dlr_expires_at]
@@ -859,6 +887,33 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/LedgerSummaryResponse" }
+  /compliance/consent:
+    get:
+      operationId: lookupConsent
+      parameters:
+        - name: msisdn
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConsentStatus" }
+    post:
+      operationId: submitManualConsent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ManualConsentRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManualConsentResponse" }
   /me:
     get:
       operationId: getMe
