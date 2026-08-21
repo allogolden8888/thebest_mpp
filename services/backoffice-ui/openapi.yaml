@@ -374,6 +374,38 @@ components:
       required: [revoked]
       properties:
         revoked: { type: boolean }
+    PartnerPortalAssignment:
+      type: object
+      required: [id, external_id, role, granted_by, granted_at]
+      properties:
+        id: { type: integer, format: int64 }
+        external_id: { type: string }
+        role: { type: string, enum: [partner-admin, partner-viewer] }
+        granted_by: { type: string }
+        granted_at: { type: string, format: date-time }
+    PartnerPortalAssignmentsResponse:
+      type: object
+      required: [assignments]
+      properties:
+        assignments:
+          type: array
+          items: { $ref: "#/components/schemas/PartnerPortalAssignment" }
+    CreatePartnerPortalAssignmentRequest:
+      type: object
+      required: [external_id, role]
+      properties:
+        external_id: { type: string }
+        role: { type: string, enum: [partner-admin, partner-viewer] }
+    CreatePartnerPortalAssignmentResponse:
+      type: object
+      required: [assignment]
+      properties:
+        assignment: { $ref: "#/components/schemas/PartnerPortalAssignment" }
+    RevokePartnerPortalAssignmentResponse:
+      type: object
+      required: [revoked]
+      properties:
+        revoked: { type: boolean }
     RotateCredentialResponse:
       type: object
       required: [credential_ref, secret_version, plaintext_secret]
@@ -1025,6 +1057,50 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/RevokeStaffAssignmentResponse" }
+  /iam/partner-portal-assignments:
+    get:
+      operationId: listPartnerPortalAssignments
+      parameters:
+        - name: external_id
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PartnerPortalAssignmentsResponse" }
+    post:
+      operationId: createPartnerPortalAssignment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreatePartnerPortalAssignmentRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatePartnerPortalAssignmentResponse" }
+  /iam/partner-portal-assignments/{external_id}/{role}:
+    delete:
+      operationId: revokePartnerPortalAssignment
+      parameters:
+        - name: external_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: role
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RevokePartnerPortalAssignmentResponse" }
   /partners/{partner_id}/applications/{application_id}/credentials/rotate:
     post:
       operationId: rotatePartnerCredential

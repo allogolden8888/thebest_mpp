@@ -20,6 +20,7 @@ const router = createRouter({
     { path: "/operator-routes", name: "operator-routes", component: () => import("../views/OperatorRoutesView.vue") },
     { path: "/reports", name: "reports", component: () => import("../views/ReportsView.vue") },
     { path: "/access-control", name: "access-control", component: () => import("../views/AccessControlView.vue") },
+    { path: "/partner-users", name: "partner-users", component: () => import("../views/PartnerUsersView.vue") },
     { path: "/audit", name: "audit", component: () => import("../views/AuditLogView.vue") },
     { path: "/incidents", name: "incidents", component: () => import("../views/IncidentsView.vue") },
     { path: "/ops-health", name: "ops-health", component: () => import("../views/OpsHealthView.vue") },

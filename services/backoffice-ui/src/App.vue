@@ -113,6 +113,12 @@ const allMenuOptions = [
     permission: "iam:manage" as string | undefined,
   },
   {
+    label: () => h(RouterLink, { to: "/partner-users" }, () => "Partner Users"),
+    key: "partner-users",
+    adminOnly: false,
+    permission: "iam:manage" as string | undefined,
+  },
+  {
     label: () => h(RouterLink, { to: "/audit" }, () => "Audit Log"),
     key: "audit",
     adminOnly: false,

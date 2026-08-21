@@ -404,6 +404,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/iam/partner-portal-assignments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listPartnerPortalAssignments"];
+        put?: never;
+        post: operations["createPartnerPortalAssignment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/iam/partner-portal-assignments/{external_id}/{role}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["revokePartnerPortalAssignment"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/partners/{partner_id}/applications/{application_id}/credentials/rotate": {
         parameters: {
             query?: never;
@@ -775,6 +807,30 @@ export interface components {
             assignment: components["schemas"]["StaffAssignment"];
         };
         RevokeStaffAssignmentResponse: {
+            revoked: boolean;
+        };
+        PartnerPortalAssignment: {
+            /** Format: int64 */
+            id: number;
+            external_id: string;
+            /** @enum {string} */
+            role: "partner-admin" | "partner-viewer";
+            granted_by: string;
+            /** Format: date-time */
+            granted_at: string;
+        };
+        PartnerPortalAssignmentsResponse: {
+            assignments: components["schemas"]["PartnerPortalAssignment"][];
+        };
+        CreatePartnerPortalAssignmentRequest: {
+            external_id: string;
+            /** @enum {string} */
+            role: "partner-admin" | "partner-viewer";
+        };
+        CreatePartnerPortalAssignmentResponse: {
+            assignment: components["schemas"]["PartnerPortalAssignment"];
+        };
+        RevokePartnerPortalAssignmentResponse: {
             revoked: boolean;
         };
         RotateCredentialResponse: {
@@ -1582,6 +1638,75 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RevokeStaffAssignmentResponse"];
+                };
+            };
+        };
+    };
+    listPartnerPortalAssignments: {
+        parameters: {
+            query?: {
+                external_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PartnerPortalAssignmentsResponse"];
+                };
+            };
+        };
+    };
+    createPartnerPortalAssignment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreatePartnerPortalAssignmentRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreatePartnerPortalAssignmentResponse"];
+                };
+            };
+        };
+    };
+    revokePartnerPortalAssignment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                external_id: string;
+                role: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevokePartnerPortalAssignmentResponse"];
                 };
             };
         };
