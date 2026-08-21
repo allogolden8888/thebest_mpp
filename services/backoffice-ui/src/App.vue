@@ -85,6 +85,16 @@ const allMenuOptions = [
     adminOnly: false,
     permission: undefined as string | undefined,
   },
+  {
+    label: () => h(RouterLink, { to: "/billing" }, () => "Billing"),
+    key: "billing",
+    adminOnly: false,
+    // backoffice-api/internal/httpapi/router.go: /v1/billing/* гейтится
+    // audit:read (нет отдельного billing:read в migrations/V025__iam.sql,
+    // см. billing.go — тот же класс решения, не выдумывать право в обход
+    // IAM-схемы на фронте).
+    permission: "audit:read" as string | undefined,
+  },
   { label: () => h(RouterLink, { to: "/reports" }, () => "Reports"), key: "reports", adminOnly: false, permission: undefined as string | undefined },
   {
     label: () => h(RouterLink, { to: "/access-control" }, () => "Users & Roles"),

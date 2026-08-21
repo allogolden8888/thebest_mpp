@@ -153,6 +153,21 @@ func NewRouter(d Deps) *chi.Mux {
 			Get("/messages", handleMessageBrowse(d.Postgres))
 		r.With(auth.RequirePermission("support:trace", d.IamClient)).
 			Get("/messages/{message_id}", handleMessageDetail(d.Postgres))
+		// Операторская (SMPP) сторона по сообщению — что и когда ушло
+		// оператору, dlr.dlr_correlation (billing.go).
+		r.With(auth.RequirePermission("support:trace", d.IamClient)).
+			Get("/messages/{message_id}/operator-events", handleMessageOperatorEvents(d.Postgres))
+
+		// /v1/billing/* — лента списаний и сводка (billing.go). Читают
+		// billing.billing_ledger напрямую. Право audit:read, а не
+		// отдельное billing:read: финансовая видимость здесь того же
+		// класса, что и остальной аудит (собственного права под биллинг
+		// в migrations/V025__iam.sql не заведено, выдумывать его в
+		// обход IAM-схемы здесь нельзя).
+		r.With(auth.RequirePermission("audit:read", d.IamClient)).
+			Get("/billing/ledger", handleLedgerBrowse(d.Postgres))
+		r.With(auth.RequirePermission("audit:read", d.IamClient)).
+			Get("/billing/summary", handleLedgerSummary(d.Postgres))
 
 		// /v1/incidents/* — luminous-hugging-charm.md Ф7, IncidentService
 		// proxy (incidents.go), backoffice-ui "Incidents". Один gate

@@ -192,6 +192,62 @@ components:
         rows:
           type: array
           items: { $ref: "#/components/schemas/ReportRow" }
+    LedgerEntry:
+      type: object
+      required: [id, charge_id, account_id, partner_id, amount, currency, entry_type, created_at]
+      properties:
+        id: { type: integer }
+        charge_id: { type: string }
+        account_id: { type: string }
+        partner_id: { type: string }
+        amount: { type: string }
+        currency: { type: string }
+        entry_type: { type: string, enum: [charge, compensating] }
+        source_charge_id: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+    LedgerEntriesResponse:
+      type: object
+      required: [entries]
+      properties:
+        entries:
+          type: array
+          items: { $ref: "#/components/schemas/LedgerEntry" }
+    LedgerSummaryRow:
+      type: object
+      required: [key, charges, compensations, net, entry_count]
+      properties:
+        key: { type: string }
+        charges: { type: string }
+        compensations: { type: string }
+        net: { type: string }
+        entry_count: { type: integer }
+    LedgerSummaryResponse:
+      type: object
+      required: [currency, group_by, rows]
+      properties:
+        currency: { type: string }
+        group_by: { type: string }
+        rows:
+          type: array
+          items: { $ref: "#/components/schemas/LedgerSummaryRow" }
+    OperatorEventSegment:
+      type: object
+      required: [segment_id, operator_id, smsc_message_id, stage_execution_id, submitted_at, dlr_expires_at]
+      properties:
+        segment_id: { type: integer }
+        operator_id: { type: string }
+        smsc_message_id: { type: string }
+        stage_execution_id: { type: string }
+        submitted_at: { type: string, format: date-time }
+        dlr_expires_at: { type: string, format: date-time }
+    MessageOperatorEventsResponse:
+      type: object
+      required: [message_id, segments]
+      properties:
+        message_id: { type: string }
+        segments:
+          type: array
+          items: { $ref: "#/components/schemas/OperatorEventSegment" }
     MeResponse:
       type: object
       required: [external_id, roles, permissions]
@@ -668,6 +724,20 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/MessageDetailResponse" }
+  /messages/{message_id}/operator-events:
+    get:
+      operationId: getMessageOperatorEvents
+      parameters:
+        - name: message_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageOperatorEventsResponse" }
   /support/messages/search:
     get:
       operationId: searchSupportMessages
@@ -742,6 +812,53 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ReportResponse" }
+  /billing/ledger:
+    get:
+      operationId: browseBillingLedger
+      parameters:
+        - name: partner_id
+          in: query
+          schema: { type: string }
+        - name: entry_type
+          in: query
+          schema: { type: string }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+        - name: limit
+          in: query
+          schema: { type: integer }
+        - name: offset
+          in: query
+          schema: { type: integer }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LedgerEntriesResponse" }
+  /billing/summary:
+    get:
+      operationId: getBillingSummary
+      parameters:
+        - name: group_by
+          in: query
+          schema: { type: string, enum: [partner, day] }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LedgerSummaryResponse" }
   /me:
     get:
       operationId: getMe

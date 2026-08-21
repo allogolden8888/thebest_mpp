@@ -180,6 +180,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/messages/{message_id}/operator-events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getMessageOperatorEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/support/messages/search": {
         parameters: {
             query?: never;
@@ -236,6 +252,38 @@ export interface paths {
             cookie?: never;
         };
         get: operations["getReport"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/billing/ledger": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["browseBillingLedger"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/billing/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getBillingSummary"];
         put?: never;
         post?: never;
         delete?: never;
@@ -570,6 +618,48 @@ export interface components {
         };
         ReportResponse: {
             rows: components["schemas"]["ReportRow"][];
+        };
+        LedgerEntry: {
+            id: number;
+            charge_id: string;
+            account_id: string;
+            partner_id: string;
+            amount: string;
+            currency: string;
+            /** @enum {string} */
+            entry_type: "charge" | "compensating";
+            source_charge_id?: string | null;
+            /** Format: date-time */
+            created_at: string;
+        };
+        LedgerEntriesResponse: {
+            entries: components["schemas"]["LedgerEntry"][];
+        };
+        LedgerSummaryRow: {
+            key: string;
+            charges: string;
+            compensations: string;
+            net: string;
+            entry_count: number;
+        };
+        LedgerSummaryResponse: {
+            currency: string;
+            group_by: string;
+            rows: components["schemas"]["LedgerSummaryRow"][];
+        };
+        OperatorEventSegment: {
+            segment_id: number;
+            operator_id: string;
+            smsc_message_id: string;
+            stage_execution_id: string;
+            /** Format: date-time */
+            submitted_at: string;
+            /** Format: date-time */
+            dlr_expires_at: string;
+        };
+        MessageOperatorEventsResponse: {
+            message_id: string;
+            segments: components["schemas"]["OperatorEventSegment"][];
         };
         MeResponse: {
             external_id: string;
@@ -1061,6 +1151,28 @@ export interface operations {
             };
         };
     };
+    getMessageOperatorEvents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                message_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageOperatorEventsResponse"];
+                };
+            };
+        };
+    };
     searchSupportMessages: {
         parameters: {
             query?: {
@@ -1154,6 +1266,57 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ReportResponse"];
+                };
+            };
+        };
+    };
+    browseBillingLedger: {
+        parameters: {
+            query?: {
+                partner_id?: string;
+                entry_type?: string;
+                from?: string;
+                to?: string;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LedgerEntriesResponse"];
+                };
+            };
+        };
+    };
+    getBillingSummary: {
+        parameters: {
+            query?: {
+                group_by?: "partner" | "day";
+                from?: string;
+                to?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LedgerSummaryResponse"];
                 };
             };
         };
