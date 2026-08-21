@@ -55,13 +55,11 @@
 
 ### 4. Blacklist
 
-**Данные и API, которые реально есть — это почти готово:**
-- `compliance-api`: `GET /v1/compliance/consent?msisdn=...` — читает `consent:category_blacklist:{msisdn}` / `consent:sender_blacklist:{msisdn}` из Runtime Redis.
-- `POST /v1/compliance/consent` (право `compliance:write`) — уже пишет ручные записи через ConfigClient.
+**✅ Готово: проксировано через backoffice-api + экран.** `GET/POST /v1/compliance/consent` — плоский HTTP-прокси в `compliance-api` (`internal/httpapi/compliance.go`), форвардит `Authorization`. GET без gate прав (то же решение, что уже приняло само `compliance-api`), POST — `compliance:write`. Экран `BlacklistView.vue`: карточка поиска по msisdn (открыта всем) + карточка ручной блокировки/разблокировки (за `RequirePermission`). Поиск ТОЛЬКО по msisdn — обратный поиск "все заблокированные" не поддержан нигде (msisdn не индексируется reverse в Redis) — честное ограничение, не баг.
 
-**Что строим:**
-1. Смонтировать `compliance-api`'s `/v1/compliance/*` за backoffice-api (сейчас это ОТДЕЛЬНЫЙ сервис/порт, не проксируется через backoffice-api как остальное) — либо прямой прокси, либо отдельный API-клиент во фронтенде на `compliance-api`. **Backend: уже готов, только решить схему проксирования — полдня.**
-2. UI-экран browse + добавление записи. Поиск ТОЛЬКО по msisdn (см. раздел "Кросс-партнёрский поиск" в `backoffice-api/README.md` — обратный поиск "все заблокированные" не поддержан нигде, msisdn не индексируется reverse) — честно ограничение, не баг.
+По пути нашлись и починены два реальных, ранее не пойманных бага, без которых запись структурно не доходила до Redis (обнаружено живой curl-проверкой, не гипотезой):
+1. `services/configuration-service/internal/validate/schemas/subscriber_consent.schema.json` (вручную поддерживаемая копия `config_schemas/`, задокументированный drift risk) не был синхронизирован после того, как канонический файл получил поле `status` — каждый `POST /v1/compliance/consent` падал на валидации.
+2. `consent-cache-projector` (Kafka `config.changes` → Runtime Redis) существует и задеплоен в k8s, но полностью отсутствовал в локальном `docker-compose.yml` — тот же класс находки, что уже чинился раньше ("docker-compose: restore 13 local self-service services"). Добавлен.
 
 ### 5. Category management per operator
 
@@ -103,8 +101,8 @@
 
 1. ~~Fix lifecycle-writer~~ ✅ готово.
 2. ~~Spam/banwords UI~~ / ~~Route config UI~~ — **оказались уже функционально готовы**: `ConfigView.vue` — универсальный редактор любого `entity_type`, уже покрывает `policy_ruleset`/`route_table` сегодня (см. разделы 2/3 выше). Специализированные формы вместо сырого JSON — полировка, не пробел, отложено.
-3. **Billing ledger browse UI** — backend уже готов (`GET /v1/billing/ledger`/`/billing/summary` уже в `router.go`), строю экран сейчас.
-4. **Blacklist proxy** — почти бесплатно (данные и часть API уже есть), высокая видимая ценность.
+3. ~~Billing ledger browse UI~~ ✅ готово.
+4. ~~Blacklist proxy~~ ✅ готово (по пути починены configuration-service schema drift и отсутствующий в compose consent-cache-projector — см. раздел 4 выше).
 5. **Operator routes read-only view** — маленький новый эндпоинт, быстро.
 6. **Template moderation workflow** — самая большая новая фича, делать осознанно отдельным заходом, не между делом.
 7. **Dashboard** — в конце, после того как остальные экраны дадут данные, которые он агрегирует.
