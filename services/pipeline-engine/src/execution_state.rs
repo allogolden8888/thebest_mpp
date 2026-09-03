@@ -307,6 +307,7 @@ mod tests {
             traceparent: "tp1".into(),
             completed_at: None,
             sandbox: false,
+            partner_id: String::new(),
             stage_result: result,
         }
     }

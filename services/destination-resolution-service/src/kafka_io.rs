@@ -53,6 +53,17 @@ fn commit_watermark(consumer: &StreamConsumer, key: &PartitionKey, next_offset: 
 pub const INPUT_TOPIC: &str = "stage.destination-resolution";
 pub const OUTPUT_TOPIC: &str = "stage.completed";
 
+
+/// `completed_at` — момент завершения стадии. Раньше все шесть
+/// сервисов-стадий писали сюда `None`: поле объявлено в контракте, но не
+/// заполнялось никем, из-за чего `analytics.stage_events` получала
+/// `occurred_at = 1970-01-01` и пер-стадийные длительности были
+/// структурно невычислимы (все разницы нулевые).
+fn now_timestamp() -> Option<prost_types::Timestamp> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(prost_types::Timestamp { seconds: now.as_secs() as i64, nanos: now.subsec_nanos() as i32 })
+}
+
 pub fn build_consumer(bootstrap_servers: &str, group_id: &str) -> StreamConsumer {
     ClientConfig::new()
         .set("bootstrap.servers", bootstrap_servers)
@@ -107,9 +118,14 @@ pub fn handle_command(snapshot: &Snapshot, command: &StageExecuteCommand) -> Sta
             retryable: false,
             retry_after: None,
             traceparent: command.traceparent.clone(),
-            completed_at: None,
+            completed_at: now_timestamp(),
             // Фаза 11 плана закрытия API-пробелов: эхо command.sandbox.
             sandbox: command.sandbox,
+            // Эхо command.partner_id — сервис не резолвит партнёра заново,
+            // копирует из обрабатываемой команды. Без этого поля
+            // analytics.stage_events писала пустой partner_id и отчёты не
+            // группировались по партнёру.
+            partner_id: command.partner_id.clone(),
             stage_result: Some(StageResult::DestinationResolution(DestinationResolutionResult {
                 resolved_operator_id: operator_id,
             })),
@@ -130,8 +146,13 @@ fn build_rejected(command: &StageExecuteCommand, reason_code: &str) -> StageComp
         retryable: false,
         retry_after: None,
         traceparent: command.traceparent.clone(),
-        completed_at: None,
+        completed_at: now_timestamp(),
         sandbox: command.sandbox,
+            // Эхо command.partner_id — сервис не резолвит партнёра заново,
+            // копирует из обрабатываемой команды. Без этого поля
+            // analytics.stage_events писала пустой partner_id и отчёты не
+            // группировались по партнёру.
+            partner_id: command.partner_id.clone(),
         stage_result: None,
     }
 }
@@ -248,7 +269,7 @@ mod tests {
             config_versions: Default::default(),
             traceparent: "tp1".into(),
             payload_ref: None,
-            sandbox: false,
+            sandbox: false, partner_id: String::new(),
             stage_extension: Some(StageExtension::DestinationResolution(
                 crate::proto::DestinationResolutionExtension {
                     destination_address: destination_address.to_string(),

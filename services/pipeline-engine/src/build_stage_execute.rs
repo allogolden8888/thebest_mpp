@@ -130,6 +130,13 @@ pub fn build_stage_execute(
         // выше (в отличие от BillingExtension.partner_id, Фаза 5a), потому
         // что sandbox нужен всем стадиям одинаково, не по-разному.
         sandbox: state.sandbox,
+        // Тот же принцип, что sandbox выше: верхнеуровневое поле, нужное
+        // всем стадиям одинаково. BillingExtension.partner_id (Фаза 5a)
+        // остаётся на месте для обратной совместимости, но теперь
+        // partner_id доезжает и до остальных стадий — без этого они не
+        // могли положить его в свой StageCompletedEvent, и аналитика
+        // писала пустой partner_id для всех stage_completed-строк.
+        partner_id: state.partner_id.clone(),
         stage_extension: Some(extension),
     })
 }
@@ -190,6 +197,26 @@ mod tests {
         let decision = NextStageDecision { node_id: "n4_routing".into(), stage_name: "ROUTING".into() };
         let command = build_stage_execute(&decision, &state, "998901331835", "se4".into()).unwrap();
         assert!(command.sandbox, "sandbox=true в ExecutionState обязан попасть в StageExecuteCommand.sandbox даже для Routing");
+    }
+
+    /// partner_id — тот же класс верхнеуровневого поля, что sandbox выше.
+    /// Раньше он жил ТОЛЬКО внутри BillingExtension (Фаза 5a), поэтому все
+    /// стадии кроме BILLING физически не могли положить его в свой
+    /// StageCompletedEvent — analytics.stage_events писала пустой
+    /// partner_id, и разбивка отчётов по партнёру была невозможна.
+    /// Проверяем на Routing именно потому, что RoutingExtension сам по себе
+    /// partner_id не несёт.
+    #[test]
+    fn partner_id_reaches_top_level_command_regardless_of_stage() {
+        let pipeline = pipeline();
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "click_uz".into(), false);
+        state.resolved_operator_id = Some("beeline".into());
+        let decision = NextStageDecision { node_id: "n4_routing".into(), stage_name: "ROUTING".into() };
+        let command = build_stage_execute(&decision, &state, "998901331835", "se4".into()).unwrap();
+        assert_eq!(
+            command.partner_id, "click_uz",
+            "partner_id обязан попасть в верхнеуровневое поле StageExecuteCommand даже для Routing"
+        );
     }
 
     #[test]

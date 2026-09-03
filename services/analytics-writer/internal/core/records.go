@@ -123,13 +123,15 @@ func FromStageCompleted(event *commonv1.StageCompletedEvent) NormalizedRecord {
 // FromStageCompletedAt — то же, но с fallback-временем (таймстамп самой
 // Kafka-записи), когда payload не несёт completed_at.
 //
-// Реальная находка, подтверждённая живым прогоном: НИ ОДИН из шести
-// сервисов-стадий (destination-resolution/policy/billing/routing/delivery/
-// delivery-reconciliation) не заполняет StageCompletedEvent.completed_at —
-// поле объявлено в контракте и остаётся protobuf-нулём. В ClickHouse все
-// пер-стадийные строки ложились с occurred_at = 1970-01-01, из-за чего
-// пер-стадийная хронология сообщения ("на какой стадии сколько провело")
-// не вычислялась в принципе: все разницы между стадиями были нулевыми.
+// Исторически НИ ОДИН из шести сервисов-стадий не заполнял
+// StageCompletedEvent.completed_at — поле было объявлено в контракте и
+// оставалось protobuf-нулём, из-за чего все пер-стадийные строки в
+// ClickHouse ложились с occurred_at = 1970-01-01 и пер-стадийная
+// хронология не вычислялась в принципе. Сейчас все шесть продюсеров
+// заполняют его по-настоящему, и эта ветка в норме не срабатывает —
+// оставлена как защита от старых событий, которые ещё лежат в топике с
+// прошлой ретенцией, и от возможного будущего продюсера, который снова
+// забудет это поле.
 //
 // Таймстамп Kafka-записи ставится продюсером в момент отправки события,
 // то есть в пределах миллисекунд от фактического завершения стадии — для
@@ -145,9 +147,15 @@ func FromStageCompletedAt(event *commonv1.StageCompletedEvent, fallback time.Tim
 		occurredAt = fallback
 	}
 	return NormalizedRecord{
-		EventType:  "stage_completed",
-		EventID:    event.GetEventId(),
-		MessageID:  event.GetMessageId(),
+		EventType: "stage_completed",
+		EventID:   event.GetEventId(),
+		MessageID: event.GetMessageId(),
+		// partner_id теперь приходит в самом событии (верхнеуровневое поле
+		// StageCompletedEvent, эхо StageExecuteCommand.partner_id). Раньше
+		// его в контракте не было вообще, поэтому все stage_completed-строки
+		// в ClickHouse писались с пустым partner_id и отчёты не
+		// группировались по партнёру.
+		PartnerID:  event.GetPartnerId(),
 		StageName:  stageNameString(event.GetStageName()),
 		Outcome:    outcomeString(event.GetOutcome()),
 		ReasonCode: event.GetReasonCode(),

@@ -131,6 +131,24 @@ public final class BillingService {
             // общий "конверт" StageCompletedEvent несёт флаг независимо от
             // outcome (succeeded/rejected), чтобы message-state-resolver
             // видел его даже при отклонённом заряде.
-            .setSandbox(command.getSandbox());
+            .setSandbox(command.getSandbox())
+            // Эхо command.partner_id — стадия не резолвит партнёра заново.
+            // Без этого поля analytics.stage_events писала пустой partner_id
+            // и отчёты не группировались по партнёру.
+            .setPartnerId(command.getPartnerId())
+            // Раньше completed_at не заполнялся ни одним из шести
+            // сервисов-стадий: поле объявлено в контракте, но оставалось
+            // protobuf-нулём, из-за чего analytics.stage_events получала
+            // occurred_at=1970 и пер-стадийные длительности были
+            // структурно невычислимы.
+            .setCompletedAt(nowTimestamp());
+    }
+
+    private static com.google.protobuf.Timestamp nowTimestamp() {
+        java.time.Instant now = java.time.Instant.now();
+        return com.google.protobuf.Timestamp.newBuilder()
+            .setSeconds(now.getEpochSecond())
+            .setNanos(now.getNano())
+            .build();
     }
 }

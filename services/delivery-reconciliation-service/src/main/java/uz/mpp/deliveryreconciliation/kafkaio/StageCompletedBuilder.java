@@ -36,6 +36,17 @@ public final class StageCompletedBuilder {
             .setReasonCode(outcome.name())
             .setRetryable(false)
             .setCompletedAt(toTimestamp(now))
+            // partner_id НЕ проставляется здесь, и это не забытое поле:
+            // эта стадия строит событие не из StageExecuteCommand, а из
+            // reconciliation.reconciliation_cases (case_id/message_id/
+            // stage_execution_id/operator_id/status/...), где partner_id
+            // отсутствует как колонка. Чтобы заполнить его, нужна миграция
+            // (добавить partner_id в таблицу и писать его при открытии
+            // case'а) — отдельная правка, не прячется здесь молча.
+            // Следствие: строки analytics.stage_events со stage_name=
+            // DELIVERY_RECONCILIATION будут с пустым partner_id и не
+            // попадут в разбивку отчётов по партнёру. Путь редкий
+            // (срабатывает только когда DLR не пришёл в SLA).
             .setDeliveryReconciliation(DeliveryReconciliationResult.newBuilder().setReconciliationOutcome(outcome).build())
             .build();
     }

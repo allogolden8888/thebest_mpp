@@ -175,7 +175,20 @@ public final class DeliveryService {
             .setTraceparent(command.getTraceparent())
             // Фаза 11 плана закрытия API-пробелов: эхо command.sandbox.
             .setSandbox(command.getSandbox())
+            // Эхо command.partner_id — см. BillingService.baseEventBuilder.
+            .setPartnerId(command.getPartnerId())
+            // completed_at раньше не заполнялся ни одной стадией — из-за
+            // этого пер-стадийные длительности в аналитике были нулевыми.
+            .setCompletedAt(nowTimestamp())
             .setDelivery(DeliveryResult.newBuilder().setQueueMsgId(queueMsgId))
+            .build();
+    }
+
+    private static com.google.protobuf.Timestamp nowTimestamp() {
+        java.time.Instant now = java.time.Instant.now();
+        return com.google.protobuf.Timestamp.newBuilder()
+            .setSeconds(now.getEpochSecond())
+            .setNanos(now.getNano())
             .build();
     }
 

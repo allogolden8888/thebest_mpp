@@ -47,6 +47,15 @@ message StageExecuteCommand {
   // накоплено в ExecutionState с handle_incoming, присваивается один раз
   // при сборке команды для любой стадии.
   bool sandbox = 15;
+  // Партнёр-владелец сообщения. Верхнеуровневое поле по той же причине,
+  // что и sandbox выше: нужно ВСЕМ стадиям одинаково, а не одной. До
+  // этого partner_id существовал только внутри BillingExtension (Фаза
+  // 5a), поэтому остальные стадии физически не могли положить его в свой
+  // StageCompletedEvent — из-за чего аналитика (analytics.stage_events)
+  // писала пустой partner_id и любая разбивка отчётов по партнёру была
+  // невозможна. Проставляется Pipeline Engine один раз при сборке
+  // команды, из ExecutionState.partner_id.
+  string partner_id = 16;
 
   oneof stage_extension {
     DestinationResolutionExtension destination_resolution = 20;
@@ -149,6 +158,12 @@ message StageCompletedEvent {
   // sandbox-сообщения были видимо отличимы от настоящего трафика в
   // отчётах/ClickHouse, а не просто "тихо не списались".
   bool sandbox = 12;
+  // Эхо StageExecuteCommand.partner_id — каждый сервис-стадия копирует
+  // значение из команды, которую обрабатывал, не резолвит заново. Нужно
+  // downstream: analytics.stage_events группирует отчёты по партнёру, а
+  // без этого поля partner_id в аналитике оставался пустым для всех
+  // stage_completed-строк.
+  string partner_id = 13;
 
   oneof stage_result {
     DestinationResolutionResult destination_resolution = 20;

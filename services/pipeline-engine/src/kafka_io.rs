@@ -859,7 +859,7 @@ mod tests {
         let event = StageCompletedEvent {
             event_id: "e2".into(), message_id: "m1".into(), stage_execution_id: dispatched_id, attempt: 1,
             stage_name: StageName::DestinationResolution as i32, outcome: Outcome::Succeeded as i32, reason_code: String::new(), retryable: false,
-            retry_after: None, traceparent: "tp1".into(), completed_at: None, sandbox: false,
+            retry_after: None, traceparent: "tp1".into(), completed_at: None, sandbox: false, partner_id: String::new(),
             stage_result: Some(StageResult::DestinationResolution(DestinationResolutionResult { resolved_operator_id: "beeline".into() })),
         };
 
@@ -887,7 +887,7 @@ mod tests {
         let event = StageCompletedEvent {
             event_id: "e1".into(), message_id: "m1".into(), stage_execution_id: "se1".into(), attempt: 1,
             stage_name: StageName::Billing as i32, outcome: Outcome::Succeeded as i32, reason_code: String::new(), retryable: false,
-            retry_after: None, traceparent: "tp1".into(), completed_at: None, sandbox: false, stage_result: None,
+            retry_after: None, traceparent: "tp1".into(), completed_at: None, sandbox: false, partner_id: String::new(), stage_result: None,
         };
         assert_eq!(advance(&mut state, &pipeline, &event, "998901331835", 0).unwrap(), AdvanceOutcome::Terminal);
     }
@@ -903,7 +903,7 @@ mod tests {
         let stale_event = StageCompletedEvent {
             event_id: "e-stale".into(), message_id: "m1".into(), stage_execution_id: "se-old".into(), attempt: 1,
             stage_name: StageName::DestinationResolution as i32, outcome: Outcome::Succeeded as i32, reason_code: String::new(), retryable: false,
-            retry_after: None, traceparent: "tp1".into(), completed_at: None, sandbox: false, stage_result: None,
+            retry_after: None, traceparent: "tp1".into(), completed_at: None, sandbox: false, partner_id: String::new(), stage_result: None,
         };
         assert_eq!(advance(&mut state, &pipeline, &stale_event, "998901331835", 0).unwrap(), AdvanceOutcome::Ignored);
         assert_eq!(state.current_node_id, "n1_destination_resolution", "состояние не должно было измениться");
