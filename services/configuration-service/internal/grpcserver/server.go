@@ -25,6 +25,7 @@ type Store interface {
 	CreateImmutableVersionAndOutbox(ctx context.Context, entityType validate.EntityType, entityID string, payloadJSON []byte, createdBy string) (store.ConfigVersion, error)
 	GetActiveVersion(ctx context.Context, entityType validate.EntityType, entityID string) (store.ConfigVersion, error)
 	ListVersions(ctx context.Context, entityType validate.EntityType, entityID string, pageSize int32, pageToken string) ([]store.ConfigVersion, string, error)
+	ListActiveVersionsByType(ctx context.Context, entityType validate.EntityType) ([]store.ConfigVersion, error)
 	ArchiveVersion(ctx context.Context, entityType validate.EntityType, entityID string, version int32) (store.ConfigVersion, error)
 	GetVersionByNumber(ctx context.Context, entityType validate.EntityType, entityID string, version int32) ([]byte, error)
 }
@@ -65,6 +66,10 @@ func entityTypeFromProto(e commonv1.ConfigEntityType) validate.EntityType {
 		return validate.EntityOperator
 	case commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_SUBSCRIBER_CONSENT:
 		return validate.EntitySubscriberConsent
+	case commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_CATEGORY:
+		return validate.EntityCategory
+	case commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_CTN:
+		return validate.EntityCTN
 	default:
 		return ""
 	}
@@ -90,6 +95,10 @@ func entityTypeToProto(e validate.EntityType) commonv1.ConfigEntityType {
 		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_OPERATOR
 	case validate.EntitySubscriberConsent:
 		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_SUBSCRIBER_CONSENT
+	case validate.EntityCategory:
+		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_CATEGORY
+	case validate.EntityCTN:
+		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_CTN
 	default:
 		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_UNSPECIFIED
 	}
@@ -161,11 +170,34 @@ func (s *Server) GetActiveVersion(ctx context.Context, req *grpcv1.GetActiveVers
 	return toResponse(version), nil
 }
 
+// ListVersions — entity_id="" переключает в browse-режим (BACKOFFICE_
+// DESIGN_SPEC.md Экраны 32/23, Categories/CTN): раньше этот случай был
+// мёртвой веткой (WHERE entity_id = '' никогда не совпадал ни с одной
+// реальной строкой — ни у одного entity_type нет и не может быть пустого
+// entity_id), так что осмысленно переопределить его значение не ломает
+// ни одного существующего вызывающего. Возвращает по одной (последней
+// активной) версии на каждый entity_id этого entity_type — то, что нужно
+// для "список всех категорий/CTN", а не "история версий одной уже
+// известной сущности" (для чего этот RPC изначально проектировался, см.
+// ConfigView.vue — там entity_id всегда вводится вручную).
 func (s *Server) ListVersions(ctx context.Context, req *grpcv1.ListVersionsRequest) (*grpcv1.ListVersionsResponse, error) {
 	entityType := entityTypeFromProto(req.GetEntityType())
 	if entityType == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "неизвестный entity_type: %v", req.GetEntityType())
 	}
+
+	if req.GetEntityId() == "" {
+		versions, err := s.store.ListActiveVersionsByType(ctx, entityType)
+		if err != nil {
+			return nil, storeErrToStatus(err)
+		}
+		resp := &grpcv1.ListVersionsResponse{}
+		for _, v := range versions {
+			resp.Versions = append(resp.Versions, toResponse(v))
+		}
+		return resp, nil
+	}
+
 	versions, nextToken, err := s.store.ListVersions(ctx, entityType, req.GetEntityId(), req.GetPageSize(), req.GetPageToken())
 	if err != nil {
 		return nil, storeErrToStatus(err)

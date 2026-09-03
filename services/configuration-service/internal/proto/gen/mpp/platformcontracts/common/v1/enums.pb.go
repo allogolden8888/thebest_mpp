@@ -620,6 +620,12 @@ const (
 	BackgroundTaskType_BACKGROUND_TASK_TYPE_UNSPECIFIED           BackgroundTaskType = 0
 	BackgroundTaskType_BACKGROUND_TASK_TYPE_DLR_CORRELATION_RETRY BackgroundTaskType = 1
 	BackgroundTaskType_BACKGROUND_TASK_TYPE_NOTIFICATION_RETRY    BackgroundTaskType = 2
+	// Отложенный редиспатч DELIVERY-стадии после транзиентного отказа
+	// (TPS_THROTTLED/PACER_QUEUE_FULL/PACER_QUEUE_TIMEOUT и т.п., см.
+	// Pipeline Engine execution_state.rs Decision::RetryLater), пока TTL
+	// сообщения не истёк — публикуется Pipeline Engine, потребляется им же
+	// (через pipeline.retry.triggers) после отработки задержки Background Lane.
+	BackgroundTaskType_BACKGROUND_TASK_TYPE_STAGE_RETRY BackgroundTaskType = 3
 )
 
 // Enum value maps for BackgroundTaskType.
@@ -628,11 +634,13 @@ var (
 		0: "BACKGROUND_TASK_TYPE_UNSPECIFIED",
 		1: "BACKGROUND_TASK_TYPE_DLR_CORRELATION_RETRY",
 		2: "BACKGROUND_TASK_TYPE_NOTIFICATION_RETRY",
+		3: "BACKGROUND_TASK_TYPE_STAGE_RETRY",
 	}
 	BackgroundTaskType_value = map[string]int32{
 		"BACKGROUND_TASK_TYPE_UNSPECIFIED":           0,
 		"BACKGROUND_TASK_TYPE_DLR_CORRELATION_RETRY": 1,
 		"BACKGROUND_TASK_TYPE_NOTIFICATION_RETRY":    2,
+		"BACKGROUND_TASK_TYPE_STAGE_RETRY":           3,
 	}
 )
 
@@ -778,21 +786,37 @@ const (
 	ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER            ConfigEntityType = 7
 	ConfigEntityType_CONFIG_ENTITY_TYPE_OPERATOR           ConfigEntityType = 8
 	ConfigEntityType_CONFIG_ENTITY_TYPE_SUBSCRIBER_CONSENT ConfigEntityType = 9
+	// luminous-hugging-charm.md, BACKOFFICE_DESIGN_SPEC.md Экран 32 —
+	// категории сообщений перестают быть фиксированным словарём
+	// (SERVICE/TRANSACTION/ADVERTISING/UNTEMPLATED/BLOCKED, раньше жили
+	// только как соглашение в документации) и становятся управляемой
+	// сущностью: name/regex/count_in_cdr. policy_template.category и
+	// billing_tariff.price_per_segment остаются свободной строкой без
+	// изменений — этот entity_type добавляет слой управления/метаданных,
+	// не новую валидацию в live-пайплайне.
+	ConfigEntityType_CONFIG_ENTITY_TYPE_CATEGORY ConfigEntityType = 10
+	// BACKOFFICE_DESIGN_SPEC.md Экран 23 — CTN (termination number),
+	// привязка (partner_id, category) -> ctn/service_name для офлайн
+	// телеком-биллинга (CDR-экспорт, см. BACKOFFICE_ROADMAP.md — сама
+	// генерация CDR не реализована, только эта справочная сущность).
+	ConfigEntityType_CONFIG_ENTITY_TYPE_CTN ConfigEntityType = 11
 )
 
 // Enum value maps for ConfigEntityType.
 var (
 	ConfigEntityType_name = map[int32]string{
-		0: "CONFIG_ENTITY_TYPE_UNSPECIFIED",
-		1: "CONFIG_ENTITY_TYPE_PIPELINE",
-		2: "CONFIG_ENTITY_TYPE_POLICY_RULESET",
-		3: "CONFIG_ENTITY_TYPE_POLICY_TEMPLATE",
-		4: "CONFIG_ENTITY_TYPE_BILLING_TARIFF",
-		5: "CONFIG_ENTITY_TYPE_ROUTING_TABLE",
-		6: "CONFIG_ENTITY_TYPE_NUMBER_RANGE",
-		7: "CONFIG_ENTITY_TYPE_PARTNER",
-		8: "CONFIG_ENTITY_TYPE_OPERATOR",
-		9: "CONFIG_ENTITY_TYPE_SUBSCRIBER_CONSENT",
+		0:  "CONFIG_ENTITY_TYPE_UNSPECIFIED",
+		1:  "CONFIG_ENTITY_TYPE_PIPELINE",
+		2:  "CONFIG_ENTITY_TYPE_POLICY_RULESET",
+		3:  "CONFIG_ENTITY_TYPE_POLICY_TEMPLATE",
+		4:  "CONFIG_ENTITY_TYPE_BILLING_TARIFF",
+		5:  "CONFIG_ENTITY_TYPE_ROUTING_TABLE",
+		6:  "CONFIG_ENTITY_TYPE_NUMBER_RANGE",
+		7:  "CONFIG_ENTITY_TYPE_PARTNER",
+		8:  "CONFIG_ENTITY_TYPE_OPERATOR",
+		9:  "CONFIG_ENTITY_TYPE_SUBSCRIBER_CONSENT",
+		10: "CONFIG_ENTITY_TYPE_CATEGORY",
+		11: "CONFIG_ENTITY_TYPE_CTN",
 	}
 	ConfigEntityType_value = map[string]int32{
 		"CONFIG_ENTITY_TYPE_UNSPECIFIED":        0,
@@ -805,6 +829,8 @@ var (
 		"CONFIG_ENTITY_TYPE_PARTNER":            7,
 		"CONFIG_ENTITY_TYPE_OPERATOR":           8,
 		"CONFIG_ENTITY_TYPE_SUBSCRIBER_CONSENT": 9,
+		"CONFIG_ENTITY_TYPE_CATEGORY":           10,
+		"CONFIG_ENTITY_TYPE_CTN":                11,
 	}
 )
 
@@ -906,11 +932,12 @@ const file_common_enums_proto_rawDesc = "" +
 	"\x0fLedgerEntryType\x12!\n" +
 	"\x1dLEDGER_ENTRY_TYPE_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18LEDGER_ENTRY_TYPE_CHARGE\x10\x01\x12\"\n" +
-	"\x1eLEDGER_ENTRY_TYPE_COMPENSATING\x10\x02*\x97\x01\n" +
+	"\x1eLEDGER_ENTRY_TYPE_COMPENSATING\x10\x02*\xbd\x01\n" +
 	"\x12BackgroundTaskType\x12$\n" +
 	" BACKGROUND_TASK_TYPE_UNSPECIFIED\x10\x00\x12.\n" +
 	"*BACKGROUND_TASK_TYPE_DLR_CORRELATION_RETRY\x10\x01\x12+\n" +
-	"'BACKGROUND_TASK_TYPE_NOTIFICATION_RETRY\x10\x02*\x8c\x01\n" +
+	"'BACKGROUND_TASK_TYPE_NOTIFICATION_RETRY\x10\x02\x12$\n" +
+	" BACKGROUND_TASK_TYPE_STAGE_RETRY\x10\x03*\x8c\x01\n" +
 	"\x13CriticalCommandType\x12%\n" +
 	"!CRITICAL_COMMAND_TYPE_UNSPECIFIED\x10\x00\x12'\n" +
 	"#CRITICAL_COMMAND_TYPE_FORCE_TIMEOUT\x10\x01\x12%\n" +
@@ -918,7 +945,7 @@ const file_common_enums_proto_rawDesc = "" +
 	"\x10ConsentScopeType\x12\"\n" +
 	"\x1eCONSENT_SCOPE_TYPE_UNSPECIFIED\x10\x00\x12\x1f\n" +
 	"\x1bCONSENT_SCOPE_TYPE_CATEGORY\x10\x01\x12\x1d\n" +
-	"\x19CONSENT_SCOPE_TYPE_SENDER\x10\x02*\x84\x03\n" +
+	"\x19CONSENT_SCOPE_TYPE_SENDER\x10\x02*\xc1\x03\n" +
 	"\x10ConfigEntityType\x12\"\n" +
 	"\x1eCONFIG_ENTITY_TYPE_UNSPECIFIED\x10\x00\x12\x1f\n" +
 	"\x1bCONFIG_ENTITY_TYPE_PIPELINE\x10\x01\x12%\n" +
@@ -929,7 +956,10 @@ const file_common_enums_proto_rawDesc = "" +
 	"\x1fCONFIG_ENTITY_TYPE_NUMBER_RANGE\x10\x06\x12\x1e\n" +
 	"\x1aCONFIG_ENTITY_TYPE_PARTNER\x10\a\x12\x1f\n" +
 	"\x1bCONFIG_ENTITY_TYPE_OPERATOR\x10\b\x12)\n" +
-	"%CONFIG_ENTITY_TYPE_SUBSCRIBER_CONSENT\x10\tBP\n" +
+	"%CONFIG_ENTITY_TYPE_SUBSCRIBER_CONSENT\x10\t\x12\x1f\n" +
+	"\x1bCONFIG_ENTITY_TYPE_CATEGORY\x10\n" +
+	"\x12\x1a\n" +
+	"\x16CONFIG_ENTITY_TYPE_CTN\x10\vBP\n" +
 	"\"uz.mpp.platformcontracts.common.v1P\x01Z(mpp/platformcontracts/common/v1;commonv1b\x06proto3"
 
 var (

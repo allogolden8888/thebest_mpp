@@ -335,12 +335,23 @@ func (x *CreateVersionRequest) GetRequestedBy() string {
 }
 
 type ConfigVersionResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	EntityType    v1.ConfigEntityType    `protobuf:"varint,1,opt,name=entity_type,json=entityType,proto3,enum=mpp.common.v1.ConfigEntityType" json:"entity_type,omitempty"`
-	EntityId      string                 `protobuf:"bytes,2,opt,name=entity_id,json=entityId,proto3" json:"entity_id,omitempty"`
-	Version       int64                  `protobuf:"varint,3,opt,name=version,proto3" json:"version,omitempty"`
-	Status        string                 `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`
-	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	EntityType v1.ConfigEntityType    `protobuf:"varint,1,opt,name=entity_type,json=entityType,proto3,enum=mpp.common.v1.ConfigEntityType" json:"entity_type,omitempty"`
+	EntityId   string                 `protobuf:"bytes,2,opt,name=entity_id,json=entityId,proto3" json:"entity_id,omitempty"`
+	Version    int64                  `protobuf:"varint,3,opt,name=version,proto3" json:"version,omitempty"`
+	Status     string                 `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`
+	CreatedAt  *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	// Найдено при реализации partner-self-service-api (Фаза 3 плана): до
+	// этого поля ни одна RPC ConfigService не отдавала обратно содержимое
+	// документа — GetActiveVersion возвращал только метаданные, что делает
+	// read-modify-write (например, добавление одного sender'а в applications[]
+	// партнёра без потери остальных) невозможным ни для одного клиента этого
+	// сервиса. Заполняется в GetActiveVersion/ListVersions (из
+	// config.config_versions.payload) и в CreateVersion (эхо принятого
+	// payload_json) — не заполняется, где ещё не поддержано конкретным
+	// сервисом (proto3 bytes по умолчанию пуст, отличимо от "нет данных" по
+	// контексту вызова, не требует отдельного presence-флага).
+	PayloadJson   []byte `protobuf:"bytes,6,opt,name=payload_json,json=payloadJson,proto3" json:"payload_json,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -406,6 +417,13 @@ func (x *ConfigVersionResponse) GetStatus() string {
 func (x *ConfigVersionResponse) GetCreatedAt() *timestamppb.Timestamp {
 	if x != nil {
 		return x.CreatedAt
+	}
+	return nil
+}
+
+func (x *ConfigVersionResponse) GetPayloadJson() []byte {
+	if x != nil {
+		return x.PayloadJson
 	}
 	return nil
 }
@@ -1006,7 +1024,7 @@ const file_grpc_internal_control_proto_rawDesc = "" +
 	"entityType\x12\x1b\n" +
 	"\tentity_id\x18\x02 \x01(\tR\bentityId\x12!\n" +
 	"\fpayload_json\x18\x03 \x01(\fR\vpayloadJson\x12!\n" +
-	"\frequested_by\x18\x04 \x01(\tR\vrequestedBy\"\xe3\x01\n" +
+	"\frequested_by\x18\x04 \x01(\tR\vrequestedBy\"\x86\x02\n" +
 	"\x15ConfigVersionResponse\x12@\n" +
 	"\ventity_type\x18\x01 \x01(\x0e2\x1f.mpp.common.v1.ConfigEntityTypeR\n" +
 	"entityType\x12\x1b\n" +
@@ -1014,7 +1032,8 @@ const file_grpc_internal_control_proto_rawDesc = "" +
 	"\aversion\x18\x03 \x01(\x03R\aversion\x12\x16\n" +
 	"\x06status\x18\x04 \x01(\tR\x06status\x129\n" +
 	"\n" +
-	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"x\n" +
+	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12!\n" +
+	"\fpayload_json\x18\x06 \x01(\fR\vpayloadJson\"x\n" +
 	"\x17GetActiveVersionRequest\x12@\n" +
 	"\ventity_type\x18\x01 \x01(\x0e2\x1f.mpp.common.v1.ConfigEntityTypeR\n" +
 	"entityType\x12\x1b\n" +

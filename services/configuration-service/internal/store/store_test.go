@@ -229,6 +229,55 @@ func TestListVersionsReturnsAllCreatedVersions(t *testing.T) {
 		t.Fatalf("ожидали 3 версии, получили %d", len(versions))
 	}
 }
+
+// TestListActiveVersionsByTypeReturnsLatestActivePerEntity — BACKOFFICE_
+// DESIGN_SPEC.md Экраны 32/23 (Categories/CTN): ListVersions требует
+// заранее известный entity_id (история версий ОДНОЙ сущности), это его
+// противоположность — "все сущности этого entity_type", по одной (последней
+// активной) строке на каждый entity_id. Реальная V030-миграция уже сеет 5
+// строк entity_type=category — тест не проверяет точное количество (это
+// столкнулось бы с этим сидом и с другими тестами, дописывающими category
+// параллельно), только что СВОЯ созданная запись присутствует и что
+// заархивированная версия того же entity_id не появляется дважды/не
+// подменяет активную.
+func TestListActiveVersionsByTypeReturnsLatestActivePerEntity(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	s := New(pool)
+	ctx := context.Background()
+	entityID := uniqueEntityID("test-cat")
+
+	v1, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityCategory, entityID, []byte(`{"name":"x","regex":"","count_in_cdr":false}`), "tester")
+	if err != nil {
+		t.Fatalf("create v1 failed: %v", err)
+	}
+	v2, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityCategory, entityID, []byte(`{"name":"x","regex":"","count_in_cdr":true}`), "tester")
+	if err != nil {
+		t.Fatalf("create v2 failed: %v", err)
+	}
+	if _, err := s.ArchiveVersion(ctx, validate.EntityCategory, entityID, v1.Version); err != nil {
+		t.Fatalf("archive v1 failed: %v", err)
+	}
+
+	all, err := s.ListActiveVersionsByType(ctx, validate.EntityCategory)
+	if err != nil {
+		t.Fatalf("ListActiveVersionsByType failed: %v", err)
+	}
+
+	var found []ConfigVersion
+	for _, v := range all {
+		if v.EntityID == entityID {
+			found = append(found, v)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("ожидали ровно одну активную запись для %q, получили %d: %+v", entityID, len(found), found)
+	}
+	if found[0].Version != v2.Version || found[0].Status != "active" {
+		t.Fatalf("ожидали последнюю активную версию (%d), получили %+v", v2.Version, found[0])
+	}
+}
+
 // TestGetVersionByNumberReturnsExactVersionPayload — luminous-hugging-charm.md
 // Ф10 (DiffVersions). Two versions of one entity, real Postgres —
 // confirms GetVersionByNumber fetches the SPECIFIC version asked for, not

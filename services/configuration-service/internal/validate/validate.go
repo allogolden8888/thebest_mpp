@@ -31,6 +31,10 @@ const (
 	EntityPartner            EntityType = "partner"
 	EntityOperator           EntityType = "operator"
 	EntitySubscriberConsent  EntityType = "subscriber_consent"
+	// EntityCategory/EntityCTN — luminous-hugging-charm.md,
+	// BACKOFFICE_DESIGN_SPEC.md Экраны 32/23 (V030__category_ctn_entity_types.sql).
+	EntityCategory EntityType = "category"
+	EntityCTN      EntityType = "ctn"
 )
 
 var schemaFile = map[EntityType]string{
@@ -43,6 +47,8 @@ var schemaFile = map[EntityType]string{
 	EntityPartner:           "partner.schema.json",
 	EntityOperator:          "operator.schema.json",
 	EntitySubscriberConsent: "subscriber_consent.schema.json",
+	EntityCategory:          "category.schema.json",
+	EntityCTN:               "ctn.schema.json",
 }
 
 // ValidEntityTypes — тот же список, что CHECK-ограничение
@@ -50,6 +56,7 @@ var schemaFile = map[EntityType]string{
 var ValidEntityTypes = []EntityType{
 	EntityPipeline, EntityPolicyRuleset, EntityPolicyTemplate, EntityBillingTariff,
 	EntityRoutingTable, EntityNumberRange, EntityPartner, EntityOperator, EntitySubscriberConsent,
+	EntityCategory, EntityCTN,
 }
 
 func IsValidEntityType(e EntityType) bool {

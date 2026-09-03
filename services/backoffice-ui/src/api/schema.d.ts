@@ -560,6 +560,7 @@ export interface components {
             status: string;
             /** Format: date-time */
             created_at?: string;
+            payload_json?: unknown;
         };
         CreateVersionRequest: {
             entity_type: string;
@@ -987,7 +988,8 @@ export interface operations {
         parameters: {
             query: {
                 entity_type: string;
-                entity_id: string;
+                /** @description Пусто/опущено — browse-режим, по одной последней активной версии на каждый entity_id этого entity_type (Categories/CTN экраны). Заполнено — история версий одной уже известной сущности (ConfigView.vue, page_size/page_token применяются только здесь). */
+                entity_id?: string;
                 page_size?: number;
                 page_token?: string;
             };

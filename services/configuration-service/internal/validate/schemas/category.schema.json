@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mpp/config_schemas/category.schema.json",
+  "title": "CATEGORY config payload (ConfigEntityType.CONFIG_ENTITY_TYPE_CATEGORY)",
+  "description": "BACKOFFICE_DESIGN_SPEC.md Экран 32. Категории сообщений (раньше — фиксированный словарь SERVICE/TRANSACTION/ADVERTISING/UNTEMPLATED/BLOCKED, живший только как соглашение в документации) становятся управляемой config-версионируемой сущностью. entity_id = name (человекочитаемый, тот же паттерн, что entity_id=partner_id у billing_tariff/route_table). policy_template.category и billing_tariff.price_per_segment остаются свободной строкой без изменений — это слой управления/метаданных (name/regex/'учитывать в CDR'), не новая валидация в live-пайплайне policy-service/billing-service.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "regex", "count_in_cdr"],
+  "properties": {
+    "name": { "type": "string", "minLength": 1 },
+    "regex": {
+      "type": "string",
+      "description": "Опциональный regex для авто-классификации сообщения в эту категорию (пустая строка — категория назначается только явно, через policy_template.category, без авто-матчинга)."
+    },
+    "count_in_cdr": {
+      "type": "boolean",
+      "description": "Учитывать ли сообщения этой категории в офлайн-биллинговом CDR-экспорте (BACKOFFICE_ROADMAP.md — сам экспорт спланирован, не реализован)."
+    }
+  }
+}

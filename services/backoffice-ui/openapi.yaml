@@ -31,6 +31,7 @@ components:
         version: { type: integer, format: int64 }
         status: { type: string }
         created_at: { type: string, format: date-time }
+        payload_json: {}
     CreateVersionRequest:
       type: object
       required: [entity_type, entity_id, payload_json]
@@ -614,7 +615,11 @@ paths:
           schema: { type: string }
         - name: entity_id
           in: query
-          required: true
+          description: >-
+            Пусто/опущено — browse-режим, по одной последней активной версии
+            на каждый entity_id этого entity_type (Categories/CTN экраны).
+            Заполнено — история версий одной уже известной сущности
+            (ConfigView.vue, page_size/page_token применяются только здесь).
           schema: { type: string }
         - name: page_size
           in: query

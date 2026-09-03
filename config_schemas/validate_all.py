@@ -36,6 +36,8 @@ SCHEMA_FOR_PREFIX = {
     "number_range": "number_range.schema.json",
     "policy_template": "policy_template.schema.json",
     "subscriber_consent": "subscriber_consent.schema.json",
+    "category": "category.schema.json",
+    "ctn": "ctn.schema.json",
 }
 
 

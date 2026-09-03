@@ -173,20 +173,33 @@ func handleConfigArchiveVersion(client grpcv1.ConfigServiceClient) http.HandlerF
 }
 
 type configVersionResponse struct {
-	EntityType string `json:"entity_type"`
-	EntityID   string `json:"entity_id"`
-	Version    int64  `json:"version"`
-	Status     string `json:"status"`
-	CreatedAt  string `json:"created_at,omitempty"`
+	EntityType  string          `json:"entity_type"`
+	EntityID    string          `json:"entity_id"`
+	Version     int64           `json:"version"`
+	Status      string          `json:"status"`
+	CreatedAt   string          `json:"created_at,omitempty"`
+	PayloadJSON json.RawMessage `json:"payload_json,omitempty"`
 }
 
+// toConfigVersionResponse — CONFIG_ENTITY_TYPE_CATEGORY/_CTN (luminous-
+// hugging-charm.md, BACKOFFICE_DESIGN_SPEC.md Экраны 32/23) нашли этот
+// пробел: ConfigVersionResponse.payload_json (internal_control.proto,
+// заведено ради read-modify-write в partner-self-service-api) уже реально
+// заполняется configuration-service'ом в GetActiveVersion/ListVersions/
+// CreateVersion, но ни разу не прокидывался дальше в HTTP-ответ — ни одна
+// сущность до сих пор не нуждалась в списке/просмотре payload'а без
+// сравнения через /diff (ConfigView.vue сегодня — черновик payload вручную,
+// без предзаполнения из списка). Category/CTN экраны — первые, которым
+// нужно РЕАЛЬНО показать содержимое активных версий в таблице, не только
+// entity_id/version/status — без этого поля список был бы бесполезен.
 func toConfigVersionResponse(v *grpcv1.ConfigVersionResponse) configVersionResponse {
 	return configVersionResponse{
-		EntityType: v.GetEntityType().String(),
-		EntityID:   v.GetEntityId(),
-		Version:    v.GetVersion(),
-		Status:     v.GetStatus(),
-		CreatedAt:  formatTimestamp(v.GetCreatedAt()),
+		EntityType:  v.GetEntityType().String(),
+		EntityID:    v.GetEntityId(),
+		Version:     v.GetVersion(),
+		Status:      v.GetStatus(),
+		CreatedAt:   formatTimestamp(v.GetCreatedAt()),
+		PayloadJSON: v.GetPayloadJson(),
 	}
 }
 

@@ -35,6 +35,7 @@ V026__iam_manage_permission.sql
 V027__credentials.sql
 V028__incident.sql
 V029__message_read_model_sandbox.sql
+V030__category_ctn_entity_types.sql
 ```
 
 Применить локально:
@@ -95,6 +96,10 @@ V028__incident.sql оставлен как есть — оба существо�
 ## V029 — luminous-hugging-charm.md Ф11, sandbox mode
 
 `messaging.message_read_model` получает `sandbox BOOLEAN NOT NULL DEFAULT false`. Без неё sandbox-сообщения (dry-run отправка через `X-Sandbox: true`, не тарифицируется, не уходит реальному оператору) в backoffice-ui/partner-api-отчётах и ClickHouse неотличимы от настоящего трафика — "почему за это сообщение никто не списал денег и не было реальной отправки" превращается в загадку при разборе инцидента. `lifecycle-writer` заполняет колонку напрямую из `IncomingMessage.sandbox` (единственный источник этого флага — устанавливается один раз на входе в pipeline, `partner-rest-receiver`) при создании строки read model из `incoming.messages` — не через `message.lifecycle`/`message-state-resolver`: тот флаг уже известен на этом, более раннем шаге, не меняется дальше по ходу пайплайна, и `incoming.messages` в любом случае приходит раньше первого `stage.completed`.
+
+## V030 — luminous-hugging-charm.md, BACKOFFICE_DESIGN_SPEC.md Экраны 32/23
+
+`category`/`ctn` добавлены в `config_versions_entity_type_check`. Категории сообщений (SERVICE/TRANSACTION/ADVERTISING/UNTEMPLATED/BLOCKED) раньше жили только как соглашение в документации (`BACKOFFICE_DESIGN_SPEC.md` §1.4) — не proto-enum, не CHECK-enum, не отдельная таблица; `policy_template.category`/`billing_tariff.price_per_segment` уже были свободной строкой (проверено кодом до миграции, не предположение). `category` становится управляемой config-версионируемой сущностью (name/regex/count_in_cdr) — слой метаданных поверх уже свободного поля, **не** новая валидация в `policy-service`/`billing-service` (они продолжают принимать любую строку). Существующие 5 значений засеяны как первые активные версии, чтобы ничего не сломалось. `ctn` — новая сущность для офлайн телеком-биллинга, привязка `(partner_id, category) -> ctn/service_name`; сам CDR-экспорт (генерация файла для сверки с оператором) спланирован в `BACKOFFICE_ROADMAP.md`, не реализован здесь.
 
 ## Найдено только на этапе реального DDL (не было видно на уровне концептуальной спеки)
 

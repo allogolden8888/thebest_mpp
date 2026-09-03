@@ -179,6 +179,38 @@ func (s *Store) ListVersions(ctx context.Context, entityType validate.EntityType
 	return out, nextToken, rows.Err()
 }
 
+// ListActiveVersionsByType — BACKOFFICE_DESIGN_SPEC.md Экраны 32/23
+// (Categories/CTN): ListVersions выше требует уже известный entity_id
+// (история версий ОДНОЙ сущности) — для "список всех категорий" нужен
+// противоположный срез, одна (последняя активная) строка на каждый
+// entity_id этого entity_type. DISTINCT ON (entity_id) ... ORDER BY
+// entity_id, id DESC — если у entity_id несколько версий, берёт
+// максимальный id среди статуса 'active' (обычно ровно один активный на
+// entity_id, но не гарантировано уникальным индексом на уровне схемы —
+// не падает, если вдруг окажется больше одного).
+func (s *Store) ListActiveVersionsByType(ctx context.Context, entityType validate.EntityType) ([]ConfigVersion, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT ON (entity_id) id, entity_type, entity_id, version, status, created_at, created_by, payload
+		FROM config.config_versions
+		WHERE entity_type = $1 AND status = 'active'
+		ORDER BY entity_id, id DESC
+	`, string(entityType))
+	if err != nil {
+		return nil, fmt.Errorf("list active versions by type: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ConfigVersion
+	for rows.Next() {
+		var v ConfigVersion
+		if err := rows.Scan(&v.ID, &v.EntityType, &v.EntityID, &v.Version, &v.Status, &v.CreatedAt, &v.CreatedBy, &v.Payload); err != nil {
+			return nil, fmt.Errorf("list active versions by type: scan: %w", err)
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
 // GetVersionByNumber — luminous-hugging-charm.md Фаза 10 (DiffVersions).
 // В отличие от GetActiveVersion, здесь конкретный номер версии, не только
 // текущая активная — diff по определению сравнивает ДВЕ версии, обычно

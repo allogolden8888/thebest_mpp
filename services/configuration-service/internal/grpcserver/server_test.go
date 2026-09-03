@@ -57,6 +57,16 @@ func (f *fakeStore) ListVersions(ctx context.Context, entityType validate.Entity
 	return f.created, "", nil
 }
 
+func (f *fakeStore) ListActiveVersionsByType(ctx context.Context, entityType validate.EntityType) ([]store.ConfigVersion, error) {
+	var out []store.ConfigVersion
+	for _, v := range f.versions {
+		if v.EntityType == entityType && v.Status == "active" {
+			out = append(out, v)
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeStore) ArchiveVersion(ctx context.Context, entityType validate.EntityType, entityID string, version int32) (store.ConfigVersion, error) {
 	v := f.versions[entityID]
 	v.Status = "archived"
@@ -363,5 +373,28 @@ func TestDiffVersionsRejectsNonPositiveVersionNumbers(t *testing.T) {
 	})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("ожидали codes.InvalidArgument, получили %v", status.Code(err))
+	}
+}
+
+func TestListVersionsWithEmptyEntityIdUsesBrowseMode(t *testing.T) {
+	fs := newFakeStore()
+	srv := New(fs, alwaysValid{})
+	ctx := context.Background()
+
+	if _, err := srv.CreateVersion(ctx, &grpcv1.CreateVersionRequest{
+		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_CATEGORY, EntityId: "SERVICE",
+		PayloadJson: []byte(`{}`), RequestedBy: "tester",
+	}); err != nil {
+		t.Fatalf("CreateVersion: %v", err)
+	}
+
+	resp, err := srv.ListVersions(ctx, &grpcv1.ListVersionsRequest{
+		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_CATEGORY, EntityId: "",
+	})
+	if err != nil {
+		t.Fatalf("ListVersions (browse mode): %v", err)
+	}
+	if len(resp.GetVersions()) != 1 || resp.GetVersions()[0].GetEntityId() != "SERVICE" {
+		t.Fatalf("ожидали одну запись entity_id=SERVICE, получили %+v", resp.GetVersions())
 	}
 }

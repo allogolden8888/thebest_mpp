@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mpp/config_schemas/ctn.schema.json",
+  "title": "CTN config payload (ConfigEntityType.CONFIG_ENTITY_TYPE_CTN)",
+  "description": "BACKOFFICE_DESIGN_SPEC.md Экран 23. CTN (termination number) — биллинговый идентификатор для офлайн телеком-биллинга: привязка (partner_id, category) -> ctn/service_name. Когда сообщение партнёра совпадает с шаблоном заданной категории, и у партнёра есть CTN для этой категории, офлайн-биллинговый экспорт (BACKOFFICE_ROADMAP.md — спланирован, не реализован в этой версии) генерирует CDR-строку (CTN, service_name, сумма списания). entity_id — составной ключ '{partner_id}:{category}' (тот же композитный-entity_id паттерн, что уже принят для subscriber_consent).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ctn", "partner_id", "category", "service_name"],
+  "properties": {
+    "ctn": { "type": "string", "minLength": 1 },
+    "partner_id": { "type": "string", "minLength": 1 },
+    "category": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Имя категории (см. category.schema.json) — не FK на Postgres-таблицу (Categories сама версионируется через config-version механизм, не отдельная реляционная таблица), ссылочная целостность не проверяется на уровне схемы, тот же класс решения, что sender_id в policy_template (V024)."
+    },
+    "service_name": { "type": "string", "minLength": 1 }
+  }
+}
