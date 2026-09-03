@@ -61,6 +61,22 @@ watch(
 const allMenuOptions = [
   { label: () => h(RouterLink, { to: "/config" }, () => "Configuration"), key: "config", adminOnly: false, permission: undefined as string | undefined },
   {
+    label: () => h(RouterLink, { to: "/categories" }, () => "Categories"),
+    key: "categories",
+    adminOnly: false,
+    // Тот же config:write gate на POST/архивации, что и ConfigView.vue —
+    // не гейтится клиентски (ConfigView.vue сам этого не делает для
+    // config:write, только для отдельного credentials:issue блока),
+    // GET-браузинг открыт любому валидному токену.
+    permission: undefined as string | undefined,
+  },
+  {
+    label: () => h(RouterLink, { to: "/ctns" }, () => "CTN"),
+    key: "ctns",
+    adminOnly: false,
+    permission: undefined as string | undefined,
+  },
+  {
     label: () => h(RouterLink, { to: "/execution-control" }, () => "Execution Control"),
     key: "execution-control",
     adminOnly: true,

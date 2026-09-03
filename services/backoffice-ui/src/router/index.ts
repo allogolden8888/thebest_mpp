@@ -10,6 +10,8 @@ const router = createRouter({
     { path: "/", redirect: "/config" },
     { path: "/login", name: "login", component: () => import("../views/LoginView.vue"), meta: { public: true } },
     { path: "/config", name: "config", component: () => import("../views/ConfigView.vue") },
+    { path: "/categories", name: "categories", component: () => import("../views/CategoriesView.vue") },
+    { path: "/ctns", name: "ctns", component: () => import("../views/CTNsView.vue") },
     { path: "/execution-control", name: "execution-control", component: () => import("../views/ExecutionControlView.vue") },
     { path: "/scheduler", name: "scheduler", component: () => import("../views/SchedulerForceCommandView.vue") },
     { path: "/messages", name: "messages", component: () => import("../views/MessagesView.vue") },
