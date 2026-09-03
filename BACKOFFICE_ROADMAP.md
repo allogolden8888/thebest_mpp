@@ -92,8 +92,25 @@
 Коротко по категориям:
 - **Уже закрыто, пересекается с экранами 1-20** (Senders/Patterns/Partners = Экраны 12/7/12, Roles = Экран 16 другим UI-паттерном, Blacklist numbers = Экран 13 c тем же архитектурным барьером на browse-список): Senders, Patterns, Partners, Roles, Blacklist numbers.
 - ~~Маленький новый backend~~ ✅ Partner Users (экран 35) готово — новые RPC в IamService + `/v1/iam/partner-portal-assignments` + экран.
-- **Требуют вашего решения, прежде чем оценивать объём** (см. полный список открытых вопросов в `BACKOFFICE_DESIGN_SPEC.md` ЧАСТЬ 3): CTN (экран 23, чужая для этой платформы концепция), Categories vs `policy_template` (экран 32), Spam Patterns vs уже существующие banwords (экран 37), Regex Patterns как отдельный реестр (экран 36), Admin users/LDAP (экран 33, вероятно уже закрыто Экраном 16).
-- **Реальная новая фича, оценивать отдельно**: Chat админ↔партнёр (экран 27, ничего похожего нет нигде), MT Sessions Disconnect (экран 30, новый write-путь), Requests (экран 25, тот же backend, что уже оценённая Модерация шаблонов — 3-4 дня), TPS/Statistics (экраны 29/31, тот же ClickHouse-источник, что Reports, другая нарезка), A2P/P2A/DLRs с raw SMPP-логами (экраны 38-40, уже оценено ~2-3 дня для per-PDU + отдельная фаза для P2A), Guides CMS (экран 41).
+- **Решено пользователем и реализовано**: ✅ CTN (экран 23) — реальная сущность для офлайн-биллинга. ✅ Categories (экран 32) — полная замена фиксированного словаря. Spam Patterns (экран 37) = Banwords (Экран 10), отдельно не строим.
+- **Решено пользователем, строится/спланировано**: Admin users (экран 33) — LDAP не нужен, полноценный локальный логин/пароль — см. раздел "Admin users" ниже. Regex Patterns (экран 36) → "Pattern Placeholders" — нужен, но требует изменения движка матчинга `policy-service`, отдельный заход. TPS-дашборд (экран 29) — подтверждён "сразу полная версия", фазовый план ниже. Chat (экран 27), A2P/P2A/DLRs per-PDU (экраны 38-40) — подтверждены нужными, в очереди отдельными заходами.
+- **Реальная новая фича, ещё не оценивалась пользователем**: MT Sessions Disconnect (экран 30, новый write-путь), Requests (экран 25, тот же backend, что уже оценённая Модерация шаблонов — 3-4 дня), Statistics (экран 31, тот же ClickHouse-источник, что Reports/TPS), Guides CMS (экран 41).
+
+### Admin users (экран 33) — локальный логин/пароль
+
+Полноценное управление аккаунтами прямо из бэкофиса: создать сотрудника с логином/паролем, LDAP/Keycloak — сильно позже. Новая таблица `iam.staff_accounts` (username/password_hash/display_name/active, `external_id`=username — нет Keycloak `sub`, брать неоткуда), новые RPC в `IamService` (`CreateStaffAccount`/`ListStaffAccounts`/`DeactivateStaffAccount`/`VerifyStaffCredentials`, bcrypt внутри `iam-service`, хеш никогда не пересекает границу процесса), новый `POST /v1/auth/login` в `backoffice-api` (единственный маршрут без JWT-мидлвари, подписывает токен новым RSA-keypair'ом, отдельным от общего dev-keypair остальных self-service API), новый `LoginView.vue` (форма вместо textarea) + `AdminUsersView.vue`.
+
+### Офлайн-биллинг / CDR-экспорт — план, не реализовано
+
+См. `BACKOFFICE_DESIGN_SPEC.md` Экран 32 "Офлайн-биллинг / CDR-экспорт" — использует уже реализованные Categories+CTN. Кратко: добавить `category` в `billing.billing_ledger` (сегодня не хранится, только транзитно в Kafka), генерация CDR — событийным Kafka-consumer'ом (не cron/polling — озвученная пользователем проблема объёма), каждое событие с активным CTN-маппингом сразу дописывается в текущий CDR-файл, ротируемый по времени/размеру.
+
+### TPS-дашборд (экран 29) — фазовый план, реализация не начата
+
+Пользователь выбрал "сразу полную версию с настраиваемыми виджетами", уже зная, что это крупная фича. Почти все нужные данные сегодня физически не существуют (метрики `operator-smpp-session-manager` размечены только по `tier`, у `operator-http-gateway` `/metrics` — заглушка, Prometheus нигде не поднят, `analytics.stage_events` не хранит category/sender/operator/gateway, счётчиков трафика на сессию и хранения конфигурации виджетов нет вообще) — поэтому "полная версия" реализуется последовательно, не одним заходом:
+1. **Инструментация**: разметить метрики по partner_id/sender_id/category, поднять реальные метрики в `operator-http-gateway`, добавить колонки в `analytics.stage_events`. Не поднимаем отдельный Prometheus — ClickHouse уже здесь.
+2. **Счётчики трафика на сессию**: `HINCRBY` на `operator_route:*` (аутбаунд), аналогичный счётчик у `smpp:partner_session:*` (инбаунд SMPP), короткоживущий rolling-counter для REST (у которого сегодня нет понятия сессии).
+3. **Backend-агрегация**: `GET /v1/dashboard/tps?group_by=...`, читает ClickHouse.
+4. **Хранение виджетов + фронтенд**: новая таблица `backoffice.dashboard_widgets` (per-admin), `vue-grid-layout` (новая зависимость — grid-layout библиотеки в проекте сегодня нет).
 
 ---
 
