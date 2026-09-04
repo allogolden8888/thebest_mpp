@@ -102,6 +102,8 @@ fn commit_watermark(consumer: &StreamConsumer, key: &PartitionKey, next_offset: 
 
 pub const INPUT_TOPIC: &str = "stage.policy";
 pub const OUTPUT_TOPIC: &str = "stage.completed";
+/// Топик для записей, которые невозможно разобрать (см. process_one_record).
+pub const DLQ_TOPIC: &str = "stage.policy.dlq";
 
 #[async_trait]
 pub trait MessageContextStore: Send + Sync {
@@ -283,18 +285,55 @@ async fn process_one_record(
     let command = match StageExecuteCommand::decode(payload) {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!("не удалось декодировать StageExecuteCommand: {e}");
-            return false;
+            // ИЗМЕРЕНО 2026-09-04: раньше здесь (и в двух ветках ниже) был
+            // `return false` — офсет не коммитился в расчёте на
+            // переобработку. Но ни одна из трёх причин НЕ временная: битый
+            // protobuf останется битым, отсутствующий extension не появится,
+            // удалённый msgctx не вернётся. А OffsetTracker двигает коммит
+            // только сплошным watermark'ом, поэтому ОДНА такая запись пиннит
+            // офсет навсегда. Замерено на живой системе: policy-service
+            // застрял на офсете 406353 при LOG-END 457357 — лаг 51004, и
+            // после каждого рестарта весь хвост перечитывался заново,
+            // производя дубликаты stage.completed и разогревая Kafka/Redis/
+            // ClickHouse перед следующим замером.
+            //
+            // Декодировать не удалось — message_id неизвестен, терминальное
+            // событие собрать не из чего. Отправляем сырой payload в DLQ
+            // (топик уже существует в infra/kafka, но до сих пор не
+            // использовался) и продвигаем офсет.
+            tracing::error!("не удалось декодировать StageExecuteCommand, payload -> {DLQ_TOPIC}: {e}");
+            let record: FutureRecord<'_, str, [u8]> = FutureRecord::to(DLQ_TOPIC).payload(payload);
+            if let Err((send_err, _)) = producer.send(record, Duration::from_secs(5)).await {
+                tracing::error!("не удалось опубликовать в {DLQ_TOPIC}: {send_err}");
+                return false; // сам DLQ недоступен — это уже transient, повтор осмыслен
+            }
+            return true;
         }
     };
+
+    // Для двух ветвей ниже message_id известен, поэтому просто пропустить
+    // запись нельзя: pipeline-engine ждёт именно POLICY и без события
+    // сообщение зависнет до истечения TTL. Завершаем его явно —
+    // терминальным REJECTED с говорящим reason_code, как и любой другой
+    // отказ политики.
     if !matches!(command.stage_extension, Some(StageExtension::Policy(_))) {
-        tracing::error!("stage.policy команда без PolicyExtension, пропущена");
-        return false;
+        tracing::error!("stage.policy команда без PolicyExtension для {} — завершаем REJECTED", command.message_id);
+        let event = build_event(&command, PolicyOutcome {
+            outcome: "REJECTED",
+            category: "BLOCKED".into(),
+            reason_code: Some("POLICY_EXTENSION_MISSING"),
+        });
+        return publish_event(producer, &event).await;
     }
 
     let Some(ctx) = context_store.fetch(&command.message_id).await else {
-        tracing::error!("не удалось получить MessageContext для {}", command.message_id);
-        return false; // не коммитим — at-least-once, переобработается
+        tracing::error!("не удалось получить MessageContext для {} — завершаем REJECTED", command.message_id);
+        let event = build_event(&command, PolicyOutcome {
+            outcome: "REJECTED",
+            category: "BLOCKED".into(),
+            reason_code: Some("MESSAGE_CONTEXT_MISSING"),
+        });
+        return publish_event(producer, &event).await;
     };
 
     let event = {
@@ -302,6 +341,14 @@ async fn process_one_record(
         handle_command(&command, &ctx, &policy.ruleset, &policy.templates, &policy.banwords, &mut runtime, now_tashkent())
     };
 
+    publish_event(producer, &event).await
+}
+
+/// Публикация `StageCompletedEvent` + решение о коммите офсета. Вынесено,
+/// чтобы штатный путь и терминальные отказы выше шли ровно одним кодом:
+/// не доставленное событие — единственная здесь ПО-НАСТОЯЩЕМУ временная
+/// ошибка, и только она оставляет офсет некоммиченным.
+async fn publish_event(producer: &FutureProducer, event: &StageCompletedEvent) -> bool {
     let bytes = event.encode_to_vec();
     let record = FutureRecord::to(OUTPUT_TOPIC).key(&event.message_id).payload(&bytes);
     if let Err((e, _)) = producer.send(record, Duration::from_secs(5)).await {

@@ -95,9 +95,40 @@ class AdaptiveThreadPoolCalibratorTest {
         // windowDurationMs=0 — окно калибровки истекает мгновенно.
         AdaptiveThreadPoolCalibrator calibrator = new AdaptiveThreadPoolCalibrator(pool, 512, 0, 0);
 
-        calibrator.recordTaskLatency(10);
+        // >=20 сэмплов — минимум, при котором LatencyWindow отдаёт значимый
+        // p95. С меньшим числом фиксироваться нечем (см. следующий тест).
+        for (int i = 0; i < 25; i++) {
+            calibrator.recordTaskLatency(10);
+        }
 
         assertTrue(calibrator.isLocked(), "истечение окна должно фиксировать калибратор даже без единого шага деградации");
+    }
+
+    @Test
+    void неФиксируетсяПоИстечениюОкнаЕслиТрафикаНеБыло() {
+        // Регрессия на реальную находку (2026-09-04): maybeTick() вызывается
+        // ТОЛЬКО из recordTaskLatency(), поэтому окно могло целиком пройти на
+        // простое — и первый же вызов после начала нагрузки фиксировал пул, не
+        // собрав ни одного сэмпла. В логе это видно как нетронутый
+        // Double.MAX_VALUE: "calibrated: 32 threads (p95=1.7976931348623157E308ms)".
+        // Из-за этого результат зависел от того, попал ли трафик в стартовое
+        // окно: три прогона одной сборки дали 32, 192 и 72 потока.
+        ThreadPoolExecutor pool = newPool();
+        AdaptiveThreadPoolCalibrator calibrator = new AdaptiveThreadPoolCalibrator(pool, 512, 0, 0);
+
+        // Меньше порога значимости — валидного p95 нет.
+        for (int i = 0; i < 5; i++) {
+            calibrator.recordTaskLatency(10);
+        }
+
+        assertTrue(!calibrator.isLocked(),
+            "без единого валидного p95 фиксировать нечего — окно должно отсчитываться заново");
+
+        // Как только данные реально набрались — фиксация происходит штатно.
+        for (int i = 0; i < 25; i++) {
+            calibrator.recordTaskLatency(10);
+        }
+        assertTrue(calibrator.isLocked(), "с набранными сэмплами истечение окна обязано зафиксировать пул");
     }
 
     @Test
