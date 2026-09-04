@@ -49,11 +49,36 @@ public final class AdaptiveThreadPoolCalibrator {
     private long lastTickMs;
 
     public AdaptiveThreadPoolCalibrator(ThreadPoolExecutor pool, int ceiling, long windowDurationMs, long tickIntervalMs) {
+        this(pool, ceiling, windowDurationMs, tickIntervalMs, FLOOR);
+    }
+
+    /**
+     * Вариант с явным полом пула.
+     *
+     * <p>Зачем понадобился (замер 300 TPS, 2026-09-04): критерий калибровки —
+     * p95 латентности ОДНОЙ задачи. Но узкое место ниже по потоку общее (одна
+     * SMPP-сессия к оператору), поэтому рост конкурентности закономерно
+     * увеличивает время каждой отдельной задачи, хотя суммарная пропускная
+     * способность при этом растёт. На таком профиле критерий систематически
+     * тянет пул ВНИЗ: живой сервис зафиксировался на {@link #FLOOR}=32
+     * ("thread pool calibrated: 32 threads (p95=82.0ms)"), что по закону
+     * Литтла даёт потолок 32/0.082 ≈ 390 сообщений/с. При целевых 300/с это
+     * загрузка 77% — очередь и хвост неизбежны, а любой дрейф латентности
+     * оператора роняет ёмкость ниже входящего потока. Отсюда же и
+     * невоспроизводимость: два прогона одной конфигурации дали p99 303мс и
+     * 1192мс.
+     *
+     * <p>Пол не отключает калибровку — она по-прежнему может расти вверх и
+     * фиксироваться на деградации; он лишь не даёт ей опуститься ниже
+     * значения, заведомо достаточного для целевого потока. Считать по
+     * Литтлу: floor >= target_tps * task_latency, с запасом на всплески.
+     */
+    public AdaptiveThreadPoolCalibrator(ThreadPoolExecutor pool, int ceiling, long windowDurationMs, long tickIntervalMs, int floor) {
         this.pool = pool;
         this.ceiling = ceiling;
         this.windowDurationMs = windowDurationMs;
         this.tickIntervalMs = tickIntervalMs;
-        this.currentSize = Math.min(FLOOR, ceiling);
+        this.currentSize = Math.min(Math.max(1, floor), ceiling);
         this.lastGoodSize = this.currentSize;
         resize(this.currentSize);
         this.calibrationStartMs = System.currentTimeMillis();

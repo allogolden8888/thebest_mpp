@@ -199,7 +199,15 @@ public final class KafkaIo {
             pool,
             envInt("DELIVERY_CONCURRENCY_CEILING", 512),
             envInt("THREAD_POOL_CALIBRATION_WINDOW_MS", 120_000),
-            envInt("THREAD_POOL_CALIBRATION_TICK_MS", 10_000));
+            envInt("THREAD_POOL_CALIBRATION_TICK_MS", 10_000),
+            // DELIVERY_CONCURRENCY снова читается. С появлением калибратора эта
+            // переменная перестала использоваться где-либо в коде, но осталась
+            // в docker-compose.yml с комментариями, описывающими её как
+            // рабочую ручку — то есть висела мёртвой настройкой, которая
+            // выглядела живой. Возвращаем ей исходный смысл: минимальная
+            // конкурентность обработки. Дефолт FLOOR сохраняет прежнее
+            // поведение, если переменная не задана.
+            envInt("DELIVERY_CONCURRENCY", AdaptiveThreadPoolCalibrator.FLOOR));
         try {
             while (running.get()) {
                 ConsumerRecords<String, byte[]> records = consumer.poll(Duration.ofSeconds(1));

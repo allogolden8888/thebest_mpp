@@ -99,4 +99,39 @@ class AdaptiveThreadPoolCalibratorTest {
 
         assertTrue(calibrator.isLocked(), "истечение окна должно фиксировать калибратор даже без единого шага деградации");
     }
+
+    @Test
+    void полПулаНеОпускаетсяНижеЗаданногоДажеПриДеградацииЛатентности() {
+        // Регрессия на реальную находку (замер 300 TPS, 2026-09-04): критерий
+        // калибровки — p95 ОДНОЙ задачи, а узкое место ниже по потоку общее,
+        // поэтому рост конкурентности всегда удлиняет отдельную задачу и
+        // калибратор откатывался в FLOOR=32. При floor=128 откат обязан
+        // остановиться на 128, а не уйти в 32.
+        ThreadPoolExecutor pool = newPool();
+        AdaptiveThreadPoolCalibrator calibrator =
+            new AdaptiveThreadPoolCalibrator(pool, 512, 10_000, 0, 128);
+
+        assertEquals(128, calibrator.currentSize(), "старт должен быть с заданного пола, не с FLOOR");
+
+        // Первый тик задаёт bestP95, следующий — резкая деградация: откат+lock.
+        for (int i = 0; i < 25; i++) {
+            calibrator.recordTaskLatency(10);
+        }
+        for (int i = 0; i < 25; i++) {
+            calibrator.recordTaskLatency(5000);
+        }
+
+        assertTrue(calibrator.isLocked(), "резкая деградация должна зафиксировать калибратор");
+        assertTrue(calibrator.lastGoodSize() >= 128,
+            "откат не должен опускать пул ниже пола, получено: " + calibrator.lastGoodSize());
+        assertTrue(pool.getCorePoolSize() >= 128, "реальный пул тоже не должен уйти ниже пола");
+    }
+
+    @Test
+    void полОграниченПотолком() {
+        ThreadPoolExecutor pool = newPool();
+        AdaptiveThreadPoolCalibrator calibrator =
+            new AdaptiveThreadPoolCalibrator(pool, 64, 10_000, 0, 256);
+        assertEquals(64, calibrator.currentSize(), "пол выше потолка должен быть срезан потолком");
+    }
 }

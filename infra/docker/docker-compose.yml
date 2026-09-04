@@ -335,7 +335,15 @@ services:
       # обрабатывается ~50мс, то есть реально нужно ~15 одновременных, а не
       # 128 — маленькая пачка ничего не теряет в пропускной способности.
       KAFKA_MAX_POLL_RECORDS: "256"
-      BILLING_CONCURRENCY: "128"
+      # 2026-09-04, ИЗМЕРЕНО: эта переменная снова читается (KafkaIo.java) —
+      # теперь как ПОЛ пула калибратора. Значение 32 = прежний хардкод FLOOR
+      # и оно же лучшее по замеру. Попытка поднять пол до 128 (калибратор
+      # дорос до 192) дала РЕГРЕССИЮ: DELIVERY p50 134 -> 429мс, p99 303 ->
+      # 4307мс на тех же 300 TPS. Причина: узкое место ниже по потоку —
+      # общее (одна SMPP-сессия к оператору), поэтому лишняя конкурентность
+      # не добавляет ёмкости, а лишь переносит очередь и удлиняет каждую
+      # задачу. Не поднимать без нового замера.
+      BILLING_CONCURRENCY: "32"
     # 2026-08-13 1500 TPS push (AMD, 12 CPU/15GB) — Dockerfile's ENTRYPOINT
     # hardcodes -Xms512m -Xmx1g; bumped to 3g there for 450-thread headroom.
     # 2026-08-17: 3g contributed to Kafka's OOMKilled=true on THIS machine
@@ -414,7 +422,15 @@ services:
       # обрабатывается ~50мс, то есть реально нужно ~15 одновременных, а не
       # 128 — маленькая пачка ничего не теряет в пропускной способности.
       KAFKA_MAX_POLL_RECORDS: "256"
-      DELIVERY_CONCURRENCY: "128"
+      # 2026-09-04, ИЗМЕРЕНО: эта переменная снова читается (KafkaIo.java) —
+      # теперь как ПОЛ пула калибратора. Значение 32 = прежний хардкод FLOOR
+      # и оно же лучшее по замеру. Попытка поднять пол до 128 (калибратор
+      # дорос до 192) дала РЕГРЕССИЮ: DELIVERY p50 134 -> 429мс, p99 303 ->
+      # 4307мс на тех же 300 TPS. Причина: узкое место ниже по потоку —
+      # общее (одна SMPP-сессия к оператору), поэтому лишняя конкурентность
+      # не добавляет ёмкости, а лишь переносит очередь и удлиняет каждую
+      # задачу. Не поднимать без нового замера.
+      DELIVERY_CONCURRENCY: "32"
     # Оценка (estimate) — Dockerfile ENTRYPOINT теперь -XX:MaxRAMPercentage=75,
     # структурно тот же профиль, что и billing-service (тот же 128-поточный
     # пул, тот же Redis-клиент), так что взят тот же mem_limit по аналогии, а
@@ -498,6 +514,37 @@ services:
   # полностью вычитывает message-state.changelog (restore), только потом
   # readyz=true — первый реальный прогон этого transactional-пути против
   # настоящего Kafka (раньше не проверялся живьём, см. README).
+  # 2026-09-04, РЕАЛЬНАЯ НАХОДКА нагрузочного прогона: этого сервиса здесь
+  # не было НИКОГДА — ни в одном из 38 контейнеров, что поднимались раньше.
+  # А граф пайплайна (config_schemas/examples/pipeline.valid.json) на
+  # DELIVERY:SUCCEEDED ведёт в n6_reconciliation, и только его исходы
+  # терминальны (все next = null). Без консьюмера stage.delivery-reconciliation
+  # НИ ОДНО сообщение не доходило до конца пайплайна: pipeline-engine никогда
+  # не получал Decision::Terminal, значит никогда не звал finalize_pipeline,
+  # значит exec:{message_id} жил все ~25 часов своего TTL-бэкстопа.
+  #
+  # Измерено на живой системе: 373 821 сообщение в топике при НУЛЕ consumer
+  # group'ов, 1.48 млн ключей и 1.16ГБ в Runtime Redis (у которого при этом
+  # maxmemory=0/noeviction — отдельная дыра, лимита нет вовсе). Это и есть
+  # механизм деградации замеров по ходу сессии: память -> своп -> хвосты
+  # латентности. Один и тот же конфиг давал e2e p99 303мс, потом 1192мс,
+  # потом 16267мс — по мере разрастания Redis.
+  delivery-reconciliation-service:
+    image: mpp/delivery-reconciliation-service:test
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: mpp
+      POSTGRES_USER: mpp
+      POSTGRES_PASSWORD: mpp_local_dev
+    mem_limit: 1g
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
   message-state-resolver:
     image: mpp/message-state-resolver:test
     ports:
@@ -863,16 +910,50 @@ services:
       - "9113:9090"
       - "8084:8080"
     environment:
+      # luminous-hugging-charm.md, BACKOFFICE_DESIGN_SPEC.md Экран 33
+      # "Admin users" — отдельный keypair только для backoffice-api (не
+      # общий dev-keypair partner-self-service-api/billing-self-service-api/
+      # compliance-api, см. internal/auth/issuer.go package doc): backoffice-
+      # api теперь сам ВЫДАЁТ токены (POST /v1/auth/login), не только
+      # валидирует чужие. infra/docker/dev-secrets/backoffice_jwt_*.pem.
       JWT_PUBLIC_KEY_PEM: |
         -----BEGIN PUBLIC KEY-----
-        MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAr6ChhBR6hStwLBcl/n3z
-        N+mFv4S7ocHFZaTdbD5vLRfOcIPIKrXs5Oaf6AKIr2JjKSGI2JWbpprDRw2P4ZK9
-        g6USZ9VYvudEh9I+In7x9ds+4TNdaQTh8OKZWq6mFF5Kl6aLuwd5h6er0GoDRDip
-        jrD61NZKZp+gMk6CkH5KbiK0sy3Yp/Ip0ELbMkzhJi8nw2Rd5qVbI2wzoi+h6/wb
-        Ml4tgq78NFWc4GB96pWLZIotzmZypbqTCOzwDqf5DBGYABHb/2OOF8jmXaodXiWk
-        h6xvXwJXLNNqjAE6Dy5OfO0RYWHhm7qQ+62pzOO1Kj63YDr7FKydtVswNUmIfgj9
-        KwIDAQAB
+        MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuqsDzJV7ThbLoEL8tXZK
+        6ju4wl8KVde2t6Jv9jjjWEink7Wzaowx9KULEl27302HXrjB5LWQj6Jzx/WN0277
+        vHQJObEWKEZZD5GYJiRiCr9npHcoLTfuWsmdWBfDUFYtpl5WPYIXPKS+Tp1YiSZR
+        vJ5t5Xlw9qxjslO2AWr5wWiLu2LJ3plblScX4Z3zBgADpSbsKtPSujPSuXNjPhcY
+        hAeFUcUjgJaJSlhtDMrQmCMwhjzsthLN4HNdVX8WmNCkAG4LN87g+l4jZvpF7WdE
+        UE2Zc/lYzFrcJgMBjth0EO6JXOMHtBaXc/eQ96CsQBv4rFbe2VJ5q+ZD8qKgGYW3
+        IQIDAQAB
         -----END PUBLIC KEY-----
+      JWT_PRIVATE_KEY_PEM: |
+        -----BEGIN RSA PRIVATE KEY-----
+        MIIEogIBAAKCAQEAuqsDzJV7ThbLoEL8tXZK6ju4wl8KVde2t6Jv9jjjWEink7Wz
+        aowx9KULEl27302HXrjB5LWQj6Jzx/WN0277vHQJObEWKEZZD5GYJiRiCr9npHco
+        LTfuWsmdWBfDUFYtpl5WPYIXPKS+Tp1YiSZRvJ5t5Xlw9qxjslO2AWr5wWiLu2LJ
+        3plblScX4Z3zBgADpSbsKtPSujPSuXNjPhcYhAeFUcUjgJaJSlhtDMrQmCMwhjzs
+        thLN4HNdVX8WmNCkAG4LN87g+l4jZvpF7WdEUE2Zc/lYzFrcJgMBjth0EO6JXOMH
+        tBaXc/eQ96CsQBv4rFbe2VJ5q+ZD8qKgGYW3IQIDAQABAoIBAEytApp+rG+fHXVv
+        Dq7bMFqWvYXZ1Dz+pqc3qhXRuFEDRxJ9iH0zqTF8udeJeSp4hip6aeqwSfk2GakB
+        TIiVBgKbB08TVq6kduDWRVElkMApb0E3UOGCH/5a4q7U0/2j6Ix2I6aQUUsvwJw6
+        NavgeaKo0St5ftVUan9Ns21Rq9Wtj0zwTJfzAGuB3PQx8yhyM+VQ+8iF+Jgn5Q96
+        2dKSsU3vVWl0dSrCYRfbvu+p35bNRBahea2eFvlHX5irQYNC6ztv7BftbTvAP9Hx
+        KxhIPECVBzJdxHQkLH/fpr4IM6oDHdRvHzML3PUMsOGyl77IwGW/GwjbWS6U7tCD
+        rZ9gnqECgYEA8+wCUNXoX4GKZ/NFHBVuT/AKJsCx7scBuBVqnDN/XkVonal/4zLf
+        Dy3eZrAiwqiAWef0MnFId/tYQlojRibinc9dKY8hxoLNQJtAy8cuV0Mlngcw6wZ4
+        bX7K0QqMRR0jX4qs/RbJq1wz0QVHDUTX5Hf+aLHh+yjn+y8qif8xPn8CgYEAw+k/
+        NmNNn88e7VgHXfQ+9vbfcUJAT4qCPWn8+R/tbgJciKEZ+fCGwDuyyjp9dVGT0tp8
+        ADE9oAANjimWJQ6bV6+g5nQEKava4AlC+hj0CG5yY0aydCU0Dprue9r1qtxzEUCg
+        0cOdQoIHZvOcQECRTh0SFSfpSRZL+9+riEQJel8CgYAo3NnKdvtVvJrWLT/fo4t2
+        Ys0gjtmAGeCk2RmiD1KAFXqgJvwgsK4DmfiPFWTNXXMbHKuhI68zQm0XuIf+QZdn
+        Pozp4GuVGOaPszKYsMaHod0Uazn7tXrJRRtvB6hWD7qUT+QJBh9E0M5xbsPnaigM
+        wzlgiqRD8idiwhULRzAVuwKBgBeQl8zn9u9RD4xG+WPgvC4ilc/ewzOOGopelFI2
+        9+0ylYTNs/0vZFX9GE1g6bRR4rELHL09Lwdu2jKOaAP/FMpgUr9FlzaX+FTYaFkC
+        5V+aQWIVn+N+khtroWH+fWxW5fReTLnOiLz2PQOyK8pCufemYYVv7oyfBPa/+bcD
+        UAyLAoGAVwUUYrykvDafCoznTz5/KWum617mJYi+lGHPe4kYVW4W3j0Ovicw4nSA
+        ieU07/G4w+wVEQjxFU+HbxH/6YEYFXQuBfKqqiQwWcDfyyvZ5j1Y969Ta1+JUt9E
+        R+1oW0zn1rw2J62+e6g/S8AYwQpZxf4F/OhOcbLd+XIhmm08Zpo=
+        -----END RSA PRIVATE KEY-----
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: mpp
