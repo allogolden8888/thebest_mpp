@@ -1,0 +1,20 @@
+<clickhouse>
+    <!-- ИЗМЕРЕНО 2026-09-04: на 8-ядерной VM с 7.75ГБ ClickHouse держал 803
+         потока и 872МБ RSS БЕЗ единого лимита, из них 486МБ ушло в своп —
+         больше, чем любой сервис горячего пути. При этом здесь он только
+         аналитический сток (analytics-writer), не участник доставки
+         сообщений. Дефолты ClickHouse рассчитаны на выделенный сервер и на
+         таком стенде вытесняют в своп Kafka и сами stage-сервисы, а major
+         faults после этого выглядят как "паузы GC" в чужих логах. -->
+    <max_server_memory_usage>805306368</max_server_memory_usage>
+    <max_thread_pool_size>256</max_thread_pool_size>
+    <background_pool_size>16</background_pool_size>
+    <background_schedule_pool_size>8</background_schedule_pool_size>
+    <background_common_pool_size>8</background_common_pool_size>
+    <background_message_broker_schedule_pool_size>4</background_message_broker_schedule_pool_size>
+    <background_move_pool_size>2</background_move_pool_size>
+    <background_fetches_pool_size>2</background_fetches_pool_size>
+    <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>
+    <mark_cache_size>134217728</mark_cache_size>
+    <uncompressed_cache_size>0</uncompressed_cache_size>
+</clickhouse>

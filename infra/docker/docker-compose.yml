@@ -187,7 +187,7 @@ services:
       # загруженной машине: e2e DELIVERY p50 ушёл с ~1.5с в 78с.
       # Возвращаем 2G без явных GC-опций до тех пор, пока не будет решена
       # исходная проблема — нехватка памяти на VM.
-      KAFKA_HEAP_OPTS: "-Xmx2G -Xms2G"
+      KAFKA_HEAP_OPTS: "-Xmx1G -Xms1G"
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
       interval: 10s
@@ -407,7 +407,10 @@ services:
     # -Xmx1500m. Нужна повторная 1500 TPS проверка (см.
     # LATENCY_INVESTIGATION_1500TPS.md) с реальным mem_limit, а не
     # безлимитным контейнером, прежде чем считать это финальным числом.
-    mem_limit: 2g
+    # 2026-09-04: MaxRAMPercentage=75 от щедрого лимита давал JVM право
+    # растить heap до сбора — на четырёх Java-сервисах это 2.3ГБ RSS при
+    # 289МБ свободной памяти на VM. Урезано под реальный живой набор.
+    mem_limit: 1g
     # Реальная находка (нагрузочный прогон): Main.java теперь принудительно
     # System.exit(1) на фатальной ошибке consumer-цикла (иначе HealthServer
     # держит процесс "живым" не-daemon потоком с /healthz=200 у мёртвого
@@ -479,7 +482,10 @@ services:
     # не из отдельной калибровки этого сервиса. Нужна отдельная 1500 TPS
     # проверка (см. LATENCY_INVESTIGATION_1500TPS.md) под этим лимитом, а не
     # безлимитным контейнером, прежде чем считать финальным.
-    mem_limit: 2g
+    # 2026-09-04: MaxRAMPercentage=75 от щедрого лимита давал JVM право
+    # растить heap до сбора — на четырёх Java-сервисах это 2.3ГБ RSS при
+    # 289МБ свободной памяти на VM. Урезано под реальный живой набор.
+    mem_limit: 1g
     depends_on:
       kafka:
         condition: service_healthy
@@ -543,7 +549,10 @@ services:
     # чувствительна к CPU/memory starvation — см. комментарий про 300 воркер-
     # потоков выше). Не откалибровано отдельным нагрузочным прогоном под
     # этим лимитом — см. LATENCY_INVESTIGATION_1500TPS.md, нужна проверка.
-    mem_limit: 1.5g
+    # 2026-09-04: MaxRAMPercentage=75 от щедрого лимита давал JVM право
+    # растить heap до сбора — на четырёх Java-сервисах это 2.3ГБ RSS при
+    # 289МБ свободной памяти на VM. Урезано под реальный живой набор.
+    mem_limit: 1g
     depends_on:
       kafka:
         condition: service_healthy
@@ -580,7 +589,10 @@ services:
       POSTGRES_DB: mpp
       POSTGRES_USER: mpp
       POSTGRES_PASSWORD: mpp_local_dev
-    mem_limit: 1g
+    # 2026-09-04: MaxRAMPercentage=75 от щедрого лимита давал JVM право
+    # растить heap до сбора — на четырёх Java-сервисах это 2.3ГБ RSS при
+    # 289МБ свободной памяти на VM. Урезано под реальный живой набор.
+    mem_limit: 768m
     depends_on:
       postgres:
         condition: service_healthy
@@ -1059,6 +1071,12 @@ services:
       # Без этого пользователь mpp не может создавать таблицы — а
       # analytics-writer создаёт схему сам при старте (createTableDDL).
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    # См. clickhouse-config/low-memory.xml — урезание пулов/кэшей под
+    # локальный стенд. mem_limit как жёсткий backstop: без него контейнер
+    # ничем не ограничен (docker inspect Memory=0).
+    volumes:
+      - ./clickhouse-config/low-memory.xml:/etc/clickhouse-server/config.d/low-memory.xml:ro
+    mem_limit: 1g
     ulimits:
       nofile:
         soft: 262144
