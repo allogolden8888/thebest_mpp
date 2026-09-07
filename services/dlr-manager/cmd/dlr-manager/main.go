@@ -102,6 +102,17 @@ func main() {
 	}
 	defer correlationStore.Close()
 
+	// Быстрый путь корреляции в Runtime Redis (пишется delivery-service
+	// тем же round trip'ом, которым он и так пишет dlvsubmit:*) — см.
+	// correlation.Store.Lookup. Не смертельно, если не поднялся: Lookup
+	// без него работает ровно как раньше, только по PostgreSQL, поэтому
+	// здесь log.Printf, а не log.Fatalf.
+	if err := correlationStore.EnableFastPath(buildRedisRuntimeURL(), func(err error) {
+		log.Printf("dlr-manager: %v", err)
+	}); err != nil {
+		log.Printf("dlr-manager: быстрый путь корреляции не включён (%v) — работаем только по PostgreSQL", err)
+	}
+
 	pendingStore, err := pending.NewStore(buildRedisRuntimeURL())
 	if err != nil {
 		log.Fatalf("pending.NewStore: %v", err)

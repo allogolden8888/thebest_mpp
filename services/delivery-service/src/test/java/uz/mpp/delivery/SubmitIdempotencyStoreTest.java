@@ -4,8 +4,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.api.StatefulRedisConnection;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -34,6 +39,7 @@ class SubmitIdempotencyStoreTest {
     private SubmitIdempotencyStore store;
     private RedisClient rawClient;
     private String stageExecutionId;
+    private String correlationKey;
 
     @BeforeEach
     void setUp() {
@@ -46,6 +52,9 @@ class SubmitIdempotencyStoreTest {
     void tearDown() {
         try (StatefulRedisConnection<String, String> conn = rawClient.connect()) {
             conn.sync().del("dlvsubmit:" + stageExecutionId);
+            if (correlationKey != null) {
+                conn.sync().del(correlationKey);
+            }
         }
         store.close();
         rawClient.shutdown();
@@ -82,6 +91,79 @@ class SubmitIdempotencyStoreTest {
         assertEquals(Outcome.OUTCOME_SUCCEEDED, done.outcome().outcome());
         assertEquals("smsc-123", done.outcome().smscMessageId());
         assertEquals("dlv-" + stageExecutionId, done.queueMsgId());
+    }
+
+    /**
+     * ГЛАВНАЯ проверка правки быстрого пути корреляции DLR: {@code recordOutcome}
+     * с {@link SubmitIdempotencyStore.CorrelationHint} обязан положить в Runtime
+     * Redis ключ РОВНО того формата, который читает Go-сторона
+     * ({@code dlr-manager/internal/correlation.FastPathKey} и
+     * {@code parseFastPathValue}). Формат сверяется здесь дословно, потому что
+     * рассинхрон между двумя языками не поймает ни один компилятор — он
+     * проявился бы только как «корреляция снова не находится».
+     */
+    @Test
+    void recordOutcomeWithHintWritesFastPathCorrelationEntryInGoReadableFormat() {
+        String operatorID = "op-" + UUID.randomUUID().toString().substring(0, 8);
+        String smscMessageId = "smsc-" + UUID.randomUUID();
+        String messageId = UUID.randomUUID().toString();
+        Instant submittedAt = Instant.now();
+        correlationKey = "dlrcorr:" + operatorID + ":" + smscMessageId + ":1";
+
+        store.claim(stageExecutionId, "dlv-" + stageExecutionId);
+        store.recordOutcome(
+            stageExecutionId,
+            new SubmitOutcome(Outcome.OUTCOME_SUCCEEDED, "", smscMessageId),
+            new SubmitIdempotencyStore.CorrelationHint(operatorID, messageId, 1, submittedAt));
+
+        try (StatefulRedisConnection<String, String> conn = rawClient.connect()) {
+            String value = conn.sync().get(correlationKey);
+            assertNotNull(value, "быстрый путь не записан по ключу " + correlationKey);
+            assertEquals(
+                submittedAt.toEpochMilli() + "|" + messageId + "|" + stageExecutionId,
+                value);
+            long ttl = conn.sync().ttl(correlationKey);
+            assertTrue(ttl > 0 && ttl <= SubmitIdempotencyStore.DEFAULT_FAST_PATH_TTL.getSeconds(),
+                "TTL быстрого пути = " + ttl + "с, ожидали (0; " + SubmitIdempotencyStore.DEFAULT_FAST_PATH_TTL.getSeconds() + "]");
+        }
+    }
+
+    /**
+     * Оператор не вернул {@code smsc_message_id} синхронно (документированно
+     * допустимо) — коррелировать не по чему, писать быстрый путь нечем и
+     * незачем. Ключ не должен появиться вообще: пустой {@code smsc_message_id}
+     * в ключе склеил бы разные сообщения в одну запись.
+     */
+    @Test
+    void recordOutcomeWithoutSmscMessageIdWritesNoFastPathEntry() {
+        String operatorID = "op-" + UUID.randomUUID().toString().substring(0, 8);
+        correlationKey = "dlrcorr:" + operatorID + "::1";
+
+        store.claim(stageExecutionId, "dlv-" + stageExecutionId);
+        store.recordOutcome(
+            stageExecutionId,
+            new SubmitOutcome(Outcome.OUTCOME_SUBMISSION_OUTCOME_UNKNOWN, "SUBMIT_TIMEOUT", ""),
+            new SubmitIdempotencyStore.CorrelationHint(operatorID, UUID.randomUUID().toString(), 1, Instant.now()));
+
+        try (StatefulRedisConnection<String, String> conn = rawClient.connect()) {
+            assertNull(conn.sync().get(correlationKey));
+        }
+    }
+
+    /**
+     * Обратная совместимость: {@code recordOutcome} без подсказки (путь
+     * AmbiguousInFlight в KafkaIo) не пишет быстрый путь и по-прежнему
+     * корректно записывает сам исход.
+     */
+    @Test
+    void recordOutcomeWithoutHintStillRecordsOutcome() {
+        store.claim(stageExecutionId, "dlv-" + stageExecutionId);
+        store.recordOutcome(stageExecutionId, new SubmitOutcome(Outcome.OUTCOME_SUCCEEDED, "", "smsc-nohint"));
+
+        SubmitIdempotencyStore.ClaimResult second = store.claim(stageExecutionId, "dlv-" + stageExecutionId);
+        SubmitIdempotencyStore.ClaimResult.AlreadyDone done =
+            assertInstanceOf(SubmitIdempotencyStore.ClaimResult.AlreadyDone.class, second);
+        assertEquals("smsc-nohint", done.outcome().smscMessageId());
     }
 
     /**

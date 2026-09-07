@@ -406,13 +406,25 @@ public final class KafkaIo {
                 queueMsgId = won.queueMsgId();
                 List<Segment> segments = SegmentMessage.segment(context.body(), context.encoding());
                 SubmitRequest request = DeliveryService.buildSubmitRequest(command, extension, context, queueMsgId, segments);
+                // Момент ДО submit'а, не после — см. SubmitIdempotencyStore.recordOutcome:
+                // DLR Manager отбрасывает запись быстрого пути, чей submitted_at
+                // позже received_at самой DLR, а при мгновенно отвечающем SMSC
+                // "после submit'а" регулярно оказывается позже.
+                Instant submitStartedAt = Instant.now();
                 try {
                     SubmitResponse response = submitClient.submit(endpoint.endpoint(), request);
                     outcome = DeliveryService.interpretSubmitResult(response);
                 } catch (io.grpc.StatusRuntimeException e) {
                     outcome = DeliveryService.handleGrpcFailure(e.getStatus().getCode().name());
                 }
-                idempotencyStore.recordOutcome(stageExecutionId, outcome);
+                // segment_id=1 — тот же номер, что проставляют обе стороны
+                // durable-пути (OperatorSubmitServer.dispatchOne и DLR-сторона
+                // в operator-smpp-session-manager/Main.java); ключ корреляции
+                // обязан сойтись байт в байт, поэтому здесь та же константа,
+                // а не число сегментов.
+                idempotencyStore.recordOutcome(stageExecutionId, outcome,
+                    new SubmitIdempotencyStore.CorrelationHint(
+                        extension.getResolvedOperatorId(), command.getMessageId(), 1, submitStartedAt));
             }
         }
 
