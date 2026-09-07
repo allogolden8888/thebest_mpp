@@ -17,7 +17,10 @@ func TestBuildDatabaseURLComposesFromDiscreteSecretVars(t *testing.T) {
 	t.Setenv("POSTGRES_PASSWORD", "s3cr3t")
 
 	got := buildDatabaseURL()
-	want := "postgres://svc_user:s3cr3t@pg.example.internal:5433/mppdb?sslmode=disable"
+	// pool_max_conns — из fef9c34 ("bounded Postgres pool"): ожидание в
+	// этом тесте тогда не обновили, и он падал на main начиная с того
+	// коммита (проверено прогоном на чистом HEAD).
+	want := "postgres://svc_user:s3cr3t@pg.example.internal:5433/mppdb?sslmode=disable&pool_max_conns=8"
 	if got != want {
 		t.Errorf("buildDatabaseURL() = %q, want %q", got, want)
 	}
@@ -29,7 +32,7 @@ func TestBuildDatabaseURLWithoutPasswordOmitsColon(t *testing.T) {
 	t.Setenv("POSTGRES_USER", "svc_user")
 
 	got := buildDatabaseURL()
-	want := "postgres://svc_user@pg.example.internal:5432/mpp?sslmode=disable"
+	want := "postgres://svc_user@pg.example.internal:5432/mpp?sslmode=disable&pool_max_conns=8"
 	if got != want {
 		t.Errorf("buildDatabaseURL() = %q, want %q", got, want)
 	}

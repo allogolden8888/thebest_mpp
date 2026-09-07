@@ -118,6 +118,11 @@ func main() {
 			retainHours = parsed
 		}
 	}
+	// Окно создания партиций жёстко связано с окном retention: писать в
+	// час, который DropOldPartitions дропнет следующим же проходом,
+	// бессмысленно, а расхождение этих двух чисел — источник ровно того
+	// класса дефектов, который здесь и чинится.
+	pgWriter.SetPartitionWindow(time.Duration(retainHours)*time.Hour, writer.DefaultPartitionMaxFuture)
 	lastRetentionRun := time.Now()
 
 	errHandler := func(err error) { log.Printf("dlr-correlation-writer: %v", err) }
@@ -127,32 +132,36 @@ func main() {
 			lastFlush = time.Now()
 			return
 		}
-		// EnsurePartition — см. writer.PgWriter.EnsurePartition: без этого
-		// вызова insert начинает падать в реальной эксплуатации, как только
-		// текущий час выходит за пределы бутстрап-окна V015 (найдено живым
-		// тестом против настоящего PostgreSQL, не гипотетически). Дешёвый
-		// idempotent вызов (CREATE TABLE IF NOT EXISTS) — не жаль делать на
-		// каждый flush, не только раз в час. И текущий, и следующий час —
-		// буфер может пересечь границу часа между первой записью в него и
-		// flush'ем. Не покрывает произвольно устаревший submitted_at
-		// (backfill/replay) — не в этом срезе, см. README.
-		now := time.Now()
-		if err := pgWriter.EnsurePartition(ctx, now); err != nil {
-			errHandler(err)
-			lastFlush = time.Now()
-			return
-		}
-		if err := pgWriter.EnsurePartition(ctx, now.Add(time.Hour)); err != nil {
-			errHandler(err)
-			lastFlush = time.Now()
-			return
-		}
 		snapshot := buf.Snapshot()
 		correlations := make([]writer.CorrelationRecord, len(snapshot))
 		for i, rec := range snapshot {
 			correlations[i] = rec.Correlation
 		}
-		if err := pgWriter.Flush(ctx, correlations); err != nil {
+		// EnsurePartitionsForBatch — см. writer.PlanPartitions. Партиции
+		// обеспечиваются под ФАКТИЧЕСКИЕ submitted_at записей батча, а не
+		// только под текущий/следующий час, как было раньше: при любом
+		// отставании от топика (или replay) submitted_at попадал в прошлые
+		// часы, партиций под которые нет, batch insert падал с SQLSTATE
+		// 23514, offset не двигался и сервис вставал в вечный retry —
+		// ровно это и наблюдалось 18 суток подряд в логах.
+		plan, err := pgWriter.EnsurePartitionsForBatch(ctx, correlations, time.Now())
+		if err != nil {
+			errHandler(err)
+			lastFlush = time.Now()
+			return
+		}
+		if len(plan.Rejected) > 0 {
+			// Осознанно отбрасываем, а не пытаемся вставить: submitted_at
+			// вне окна корреляции коррелировать всё равно уже некому
+			// (партиция такого часа либо уже дропнута retention'ом, либо
+			// таймстамп битый), а попытка вставки заблокировала бы весь
+			// батч навсегда. Не молча — логируем количество и образец.
+			sample := plan.Rejected[0]
+			log.Printf("dlr-correlation-writer: %d записей отброшено — submitted_at вне окна партиционирования (-%dч..+%dч); образец: operator_id=%s message_id=%s submitted_at=%s",
+				len(plan.Rejected), retainHours, int(writer.DefaultPartitionMaxFuture.Hours()),
+				sample.OperatorID, sample.MessageID, sample.SubmittedAt.UTC().Format(time.RFC3339))
+		}
+		if err := pgWriter.Flush(ctx, plan.Accepted); err != nil {
 			// Не коммитим, не чистим буфер — та же запись переобработается
 			// на следующем flush'е (at-least-once, тот же принцип "коммит
 			// только после подтверждённой записи", что у всех остальных
