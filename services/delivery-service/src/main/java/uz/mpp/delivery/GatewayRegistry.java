@@ -2,6 +2,7 @@ package uz.mpp.delivery;
 
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.api.StatefulRedisConnection;
+import io.lettuce.core.RedisFuture;
 import io.lettuce.core.api.sync.RedisCommands;
 import java.util.Map;
 
@@ -32,6 +33,20 @@ public final class GatewayRegistry {
     public GatewayRegistry(String redisUrl) {
         this.client = RedisClient.create(redisUrl);
         this.connection = client.connect();
+    }
+
+    /** Асинхронный вариант — см. обоснование в MessageContextStore.fetchAsync. */
+    public RedisFuture<java.util.Map<String, String>> resolveAsync(String operatorId, String routeId) {
+        return connection.async().hgetall("operator_route:" + operatorId + ":" + routeId);
+    }
+
+    /** Разбор результата {@link #resolveAsync} — та же логика, что в {@link #resolve}. */
+    public static GatewayEndpoint toEndpoint(Map<String, String> fields) {
+        if (fields == null || fields.isEmpty() || !fields.containsKey("endpoint")) {
+            return null;
+        }
+        return new GatewayEndpoint(
+            fields.get("protocol"), fields.get("owning_instance_id"), fields.get("endpoint"), fields.get("route_epoch"));
     }
 
     public GatewayEndpoint resolve(String operatorId, String routeId) {

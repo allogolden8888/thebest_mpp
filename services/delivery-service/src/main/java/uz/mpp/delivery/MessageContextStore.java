@@ -2,6 +2,7 @@ package uz.mpp.delivery;
 
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.api.StatefulRedisConnection;
+import io.lettuce.core.RedisFuture;
 import io.lettuce.core.api.sync.RedisCommands;
 import java.util.Map;
 
@@ -32,6 +33,30 @@ public final class MessageContextStore {
     public MessageContextStore(String redisUrl) {
         this.client = RedisClient.create(redisUrl);
         this.connection = client.connect();
+    }
+
+    /**
+     * Асинхронный вариант — команда лишь ОТПРАВЛЯЕТСЯ, поток не паркуется.
+     * Нужен, чтобы совместить этот HGETALL с независимым от него
+     * {@code GatewayRegistry.resolve}: JFR-профиль (300 TPS) показал, что
+     * каждый блокирующий хоп стоит ~25мс park+wakeup независимо от того,
+     * сколько длится сама операция (локальный Redis, 1200 оп/с — для него
+     * ничто). То есть платим мы за ЧИСЛО ожиданий, а не за их содержание.
+     */
+    public RedisFuture<java.util.Map<String, String>> fetchAsync(String messageId) {
+        return connection.async().hgetall("msgctx:" + messageId);
+    }
+
+    /** Разбор результата {@link #fetchAsync} — та же логика, что в {@link #fetch}. */
+    public static MessageContext toContext(Map<String, String> fields) {
+        if (fields == null || fields.isEmpty()) {
+            return null;
+        }
+        return new MessageContext(
+            fields.get("body"),
+            fields.get("sender"),
+            fields.get("msisdn"),
+            fields.getOrDefault("encoding", "GSM7"));
     }
 
     public MessageContext fetch(String messageId) {

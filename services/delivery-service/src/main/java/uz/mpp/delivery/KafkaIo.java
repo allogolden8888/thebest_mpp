@@ -25,6 +25,7 @@ import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
@@ -215,15 +216,16 @@ public final class KafkaIo {
                     continue;
                 }
 
-                Map<ConsumerRecord<String, byte[]>, Future<Void>> futures = new HashMap<>();
+                Map<ConsumerRecord<String, byte[]>, Future<Future<RecordMetadata>>> futures = new HashMap<>();
                 Map<TopicPartition, List<ConsumerRecord<String, byte[]>>> byPartition = new HashMap<>();
                 for (ConsumerRecord<String, byte[]> record : records) {
                     byPartition.computeIfAbsent(new TopicPartition(record.topic(), record.partition()), k -> new ArrayList<>()).add(record);
                     futures.put(record, pool.submit(() -> {
                         long startNanos = System.nanoTime();
-                        processRecord(record, contextStore, gatewayRegistry, controlSnapshot, submitClient, idempotencyStore, producer);
+                        Future<RecordMetadata> sent = processRecord(
+                            record, contextStore, gatewayRegistry, controlSnapshot, submitClient, idempotencyStore, producer);
                         calibrator.recordTaskLatency((System.nanoTime() - startNanos) / 1_000_000);
-                        return null;
+                        return sent;
                     }));
                 }
 
@@ -234,7 +236,13 @@ public final class KafkaIo {
                     ordered.sort(Comparator.comparingLong(ConsumerRecord::offset));
                     for (ConsumerRecord<String, byte[]> record : ordered) {
                         try {
-                            futures.get(record).get();
+                            // Ждём и саму обработку, и подтверждение публикации —
+                            // офсет по-прежнему коммитится только после того, как
+                            // stage.completed реально принят брокером.
+                            Future<RecordMetadata> sent = futures.get(record).get();
+                            if (sent != null) {
+                                sent.get(PRODUCER_SEND_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+                            }
                             tracker.recordSuccess(tp, record.offset());
                         } catch (Exception e) {
                             LOG.log(Level.SEVERE, "не удалось обработать stage.delivery запись partition=" + tp
@@ -290,7 +298,7 @@ public final class KafkaIo {
      * позволяет подставить {@link org.apache.kafka.clients.producer.MockProducer}
      * в тестах, {@link #run} по-прежнему передаёт сюда настоящий {@link KafkaProducer}.
      */
-    static void processRecord(
+    static Future<RecordMetadata> processRecord(
         ConsumerRecord<String, byte[]> record,
         MessageContextStore contextStore,
         GatewayRegistry gatewayRegistry,
@@ -307,7 +315,7 @@ public final class KafkaIo {
         // владеет решением, когда отпустить (см. DeliveryService.isAdmitted).
         if (!DeliveryService.isAdmitted(controlSnapshot.check(extension.getRouteId()))) {
             LOG.info("stage_execution_id=" + command.getStageExecutionId() + " held по OPERATOR_ROUTE control state, submit отложен");
-            return;
+            return null; // HOLD: stage.completed не публикуется, ждать нечего
         }
 
         // Детерминированный queue_msg_id (по stage_execution_id, не
@@ -333,10 +341,18 @@ public final class KafkaIo {
             DeliveryStatusEvent dlrEvent = DeliveryService.buildSandboxDeliveryStatusEvent(command, extension, Instant.now());
             producer.send(new ProducerRecord<>(DELIVERY_STATUS_TOPIC, dlrEvent.getMessageId(), dlrEvent.toByteArray()))
                 .get(PRODUCER_SEND_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-            return;
+            return null; // sandbox — редкий путь, две публикации ждём на месте
         }
 
-        MessageContext context = contextStore.fetch(command.getMessageId());
+        // fetch и resolve НЕЗАВИСИМЫ — раньше выполнялись последовательно и
+        // стоили два park+wakeup (~25мс каждый по JFR). Отправляем обе команды
+        // сразу, ждём один раз.
+        io.lettuce.core.RedisFuture<java.util.Map<String, String>> ctxFuture =
+            contextStore.fetchAsync(command.getMessageId());
+        io.lettuce.core.RedisFuture<java.util.Map<String, String>> gwFuture =
+            gatewayRegistry.resolveAsync(extension.getResolvedOperatorId(), extension.getRouteId());
+
+        MessageContext context = MessageContextStore.toContext(ctxFuture.get());
         if (context == null) {
             // HIGH находка кодревью: раньше это был throw, который блокировал
             // партицию НАВСЕГДА, если msgctx реально никогда не появится
@@ -351,11 +367,10 @@ public final class KafkaIo {
                 + command.getMessageId() + ", завершаем как SUBMISSION_OUTCOME_UNKNOWN вместо блокировки партиции");
             SubmitOutcome outcome = DeliveryService.handleGrpcFailure("MESSAGE_CONTEXT_NOT_FOUND");
             StageCompletedEvent event = DeliveryService.buildEvent(command, deterministicQueueMsgId, outcome);
-            sendCompletedEvent(producer, event);
-            return;
+            return sendCompletedEvent(producer, event);
         }
 
-        GatewayEndpoint endpoint = gatewayRegistry.resolve(extension.getResolvedOperatorId(), extension.getRouteId());
+        GatewayEndpoint endpoint = GatewayRegistry.toEndpoint(gwFuture.get());
 
         SubmitOutcome outcome;
         String queueMsgId;
@@ -402,15 +417,21 @@ public final class KafkaIo {
         }
 
         StageCompletedEvent event = DeliveryService.buildEvent(command, queueMsgId, outcome);
-        sendCompletedEvent(producer, event);
+        return sendCompletedEvent(producer, event);
     }
 
     /**
      * Общий helper для обоих мест публикации {@code stage.completed} в
      * {@link #processRecord} (путь MESSAGE_CONTEXT_NOT_FOUND и обычный путь).
      */
-    private static void sendCompletedEvent(Producer<String, byte[]> producer, StageCompletedEvent event) throws Exception {
-        producer.send(new ProducerRecord<>(OUTPUT_TOPIC, event.getMessageId(), event.toByteArray()))
-            .get(PRODUCER_SEND_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+    private static Future<RecordMetadata> sendCompletedEvent(Producer<String, byte[]> producer, StageCompletedEvent event) {
+        // Раньше здесь был .get(): воркер ПАРКОВАЛСЯ на подтверждение брокера.
+        // JFR (300 TPS) намерил 359с из 2435с суммарного park-времени именно
+        // тут, в среднем 30мс на вызов — 15% всего времени воркеров, при том
+        // что сама публикация ничего не решает для дальнейшей обработки.
+        // Теперь future возвращается наверх и ожидается в цикле дренажа ПЕРЕД
+        // коммитом офсета: гарантия "не коммитим неопубликованное" полностью
+        // сохраняется, но поток освобождается сразу и берёт следующую запись.
+        return producer.send(new ProducerRecord<>(OUTPUT_TOPIC, event.getMessageId(), event.toByteArray()));
     }
 }
