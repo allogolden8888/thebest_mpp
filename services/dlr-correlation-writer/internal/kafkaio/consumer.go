@@ -5,6 +5,7 @@ package kafkaio
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -91,6 +92,54 @@ func (c *Consumer) CommitRecords(ctx context.Context, records ...*kgo.Record) er
 	return c.client.CommitRecords(ctx, records...)
 }
 
+// isExpectedPollOutcome — ОЖИДАЕМЫЙ, штатный исход опроса, а не ошибка.
+//
+// Почему это выделено отдельно и почему это важно. Вызывающий (см.
+// cmd/dlr-correlation-writer/main.go) опрашивает Kafka в бесконечном цикле
+// с pollCtx = context.WithTimeout(ctx, flushInterval), а flushInterval по
+// умолчанию 2 секунды. Когда новых operator.submit.accepted в топике нет —
+// нормальное состояние между всплесками трафика, — дедлайн истекает и
+// franz-go возвращает context.DeadlineExceeded по каждой назначенной
+// партиции. Раньше это безусловно уходило в errHandler и сервис писал
+// `dlr-correlation-writer: fetch error: context deadline exceeded` каждые
+// ~2 секунды, круглосуточно, при полностью исправной работе.
+//
+// Цена такого лога уже измерена на живой системе в соседнем сервисе: у
+// dlr-manager ровно эта строка стоила ложного диагноза «DLR не приходят,
+// сервис сломан» и увела отладку в сторону на существенную часть сессии,
+// тогда как реальная поломка была в другом месте (см. коммит 7e796fa и
+// dlr-manager/internal/kafkaio/kafkaio.go). Хуже того, поток одинаковых
+// строк маскирует настоящие ошибки fetch этого сервиса: если он
+// действительно начнёт падать на опросе, это утонет в шуме.
+//
+// context.Canceled — тот же класс: при shutdown родительский ctx
+// отменяется по SIGTERM/SIGINT, и незавершённый опрос возвращает Canceled.
+// Штатная остановка, не авария.
+//
+// Глушатся РОВНО эти два исхода и только через errors.Is (franz-go
+// оборачивает контекстные ошибки). Всё остальное — брокер недоступен,
+// ошибки партиции, потеря данных, проблемы авторизации — логируется как
+// прежде, с тем же форматом `fetch error: %w`.
+func isExpectedPollOutcome(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
+}
+
+// reportFetchErrors — отдаёт в errHandler только неожидаемые ошибки опроса.
+// Выделено из PollOnce отдельной функцией, потому что PollOnce требует
+// живого *kgo.Client, а эта логика должна покрываться unit-тестом (см.
+// consumer_test.go).
+func reportFetchErrors(fetches kgo.Fetches, errHandler func(error)) {
+	if errHandler == nil {
+		return
+	}
+	fetches.EachError(func(_ string, _ int32, err error) {
+		if isExpectedPollOutcome(err) {
+			return
+		}
+		errHandler(fmt.Errorf("fetch error: %w", err))
+	})
+}
+
 // PollOnce — один цикл фетча, декодирует все полученные записи. `ctx`
 // обычно оборачивается вызывающей стороной в `context.WithTimeout` на
 // интервал flush'а (см. cmd/dlr-correlation-writer/main.go) — это то, что
@@ -116,11 +165,7 @@ func (c *Consumer) PollOnce(
 	errHandler func(error),
 ) {
 	fetches := c.client.PollFetches(ctx)
-	fetches.EachError(func(_ string, _ int32, err error) {
-		if errHandler != nil {
-			errHandler(fmt.Errorf("fetch error: %w", err))
-		}
-	})
+	reportFetchErrors(fetches, errHandler)
 	fetches.EachRecord(func(rec *kgo.Record) {
 		correlation, err := DecodeOperatorSubmitAccepted(rec.Value)
 		if err != nil {
