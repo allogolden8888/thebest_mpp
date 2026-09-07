@@ -192,6 +192,8 @@ impl RedisStateStore {
         let result: Vec<String> = redis::Script::new(FINALIZE_SCRIPT)
             .key(&exec_key)
             .key(&deadlines_key)
+            // msgctx освобождается вместе с exec — см. комментарий в finalize.lua
+            .key(format!("msgctx:{message_id}"))
             .arg(expected_awaiting_stage_execution_id)
             .invoke_async(&mut conn)
             .await
