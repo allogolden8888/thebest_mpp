@@ -200,6 +200,16 @@ public final class Main {
         // enquire-link-tick выше. Каждый тик: дренирует протухшие элементы
         // (safety valve max-wait), считает PacerCore.decide(), диспетчирует
         // допущенные элементы в pacerWorkerPool.
+        // ИЗМЕРЕНО 2026-09-07 (JFR delivery-service, 300 TPS): воркеры
+        // delivery-service проводят 60% времени в блокирующем gRPC submit —
+        // 1473с из 2435с суммарного park-времени, в среднем 53.8мс на вызов.
+        // При RTT до SMSC ~12мс это в основном НЕ сеть. Часть разницы —
+        // дискретизация тиком: сообщение, пришедшее сразу после тика, ждёт
+        // следующего, то есть в среднем половину периода. 20мс -> 5мс убирает
+        // ~7мс среднего ожидания на каждое сообщение. Вынесено в env, чтобы
+        // подбирать без пересборки (тик дешёвый: это не поток на сообщение, а
+        // один Timer, который лишь считает PacerCore.decide()).
+        int pacerTickMs = Integer.parseInt(env("PACER_TICK_MS", "5"));
         Timer pacerTimer = new Timer("pacer-dispatch-tick", true);
         pacerTimer.scheduleAtFixedRate(new TimerTask() {
             @Override
@@ -207,7 +217,7 @@ public final class Main {
                 runPacerTick(queuesByTier, pacerCore, concurrentSubmitPermits, pacerMetrics,
                     submitServer, pacerWorkerPool, maxQueueWaitMs, threadPoolCalibrator);
             }
-        }, 0, 20);
+        }, 0, pacerTickMs);
 
         Server grpcServer = ServerBuilder.forPort(Integer.parseInt(env("GRPC_PORT", "9000")))
             .addService(submitServer)
