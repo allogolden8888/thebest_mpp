@@ -614,6 +614,13 @@ services:
   delivery-reconciliation-service:
     image: mpp/delivery-reconciliation-service:test
     environment:
+      # Окно реконсиляции задаёт ПОЛ удержания памяти: пока case открыт,
+      # pipeline-engine не зовёт finalize_pipeline и ключи exec:/msgctx:
+      # живут в Runtime Redis. При 300 сообщ/с окно 30 минут само по себе
+      # держит ~540 000 сообщений "в полёте". На этом стенде (8 CPU/7.75ГБ)
+      # столько памяти нет, а DLR при соседнем SMSC приходит в ТУ ЖЕ
+      # миллисекунду, что и подтверждение отправки — ждать полчаса не за чем.
+      RECONCILIATION_WINDOW_MINUTES: "2"
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
