@@ -1,7 +1,9 @@
 package uz.mpp.delivery;
 
+import io.lettuce.core.RedisFuture;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -216,13 +218,13 @@ public final class KafkaIo {
                     continue;
                 }
 
-                Map<ConsumerRecord<String, byte[]>, Future<Future<RecordMetadata>>> futures = new HashMap<>();
+                Map<ConsumerRecord<String, byte[]>, Future<PendingAcks>> futures = new HashMap<>();
                 Map<TopicPartition, List<ConsumerRecord<String, byte[]>>> byPartition = new HashMap<>();
                 for (ConsumerRecord<String, byte[]> record : records) {
                     byPartition.computeIfAbsent(new TopicPartition(record.topic(), record.partition()), k -> new ArrayList<>()).add(record);
                     futures.put(record, pool.submit(() -> {
                         long startNanos = System.nanoTime();
-                        Future<RecordMetadata> sent = processRecord(
+                        PendingAcks sent = processRecord(
                             record, contextStore, gatewayRegistry, controlSnapshot, submitClient, idempotencyStore, producer);
                         calibrator.recordTaskLatency((System.nanoTime() - startNanos) / 1_000_000);
                         return sent;
@@ -239,9 +241,12 @@ public final class KafkaIo {
                             // Ждём и саму обработку, и подтверждение публикации —
                             // офсет по-прежнему коммитится только после того, как
                             // stage.completed реально принят брокером.
-                            Future<RecordMetadata> sent = futures.get(record).get();
-                            if (sent != null) {
-                                sent.get(PRODUCER_SEND_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+                            PendingAcks acks = futures.get(record).get();
+                            if (acks != null) {
+                                if (acks.kafka() != null) {
+                                    acks.kafka().get(PRODUCER_SEND_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+                                }
+                                SubmitIdempotencyStore.awaitRecorded(acks.redis());
                             }
                             tracker.recordSuccess(tp, record.offset());
                         } catch (Exception e) {
@@ -298,7 +303,7 @@ public final class KafkaIo {
      * позволяет подставить {@link org.apache.kafka.clients.producer.MockProducer}
      * в тестах, {@link #run} по-прежнему передаёт сюда настоящий {@link KafkaProducer}.
      */
-    static Future<RecordMetadata> processRecord(
+    static PendingAcks processRecord(
         ConsumerRecord<String, byte[]> record,
         MessageContextStore contextStore,
         GatewayRegistry gatewayRegistry,
@@ -315,7 +320,7 @@ public final class KafkaIo {
         // владеет решением, когда отпустить (см. DeliveryService.isAdmitted).
         if (!DeliveryService.isAdmitted(controlSnapshot.check(extension.getRouteId()))) {
             LOG.info("stage_execution_id=" + command.getStageExecutionId() + " held по OPERATOR_ROUTE control state, submit отложен");
-            return null; // HOLD: stage.completed не публикуется, ждать нечего
+            return PendingAcks.NONE; // HOLD: stage.completed не публикуется, ждать нечего
         }
 
         // Детерминированный queue_msg_id (по stage_execution_id, не
@@ -341,7 +346,7 @@ public final class KafkaIo {
             DeliveryStatusEvent dlrEvent = DeliveryService.buildSandboxDeliveryStatusEvent(command, extension, Instant.now());
             producer.send(new ProducerRecord<>(DELIVERY_STATUS_TOPIC, dlrEvent.getMessageId(), dlrEvent.toByteArray()))
                 .get(PRODUCER_SEND_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-            return null; // sandbox — редкий путь, две публикации ждём на месте
+            return PendingAcks.NONE; // sandbox — редкий путь, две публикации ждём на месте
         }
 
         // fetch и resolve НЕЗАВИСИМЫ — раньше выполнялись последовательно и
@@ -367,13 +372,14 @@ public final class KafkaIo {
                 + command.getMessageId() + ", завершаем как SUBMISSION_OUTCOME_UNKNOWN вместо блокировки партиции");
             SubmitOutcome outcome = DeliveryService.handleGrpcFailure("MESSAGE_CONTEXT_NOT_FOUND");
             StageCompletedEvent event = DeliveryService.buildEvent(command, deterministicQueueMsgId, outcome);
-            return sendCompletedEvent(producer, event);
+            return new PendingAcks(sendCompletedEvent(producer, event), Collections.emptyList());
         }
 
         GatewayEndpoint endpoint = GatewayRegistry.toEndpoint(gwFuture.get());
 
         SubmitOutcome outcome;
         String queueMsgId;
+        List<RedisFuture<?>> pendingRedis = Collections.emptyList();
         if (endpoint == null) {
             // Registry-запись отсутствует (владеющая реплика ещё не
             // зарегистрировалась/сдохла без переизбрания) — тот же исход,
@@ -400,7 +406,7 @@ public final class KafkaIo {
                 // НЕ вызываем submitClient.submit(...) снова.
                 queueMsgId = ambiguous.queueMsgId();
                 outcome = DeliveryService.handleGrpcFailure("AMBIGUOUS_PRIOR_ATTEMPT_NOT_RESUBMITTED");
-                idempotencyStore.recordOutcome(stageExecutionId, outcome);
+                pendingRedis = idempotencyStore.recordOutcomeAsync(stageExecutionId, outcome, null);
             } else {
                 SubmitIdempotencyStore.ClaimResult.Won won = (SubmitIdempotencyStore.ClaimResult.Won) claim;
                 queueMsgId = won.queueMsgId();
@@ -422,20 +428,33 @@ public final class KafkaIo {
                 // в operator-smpp-session-manager/Main.java); ключ корреляции
                 // обязан сойтись байт в байт, поэтому здесь та же константа,
                 // а не число сегментов.
-                idempotencyStore.recordOutcome(stageExecutionId, outcome,
+                pendingRedis = idempotencyStore.recordOutcomeAsync(stageExecutionId, outcome,
                     new SubmitIdempotencyStore.CorrelationHint(
                         extension.getResolvedOperatorId(), command.getMessageId(), 1, submitStartedAt));
             }
         }
 
         StageCompletedEvent event = DeliveryService.buildEvent(command, queueMsgId, outcome);
-        return sendCompletedEvent(producer, event);
+        return new PendingAcks(sendCompletedEvent(producer, event), pendingRedis);
     }
 
     /**
      * Общий helper для обоих мест публикации {@code stage.completed} в
      * {@link #processRecord} (путь MESSAGE_CONTEXT_NOT_FOUND и обычный путь).
      */
+    /**
+     * Подтверждения, которые ещё не дождались: публикация stage.completed и
+     * запись исхода в идемпотентный store. Оба ожидаются в цикле дренажа
+     * ПЕРЕД коммитом офсета — воркер на них не стоит.
+     *
+     * По JFR это два park'а по ~28-30мс каждый в самом хвосте обработки,
+     * когда реальная работа (gRPC submit оператору) уже сделана. Гарантии не
+     * ослабляются: офсет не двигается, пока и Kafka, и Redis не подтвердили.
+     */
+    record PendingAcks(Future<RecordMetadata> kafka, List<RedisFuture<?>> redis) {
+        static final PendingAcks NONE = new PendingAcks(null, Collections.emptyList());
+    }
+
     private static Future<RecordMetadata> sendCompletedEvent(Producer<String, byte[]> producer, StageCompletedEvent event) {
         // Раньше здесь был .get(): воркер ПАРКОВАЛСЯ на подтверждение брокера.
         // JFR (300 TPS) намерил 359с из 2435с суммарного park-времени именно

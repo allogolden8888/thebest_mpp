@@ -214,6 +214,27 @@ public final class SubmitIdempotencyStore {
      * не позже любой DLR о нём.
      */
     public void recordOutcome(String stageExecutionId, SubmitOutcome outcome, CorrelationHint correlation) {
+        List<RedisFuture<?>> pending = recordOutcomeAsync(stageExecutionId, outcome, correlation);
+        awaitRecorded(pending);
+    }
+
+    /**
+     * Тот же самый набор команд, но БЕЗ ожидания — futures отдаются наверх.
+     *
+     * Зачем. По JFR это ожидание стоило воркеру ~28мс park+wakeup, и лежало
+     * оно в самом хвосте обработки: submit уже выполнен, событие построено,
+     * дальше остаётся только опубликовать stage.completed. Держать на нём
+     * поток незачем — тот же приём уже применён к публикации в Kafka
+     * (см. KafkaIo.sendCompletedEvent).
+     *
+     * ГАРАНТИЯ СОХРАНЯЕТСЯ ПОЛНОСТЬЮ. Ожидание не исчезает, а переносится в
+     * цикл дренажа KafkaIo — ПЕРЕД коммитом офсета. То есть офсет
+     * по-прежнему не двигается, пока запись об исходе не подтверждена
+     * Redis'ом. Это принципиально: без подтверждённой записи переобработка
+     * той же записи Kafka могла бы привести к ПОВТОРНОМУ реальному submit'у
+     * оператору, ради чего этот store и существует.
+     */
+    public List<RedisFuture<?>> recordOutcomeAsync(String stageExecutionId, SubmitOutcome outcome, CorrelationHint correlation) {
         RedisAsyncCommands<String, String> commands = connection.async();
         String k = key(stageExecutionId);
 
@@ -233,6 +254,14 @@ public final class SubmitIdempotencyStore {
                 SetArgs.Builder.ex(fastPathTtl)));
         }
 
+        return pending;
+    }
+
+    /** Ожидание записей, отданных {@link #recordOutcomeAsync}. */
+    public static void awaitRecorded(List<RedisFuture<?>> pending) {
+        if (pending == null || pending.isEmpty()) {
+            return;
+        }
         LettuceFutures.awaitAll(
             AWAIT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS, pending.toArray(new RedisFuture<?>[0]));
     }
