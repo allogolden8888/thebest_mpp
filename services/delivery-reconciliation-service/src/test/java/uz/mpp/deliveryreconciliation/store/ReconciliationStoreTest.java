@@ -113,9 +113,53 @@ class ReconciliationStoreTest {
         store.create(expiredMessageId, UUID.randomUUID(), "beeline_uz", Instant.now().minus(1, ChronoUnit.MINUTES));
         store.create(futureMessageId, UUID.randomUUID(), "beeline_uz", Instant.now().plus(1, ChronoUnit.HOURS));
 
-        var expired = store.findExpiredOpenCases(Instant.now());
+        // Лимит намеренно взят заведомо больше любого реального бэклога:
+        // findExpiredOpenCases отдаёт САМЫЕ ПРОСРОЧЕННЫЕ первыми, а тест гоняется
+        // против общей живой mpp-базы, где уже лежат чужие просроченные case'ы
+        // старше только что созданного здесь. С маленьким лимитом тест проверял
+        // бы не предикат выборки, а всего лишь то, что бэклог короче лимита.
+        var expired = store.findExpiredOpenCases(Instant.now(), Integer.MAX_VALUE);
         assertTrue(expired.stream().anyMatch(c -> c.messageId().equals(expiredMessageId)));
         assertTrue(expired.stream().noneMatch(c -> c.messageId().equals(futureMessageId)));
+    }
+
+    @Test
+    void findExpiredOpenCasesRespectsLimit() {
+        for (int i = 0; i < 3; i++) {
+            store.create(UUID.randomUUID(), UUID.randomUUID(), "beeline_uz", Instant.now().minus(1, ChronoUnit.MINUTES));
+        }
+
+        assertEquals(2, store.findExpiredOpenCases(Instant.now(), 2).size(),
+            "неограниченная выборка при бэклоге грузит в heap весь бэклог — LIMIT обязателен");
+    }
+
+    @Test
+    void closeCasesClosesEveryCaseOfTheBatchInOneStatement() {
+        UUID firstMessageId = UUID.randomUUID();
+        UUID secondMessageId = UUID.randomUUID();
+        UUID untouchedMessageId = UUID.randomUUID();
+        ReconciliationCase first = store.create(firstMessageId, UUID.randomUUID(), "beeline_uz", Instant.now().minus(1, ChronoUnit.MINUTES));
+        ReconciliationCase second = store.create(secondMessageId, UUID.randomUUID(), "beeline_uz", Instant.now().minus(1, ChronoUnit.MINUTES));
+        store.create(untouchedMessageId, UUID.randomUUID(), "beeline_uz", Instant.now().minus(1, ChronoUnit.MINUTES));
+
+        store.closeCases(java.util.List.of(first.caseId(), second.caseId()), "resolved", Instant.now());
+
+        assertEquals("resolved", store.loadByMessageId(firstMessageId).orElseThrow().status());
+        assertEquals("resolved", store.loadByMessageId(secondMessageId).orElseThrow().status());
+        assertNotNull(store.loadByMessageId(secondMessageId).orElseThrow().resolvedAt());
+        assertEquals("open", store.loadByMessageId(untouchedMessageId).orElseThrow().status(),
+            "closeCases не должен трогать case'ы вне переданного списка");
+    }
+
+    @Test
+    void closeCasesOnEmptyListIsNoOp() {
+        UUID messageId = UUID.randomUUID();
+        store.create(messageId, UUID.randomUUID(), "beeline_uz", Instant.now().minus(1, ChronoUnit.MINUTES));
+
+        store.closeCases(java.util.List.of(), "resolved", Instant.now());
+
+        assertEquals("open", store.loadByMessageId(messageId).orElseThrow().status(),
+            "пустой батч (все публикации провалились) не должен закрывать вообще ничего");
     }
 
     @Test

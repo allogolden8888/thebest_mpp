@@ -24,14 +24,17 @@ import uz.mpp.platformcontracts.events.v1.OperatorSubmitAccepted;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.UnaryOperator;
@@ -50,7 +53,21 @@ import java.util.function.UnaryOperator;
  */
 public final class Main {
 
-    private static final Duration RECONCILIATION_WINDOW = Duration.ofMinutes(30);
+    /**
+     * Окно реконсиляции — сколько ждать позднее свидетельство (submit_sm_resp,
+     * DLR, query_sm), прежде чем закрывать case по дедлайну. Значение по
+     * умолчанию (30 минут) не изменено; вынесено в env по той же причине, что
+     * и параметры sweep'а — это ГЛАВНЫЙ множитель удержания памяти платформы,
+     * а не косметика: до закрытия case'а pipeline-engine не зовёт
+     * finalize_pipeline, и ключи exec:/msgctx: сообщения (+4 на сообщение)
+     * живут в Runtime Redis. При 300 сообщ/с окно в 30 минут само по себе
+     * держит ~540 000 сообщений «в полёте» даже при идеально успевающем
+     * sweep'е. Sweep, который догоняет поток, убирает НЕОГРАНИЧЕННЫЙ рост
+     * сверх этого; сам пол задаёт окно, и подбирать его теперь можно без
+     * пересборки.
+     */
+    private static final Duration RECONCILIATION_WINDOW =
+        Duration.ofMinutes(Long.parseLong(env("RECONCILIATION_WINDOW_MINUTES", "30")));
 
     /**
      * CODE_REVIEW.md #11 — per-case lock для read-modify-write поверх
@@ -69,36 +86,78 @@ public final class Main {
         HealthServer health = new HealthServer();
         health.start();
 
-        Connection connection = DriverManager.getConnection(buildJdbcUrl());
-        DSLContext dsl = DSL.using(connection, SQLDialect.POSTGRES);
-        ReconciliationStore store = new ReconciliationStore(dsl);
+        // По отдельному JDBC-соединению на поток. java.sql.Connection у
+        // pgJDBC — это ОДИН защищённый локом канал к бэкенду: пока по нему
+        // идёт запрос, все прочие потоки блокируются на нём. Раньше все
+        // четыре потока сервиса (три consumer'а + sweep) делили одно
+        // соединение, а нагрузка на него несимметричная: при 300 сообщ/с
+        // consumer'ы дают ~2700 запросов/с (loadByMessageId/create/
+        // persistEvidence на каждое событие трёх топиков), и sweep стоял в
+        // общей очереди за ними на каждый closeCase. Соединение на поток
+        // убирает это внутрисервисное сериализующее звено; JVM-локи
+        // (см. {@link #caseLocks}) остаются единственным механизмом
+        // сериализации read-modify-write, они от соединения не зависели.
+        List<Connection> connections = new ArrayList<>();
+        ReconciliationStore sweepStore = openStore(connections);
+        ReconciliationStore executeStore = openStore(connections);
+        ReconciliationStore submitAcceptedStore = openStore(connections);
+        ReconciliationStore deliveryStatusStore = openStore(connections);
 
         StageCompletedPublisher publisher = new StageCompletedPublisher(env("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap.mpp.svc:9092"));
 
-        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-        scheduler.scheduleAtFixedRate(() -> sweepDeadlines(store, publisher), 30, 30, TimeUnit.SECONDS);
+        // Оба параметра — env, чтобы подбирать под конкретный стенд без
+        // пересборки (принятый в репозитории приём, ср. OUTBOX_NUM_SHARDS в
+        // billing-outbox-publisher, MAX_CONCURRENT_SUBMITS в
+        // operator-smpp-session-manager).
+        //
+        // Интервал: было 30с. При 300 сообщ/с за один такой промежуток
+        // накапливается ~9000 case'ов, и вся работа шла рывком — сервис
+        // 30 секунд простаивал, потом пытался догнать, а всё это время
+        // pipeline-engine не звал finalize_pipeline и ключи exec:/msgctx:
+        // висели в Runtime Redis (+4 ключа на сообщение). 2с — тот же объём
+        // работы, размазанный ровно: ~600 case'ов на прогон, фиксированные
+        // издержки прогона (один SELECT + одно ожидание подтверждений + 1-2
+        // UPDATE) при этом полностью амортизируются, а задержка закрытия
+        // case'а после дедлайна падает с "до 30с" до "до 2с".
+        //
+        // scheduleWithFixedDelay, а не scheduleAtFixedRate: если прогон
+        // затянулся (догон бэклога), нам нужен интервал ПОСЛЕ его окончания,
+        // а не пачка немедленно накопившихся запусков подряд.
+        long sweepIntervalMs = Long.parseLong(env("RECONCILIATION_SWEEP_INTERVAL_MS", "2000"));
+        int sweepBatchSize = Integer.parseInt(env("RECONCILIATION_SWEEP_BATCH_SIZE", "2000"));
 
-        Thread executeConsumerThread = new Thread(() -> runExecuteConsumer(store), "reconciliation-execute-consumer");
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        scheduler.scheduleWithFixedDelay(() -> sweepDeadlines(sweepStore, publisher, sweepBatchSize),
+            sweepIntervalMs, sweepIntervalMs, TimeUnit.MILLISECONDS);
+
+        Thread executeConsumerThread = new Thread(() -> runExecuteConsumer(executeStore), "reconciliation-execute-consumer");
         executeConsumerThread.setDaemon(true);
         executeConsumerThread.start();
 
         // CODE_REVIEW.md #11 — collect_evidence: до этой находки эти два
         // топика не консюмились нигде, поэтому sweepDeadlines всегда резолвил
         // Evidence.empty() (см. докстринг sweepDeadlines).
-        Thread submitAcceptedConsumerThread = new Thread(() -> runSubmitAcceptedConsumer(store), "reconciliation-submit-accepted-consumer");
+        Thread submitAcceptedConsumerThread = new Thread(() -> runSubmitAcceptedConsumer(submitAcceptedStore), "reconciliation-submit-accepted-consumer");
         submitAcceptedConsumerThread.setDaemon(true);
         submitAcceptedConsumerThread.start();
 
-        Thread deliveryStatusConsumerThread = new Thread(() -> runDeliveryStatusConsumer(store), "reconciliation-delivery-status-consumer");
+        Thread deliveryStatusConsumerThread = new Thread(() -> runDeliveryStatusConsumer(deliveryStatusStore), "reconciliation-delivery-status-consumer");
         deliveryStatusConsumerThread.setDaemon(true);
         deliveryStatusConsumerThread.start();
 
         health.setReady(true);
-        System.out.println("delivery-reconciliation-service готов");
+        System.out.println("delivery-reconciliation-service готов (sweep: интервал " + sweepIntervalMs + "мс, батч " + sweepBatchSize + ")");
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             scheduler.shutdown();
             publisher.close();
+            for (Connection c : connections) {
+                try {
+                    c.close();
+                } catch (SQLException e) {
+                    System.err.println("close JDBC connection failed: " + e.getMessage());
+                }
+            }
             health.stop();
         }));
 
@@ -222,11 +281,78 @@ public final class Main {
         });
     }
 
-    /** evaluate_deadline + resolve_outcome (по накопленному Evidence — CODE_REVIEW.md #11) + publish_stage_completed + persist_case, по таймеру. */
-    private static void sweepDeadlines(ReconciliationStore store, StageCompletedPublisher publisher) {
-        List<ReconciliationCase> expiredCases = store.findExpiredOpenCases(Instant.now());
+    /**
+     * evaluate_deadline + resolve_outcome (по накопленному Evidence —
+     * CODE_REVIEW.md #11) + publish_stage_completed + persist_case, по таймеру.
+     *
+     * <p>Один прогон выгребает бэклог чанками по {@code batchSize}, пока чанки
+     * не кончатся, а не одним неограниченным SELECT'ом: так пиковое
+     * потребление памяти не зависит от размера бэклога, но догон при этом не
+     * растягивается на много тактов таймера.
+     */
+    private static void sweepDeadlines(ReconciliationStore store, StageCompletedPublisher publisher, int batchSize) {
+        try {
+            while (true) {
+                List<ReconciliationCase> expiredCases = store.findExpiredOpenCases(Instant.now(), batchSize);
+                if (expiredCases.isEmpty()) {
+                    return;
+                }
+                int closed = sweepBatch(store, publisher, expiredCases);
+                // closed == 0 — ни один case чанка закрыть не удалось (Kafka
+                // недоступна, либо resolve_outcome вернул null). Следующий
+                // SELECT вернул бы ровно тот же чанк: без этой проверки
+                // прогон крутился бы в бесконечном цикле. Прерываемся и ждём
+                // следующего такта таймера.
+                if (closed == 0 || expiredCases.size() < batchSize) {
+                    return;
+                }
+                if (Thread.currentThread().isInterrupted()) {
+                    return;
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("sweep_deadlines failed: " + e);
+        }
+    }
 
-        for (ReconciliationCase c : expiredCases) {
+    /** Один case, отправленный в Kafka и ждущий подтверждения. */
+    private record InFlight(UUID caseId, String finalStatus, Future<?> ack) {
+    }
+
+    /**
+     * Один чанк sweep'а. Раньше на КАЖДЫЙ case делалось два последовательных
+     * блокирующих round-trip'а — {@code publisher.publish(...).get()} и
+     * {@code store.closeCase(...)}. На тесной машине, где park+wakeup стоит
+     * ~25мс, это ~50мс на case, т.е. потолок ~20 case/с при входящем потоке
+     * 300/с (замерено на живой системе: ~45 событий DELIVERY_RECONCILIATION в
+     * секунду против 300 входящих — отставание в 6-7 раз). Отставание не
+     * косметическое: пока case не закрыт, pipeline-engine не получает
+     * stage.completed, не зовёт finalize_pipeline, и ключи exec:/msgctx:
+     * (+4 на сообщение) продолжают копиться в Runtime Redis, выедая память
+     * всей платформы.
+     *
+     * <p>Здесь те же самые ожидания сложены: сначала отправляются ВСЕ записи
+     * чанка (KafkaProducer асинхронный, linger.ms=5 их ещё и упакует), потом
+     * один раз ждём подтверждений, потом закрываем подтверждённые одним-двумя
+     * UPDATE'ами. Вместо N последовательных ожиданий — одно; ни одного
+     * дополнительного потока не добавлено.
+     *
+     * <p><b>Гарантия CODE_REVIEW.md #12 сохранена дословно</b>: закрываются
+     * ТОЛЬКО те case'ы, для которых {@code Future.get()} вернулся без
+     * исключения. Любой сбой публикации (или прерывание ожидания) оставляет
+     * свой case в статусе "open" — его подберёт следующий прогон, т.к.
+     * deadline_at уже в прошлом. Батчинг здесь ничего не ослабляет: сбой
+     * одной записи не тянет за собой соседей по чанку, потому что решение
+     * принимается по каждому Future отдельно.
+     *
+     * @return сколько case'ов реально закрыто
+     */
+    private static int sweepBatch(ReconciliationStore store, StageCompletedPublisher publisher, List<ReconciliationCase> batch) {
+        List<InFlight> inFlight = new ArrayList<>(batch.size());
+        int sendFailures = 0;
+        String lastSendError = null;
+
+        for (ReconciliationCase c : batch) {
             OutcomeResolver.DeadlineState deadlineState = DeadlineEvaluator.evaluate(Instant.now(), c.deadlineAt());
             Evidence evidence = EvidenceCodec.decode(c.evidenceJson());
             ReconciliationOutcome outcome = OutcomeResolver.resolve(evidence, deadlineState);
@@ -234,30 +360,62 @@ public final class Main {
                 continue;
             }
             String finalStatus = outcome == ReconciliationOutcome.RECONCILIATION_OUTCOME_DELIVERY_UNRESOLVED ? "unresolved" : "resolved";
-
-            // CODE_REVIEW.md #12 — публикуем ДО close_case и ждём подтверждения
-            // через Future.get() (тот же паттерн, что уже использует
-            // billing-outbox-publisher). Раньше closeCase шёл первым и Future
-            // не проверялся: неудачный publish навсегда оставлял case
-            // "closed", но никогда не опубликованным в stage.completed. Теперь
-            // при сбое публикации case остаётся "open" и будет подобран
-            // повторно следующим прогоном sweepDeadlines (findExpiredOpenCases
-            // снова его вернёт, т.к. deadline_at уже в прошлом) — идемпотентно,
-            // т.к. persist_case для незакрытого case'а не имеет побочных
-            // эффектов, требующих отмены.
             try {
-                publisher.publish(StageCompletedBuilder.build(c.messageId(), c.stageExecutionId(), 1, outcome, Instant.now())).get();
+                // send() не блокирует в ожидании брокера (кроме случая
+                // переполненного буфера — max.block.ms=10с), поэтому весь
+                // чанк уходит без ожиданий между записями.
+                Future<?> ack = publisher.publish(StageCompletedBuilder.build(c.messageId(), c.stageExecutionId(), 1, outcome, Instant.now()));
+                inFlight.add(new InFlight(c.caseId(), finalStatus, ack));
+            } catch (Exception e) {
+                sendFailures++;
+                lastSendError = e.getMessage();
+            }
+        }
+
+        // Одно ожидание на весь чанк вместо N последовательных: к моменту,
+        // когда дойдём до последнего Future, первые давно подтверждены.
+        List<UUID> resolvedIds = new ArrayList<>();
+        List<UUID> unresolvedIds = new ArrayList<>();
+        int ackFailures = 0;
+        String lastAckError = null;
+        for (InFlight f : inFlight) {
+            try {
+                f.ack().get();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                continue;
+                // Прерывание — не повод терять уже подтверждённые case'ы:
+                // выходим из ожидания, но закрываем то, что подтверждено.
+                break;
             } catch (Exception e) {
-                System.err.println("publish_stage_completed failed for case " + c.caseId() + ", case остаётся open для повторной попытки: " + e.getMessage());
+                ackFailures++;
+                lastAckError = e.getMessage();
                 continue;
             }
-
-            store.closeCase(c.caseId(), finalStatus, Instant.now());
-            caseLocks.remove(c.caseId());
+            if ("unresolved".equals(f.finalStatus())) {
+                unresolvedIds.add(f.caseId());
+            } else {
+                resolvedIds.add(f.caseId());
+            }
         }
+
+        Instant resolvedAt = Instant.now();
+        store.closeCases(resolvedIds, "resolved", resolvedAt);
+        store.closeCases(unresolvedIds, "unresolved", resolvedAt);
+        for (UUID caseId : resolvedIds) {
+            caseLocks.remove(caseId);
+        }
+        for (UUID caseId : unresolvedIds) {
+            caseLocks.remove(caseId);
+        }
+
+        // Агрегированный лог: при бэклоге в тысячи case'ов строка на каждый
+        // сбой сама по себе стала бы источником нагрузки.
+        if (sendFailures > 0 || ackFailures > 0) {
+            System.err.println("publish_stage_completed failed для " + (sendFailures + ackFailures)
+                + " case(ов) из " + batch.size() + ", они остаются open для повторной попытки; последняя ошибка: "
+                + (lastAckError != null ? lastAckError : lastSendError));
+        }
+        return resolvedIds.size() + unresolvedIds.size();
     }
 
     private static Properties consumerProps(String groupId) {
@@ -267,6 +425,14 @@ public final class Main {
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
         return props;
+    }
+
+    /** Отдельное JDBC-соединение (см. комментарий в {@link #main}); все они закрываются в shutdown hook. */
+    private static ReconciliationStore openStore(List<Connection> registry) throws SQLException {
+        Connection connection = DriverManager.getConnection(buildJdbcUrl());
+        registry.add(connection);
+        DSLContext dsl = DSL.using(connection, SQLDialect.POSTGRES);
+        return new ReconciliationStore(dsl);
     }
 
     private static String buildJdbcUrl() {

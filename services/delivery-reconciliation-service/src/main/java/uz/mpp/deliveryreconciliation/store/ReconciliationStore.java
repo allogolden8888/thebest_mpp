@@ -44,17 +44,37 @@ public final class ReconciliationStore {
     // сквозном прогоне тестов с реальным Postgres при работе над #11.
     private static final Field<JSONB> EVIDENCE = field("evidence", JSONB.class);
 
+    private static final int CLOSE_CHUNK = 1000;
+
     private final DSLContext dsl;
 
     public ReconciliationStore(DSLContext dsl) {
         this.dsl = dsl;
     }
 
-    /** evaluate_deadline sweep — open case'ы с истёкшим deadline_at, использует reconciliation_cases_status_deadline_idx. */
-    public java.util.List<ReconciliationCase> findExpiredOpenCases(java.time.Instant now) {
+    /**
+     * evaluate_deadline sweep — open case'ы с истёкшим deadline_at, использует
+     * reconciliation_cases_status_deadline_idx.
+     *
+     * <p><b>LIMIT обязателен.</b> До этого выборка была неограниченной: при
+     * бэклоге весь набор просроченных case'ов (замерено на живом стенде — 76 032
+     * open-case'а, истекающих в пределах одного десятиминутного окна) грузился
+     * в heap одним fetch'ем, вместе с evidence JSONB каждого. На mem_limit=768m
+     * это прямой риск OOM ровно в тот момент, когда сервис и так отстаёт.
+     * Ограничение делает потребление памяти одного прогона предсказуемым;
+     * догон бэклога обеспечивается тем, что вызывающая сторона
+     * ({@code Main.sweepDeadlines}) выбирает чанк за чанком, пока они не
+     * кончатся, а не тем, что один SELECT забирает всё.
+     *
+     * <p>ORDER BY deadline_at — самые просроченные первыми: при бэклоге
+     * догоняем в порядке возраста, а не в произвольном порядке хранения.
+     */
+    public java.util.List<ReconciliationCase> findExpiredOpenCases(java.time.Instant now, int limit) {
         return dsl.select(CASE_ID, MESSAGE_ID, STAGE_EXECUTION_ID, OPERATOR_ID, STATUS, OPENED_AT, RESOLVED_AT, DEADLINE_AT, EVIDENCE)
             .from(CASES)
             .where(STATUS.eq("open").and(DEADLINE_AT.le(Timestamp.from(now))))
+            .orderBy(DEADLINE_AT.asc())
+            .limit(limit)
             .fetch()
             .map(ReconciliationStore::toCase);
     }
@@ -88,11 +108,39 @@ public final class ReconciliationStore {
 
     /** persist_case — закрытие case с финальным статусом ("resolved" | "unresolved"). */
     public void closeCase(UUID caseId, String finalStatus, Instant resolvedAt) {
-        dsl.update(CASES)
-            .set(STATUS, finalStatus)
-            .set(RESOLVED_AT, Timestamp.from(resolvedAt))
-            .where(CASE_ID.eq(caseId))
-            .execute();
+        closeCases(java.util.List.of(caseId), finalStatus, resolvedAt);
+    }
+
+    /**
+     * persist_case пачкой — закрытие сразу многих case'ов одним UPDATE
+     * (... WHERE case_id IN (...)) вместо одного round-trip'а на case.
+     *
+     * <p>Sweep закрывает только те case'ы, публикация которых в
+     * {@code stage.completed} уже подтверждена (CODE_REVIEW.md #12), поэтому
+     * список приходит сюда уже отфильтрованным — здесь остаётся только не
+     * платить за каждый из них отдельным сетевым хопом в PostgreSQL. На
+     * тесной машине, где park+wakeup блокирующего хопа стоит ~25мс,
+     * последовательные UPDATE'ы были соизмеримы по стоимости с самой
+     * реконсиляцией.
+     *
+     * <p>Чанк {@value #CLOSE_CHUNK} — граница по числу bind-параметров
+     * PostgreSQL (максимум 65535 на запрос), а не по производительности:
+     * даёт запас на порядок при любом разумном
+     * {@code RECONCILIATION_SWEEP_BATCH_SIZE}.
+     */
+    public void closeCases(java.util.List<UUID> caseIds, String finalStatus, Instant resolvedAt) {
+        if (caseIds.isEmpty()) {
+            return;
+        }
+        Timestamp resolvedTs = Timestamp.from(resolvedAt);
+        for (int from = 0; from < caseIds.size(); from += CLOSE_CHUNK) {
+            java.util.List<UUID> chunk = caseIds.subList(from, Math.min(from + CLOSE_CHUNK, caseIds.size()));
+            dsl.update(CASES)
+                .set(STATUS, finalStatus)
+                .set(RESOLVED_AT, resolvedTs)
+                .where(CASE_ID.in(chunk))
+                .execute();
+        }
     }
 
     private static ReconciliationCase toCase(Record r) {
