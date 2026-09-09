@@ -6,6 +6,7 @@ import org.jooq.JSONB;
 import org.jooq.Record;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
+import uz.mpp.deliveryreconciliation.core.Evidence;
 
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -22,7 +23,7 @@ import static org.jooq.impl.DSL.table;
  * таблица/поля объявлены явно через DSL.table/DSL.field, стандартный
  * jOOQ-паттерн для схем без сгенerированных классов).
  */
-public final class ReconciliationStore {
+public final class ReconciliationStore implements CaseStore {
 
     private static final Table<Record> CASES = table("reconciliation.reconciliation_cases");
     private static final Field<UUID> CASE_ID = field("case_id", UUID.class);
@@ -43,6 +44,19 @@ public final class ReconciliationStore {
     // ReconciliationStoreTest, где 4 из 4 relevant-тестов падали. Найдено при
     // сквозном прогоне тестов с реальным Postgres при работе над #11.
     private static final Field<JSONB> EVIDENCE = field("evidence", JSONB.class);
+
+    // reconciliation.early_evidence (migrations/V032) — посадочная площадка
+    // для свидетельства, обогнавшего создание case'а. По колонке на вид
+    // свидетельства, а не JSONB: каждый источник обновляет ТОЛЬКО свою
+    // колонку, поэтому накопление атомарно на уровне строки и не требует
+    // read-modify-write (а значит, не теряет обновления между репликами —
+    // JVM-локи Main.caseLocks там не помогают).
+    private static final Table<Record> EARLY_EVIDENCE = table("reconciliation.early_evidence");
+    private static final Field<UUID> EARLY_MESSAGE_ID = field("message_id", UUID.class);
+    private static final Field<Boolean> EARLY_SUBMIT_ACCEPTED = field("submit_accepted", Boolean.class);
+    private static final Field<String> EARLY_DELIVERY_STATUS = field("delivery_status", String.class);
+    private static final Field<String> EARLY_QUERY_SM = field("query_sm", String.class);
+    private static final Field<Timestamp> EARLY_FIRST_SEEN_AT = field("first_seen_at", Timestamp.class);
 
     private static final int CLOSE_CHUNK = 1000;
 
@@ -69,6 +83,7 @@ public final class ReconciliationStore {
      * <p>ORDER BY deadline_at — самые просроченные первыми: при бэклоге
      * догоняем в порядке возраста, а не в произвольном порядке хранения.
      */
+    @Override
     public java.util.List<ReconciliationCase> findExpiredOpenCases(java.time.Instant now, int limit) {
         return dsl.select(CASE_ID, MESSAGE_ID, STAGE_EXECUTION_ID, OPERATOR_ID, STATUS, OPENED_AT, RESOLVED_AT, DEADLINE_AT, EVIDENCE)
             .from(CASES)
@@ -80,6 +95,7 @@ public final class ReconciliationStore {
     }
 
     /** handle_reconciliation_execute — загрузка существующего case по message_id, если есть. */
+    @Override
     public Optional<ReconciliationCase> loadByMessageId(UUID messageId) {
         return dsl.select(CASE_ID, MESSAGE_ID, STAGE_EXECUTION_ID, OPERATOR_ID, STATUS, OPENED_AT, RESOLVED_AT, DEADLINE_AT, EVIDENCE)
             .from(CASES)
@@ -88,17 +104,111 @@ public final class ReconciliationStore {
             .map(ReconciliationStore::toCase);
     }
 
-    /** handle_reconciliation_execute — создание нового case. */
+    /**
+     * handle_reconciliation_execute — создание нового case.
+     *
+     * <p>{@code ON CONFLICT (message_id) DO NOTHING} (опирается на
+     * {@code reconciliation_cases_message_uniq}, migrations/V032): раньше
+     * создание было check-then-act (loadByMessageId -> create), и при
+     * at-least-once передоставке {@code stage.delivery-reconciliation} или
+     * при ребалансе между двумя репликами два процесса могли вставить два
+     * case'а на один message_id. Последствие было хуже дубля: после этого
+     * {@link #loadByMessageId} (fetchOptional) бросал бы TooManyRows на
+     * КАЖДОЕ свидетельство этого сообщения, т.е. терялось бы всё
+     * свидетельство, а не только раннее — ровно тот класс порчи данных,
+     * который и разбирается этой правкой.
+     *
+     * <p>Возвращается победившая строка (своя или чужая) — вызывающая
+     * сторона работает с одним и тем же case'ом в любом случае.
+     */
+    @Override
     public ReconciliationCase create(UUID messageId, UUID stageExecutionId, String operatorId, Instant deadlineAt) {
         UUID caseId = UUID.randomUUID();
         dsl.insertInto(CASES)
             .columns(CASE_ID, MESSAGE_ID, STAGE_EXECUTION_ID, OPERATOR_ID, STATUS, DEADLINE_AT, EVIDENCE)
             .values(caseId, messageId, stageExecutionId, operatorId, "open", Timestamp.from(deadlineAt), JSONB.jsonb("{}"))
+            .onConflict(MESSAGE_ID)
+            .doNothing()
             .execute();
         return loadByMessageId(messageId).orElseThrow();
     }
 
+    /**
+     * collect_evidence до создания case'а — INSERT ... ON CONFLICT DO UPDATE,
+     * трогающий ровно те колонки, которые несёт это событие. Именно поэтому
+     * приземление раннего свидетельства не нуждается ни в каком локе: два
+     * события разных видов (submit_accepted и DLR) пишут разные колонки одной
+     * строки, а два события одного вида несут одно и то же значение.
+     *
+     * <p>Пустой delta не пишет НИЧЕГО — иначе строка появлялась бы для каждого
+     * сообщения платформы, ничего при этом не неся (см. раздел «ОБЪЁМ» в
+     * migrations/V032).
+     */
+    @Override
+    public void recordEarlyEvidence(UUID messageId, Evidence delta) {
+        java.util.Map<Field<?>, Object> updates = new java.util.LinkedHashMap<>();
+        if (delta.submitAcceptedObserved()) {
+            updates.put(EARLY_SUBMIT_ACCEPTED, true);
+        }
+        if (delta.deliveryStatusObserved() != Evidence.DeliveryOutcome.NONE) {
+            updates.put(EARLY_DELIVERY_STATUS, delta.deliveryStatusObserved().name());
+        }
+        if (delta.querySmObserved() != Evidence.QuerySmOutcome.NOT_CALLED) {
+            updates.put(EARLY_QUERY_SM, delta.querySmObserved().name());
+        }
+        if (updates.isEmpty()) {
+            return;
+        }
+        dsl.insertInto(EARLY_EVIDENCE)
+            .columns(EARLY_MESSAGE_ID, EARLY_SUBMIT_ACCEPTED, EARLY_DELIVERY_STATUS, EARLY_QUERY_SM)
+            .values(messageId,
+                delta.submitAcceptedObserved(),
+                delta.deliveryStatusObserved() == Evidence.DeliveryOutcome.NONE ? null : delta.deliveryStatusObserved().name(),
+                delta.querySmObserved() == Evidence.QuerySmOutcome.NOT_CALLED ? null : delta.querySmObserved().name())
+            .onConflict(EARLY_MESSAGE_ID)
+            .doUpdate()
+            .set(updates)
+            .execute();
+    }
+
+    @Override
+    public Optional<Evidence> loadEarlyEvidence(UUID messageId) {
+        return dsl.select(EARLY_SUBMIT_ACCEPTED, EARLY_DELIVERY_STATUS, EARLY_QUERY_SM)
+            .from(EARLY_EVIDENCE)
+            .where(EARLY_MESSAGE_ID.eq(messageId))
+            .fetchOptional()
+            .map(r -> new Evidence(
+                Boolean.TRUE.equals(r.get(EARLY_SUBMIT_ACCEPTED)),
+                parseEnum(Evidence.DeliveryOutcome.class, r.get(EARLY_DELIVERY_STATUS), Evidence.DeliveryOutcome.NONE),
+                parseEnum(Evidence.QuerySmOutcome.class, r.get(EARLY_QUERY_SM), Evidence.QuerySmOutcome.NOT_CALLED)));
+    }
+
+    @Override
+    public void deleteEarlyEvidence(UUID messageId) {
+        dsl.deleteFrom(EARLY_EVIDENCE).where(EARLY_MESSAGE_ID.eq(messageId)).execute();
+    }
+
+    @Override
+    public int purgeEarlyEvidence(Instant olderThan) {
+        return dsl.deleteFrom(EARLY_EVIDENCE)
+            .where(EARLY_FIRST_SEEN_AT.lt(Timestamp.from(olderThan)))
+            .execute();
+    }
+
+    /** Неизвестное/NULL значение — деградируем к дефолту, как {@code EvidenceCodec.decode}, не бросаем. */
+    private static <E extends Enum<E>> E parseEnum(Class<E> type, String value, E fallback) {
+        if (value == null) {
+            return fallback;
+        }
+        try {
+            return Enum.valueOf(type, value);
+        } catch (IllegalArgumentException e) {
+            return fallback;
+        }
+    }
+
     /** persist_case — обновление evidence и, опционально, финального статуса/resolved_at. */
+    @Override
     public void persistEvidence(UUID caseId, String evidenceJson) {
         dsl.update(CASES)
             .set(EVIDENCE, JSONB.jsonb(evidenceJson))
@@ -128,6 +238,7 @@ public final class ReconciliationStore {
      * даёт запас на порядок при любом разумном
      * {@code RECONCILIATION_SWEEP_BATCH_SIZE}.
      */
+    @Override
     public void closeCases(java.util.List<UUID> caseIds, String finalStatus, Instant resolvedAt) {
         if (caseIds.isEmpty()) {
             return;

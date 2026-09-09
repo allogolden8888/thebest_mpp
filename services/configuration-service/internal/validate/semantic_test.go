@@ -6,6 +6,16 @@ import "testing"
 // pipeline.*.json and routing_table.*.json — ported verbatim, not
 // reinvented, so the semantic checks stay traceable to the Python originals
 // in config_schemas/validate_all.py.
+//
+// 2026-09-08: n5_delivery.next обновлён вслед за исправлением реального
+// pipeline.valid.json — DELIVERY:SUCCEEDED терминален, а в реконсиляцию
+// ведёт SUBMISSION_OUTCOME_UNKNOWN (platform-contracts/common/
+// stage_contract.proto, DeliveryReconciliationExtension.triggering_outcome:
+// "сегодня всегда SUBMISSION_OUTCOME_UNKNOWN"). Старая инвертированная
+// маршрутизация давала 16 187 сообщений с DELIVERY=SUCCEEDED и
+// DELIVERY_RECONCILIATION=CONFIRMED_NOT_SUBMITTED одновременно (измерено в
+// ClickHouse на живом стенде). Фикстура обязана оставаться дословной копией
+// примера, иначе валидатор проверяется против графа, которого нет.
 
 const validPipeline = `{
 	"pipeline_id": "sms-default-v1",
@@ -20,7 +30,7 @@ const validPipeline = `{
 		{"node_id": "n3_billing", "stage_name": "BILLING", "next": {"SUCCEEDED": "n4_routing", "FAILED": null}},
 		{"node_id": "n_billing_blocked", "stage_name": "BILLING", "implicit_category": "BLOCKED", "next": {"SUCCEEDED": null, "FAILED": null}},
 		{"node_id": "n4_routing", "stage_name": "ROUTING", "next": {"SUCCEEDED": "n5_delivery", "FAILED": null, "RETRY_EXHAUSTED": null}},
-		{"node_id": "n5_delivery", "stage_name": "DELIVERY", "next": {"SUCCEEDED": "n6_reconciliation", "FAILED": null, "TIMED_OUT": "n6_reconciliation", "RETRY_EXHAUSTED": "n6_reconciliation"}},
+		{"node_id": "n5_delivery", "stage_name": "DELIVERY", "next": {"SUCCEEDED": null, "SUBMISSION_OUTCOME_UNKNOWN": "n6_reconciliation", "FAILED": null, "TIMED_OUT": "n6_reconciliation", "RETRY_EXHAUSTED": "n6_reconciliation"}},
 		{"node_id": "n6_reconciliation", "stage_name": "DELIVERY_RECONCILIATION", "next": {"SUCCEEDED": null, "SUBMISSION_OUTCOME_UNKNOWN": null, "DELIVERY_UNRESOLVED": null}}
 	]
 }`

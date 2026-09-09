@@ -1,59 +1,49 @@
 package uz.mpp.delivery;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.util.Map;
-import org.apache.kafka.common.TopicPartition;
 import org.junit.jupiter.api.Test;
-import uz.mpp.delivery.KafkaIo.OffsetTracker;
 
 /**
- * {@link OffsetTracker} — тот же паттерн, что уже найден и исправлен
- * кодревью в billing-service (commitAsync() без аргументов коммитит позицию
- * всего фетча, не оффсет обработанной записи) — применён здесь с самого
- * начала, тестируется тем же способом.
+ * Backpressure непрерывного цикла опроса ({@link KafkaIo#shouldPause}).
+ *
+ * <p>Прежний цикл ограничивал себя сам: следующий {@code poll()} не
+ * начинался, пока не слит предыдущий батч — ценой head-of-line blocking,
+ * ради устранения которого барьер и убран. Теперь ограничение явное:
+ * счётчик in-flight + {@code pause()}/{@code resume()}. Логика решения
+ * вынесена чистой функцией и проверяется здесь без Kafka; семантику
+ * коммита проверяет {@link OffsetWatermarkTrackerTest}.
  */
 class KafkaIoTest {
 
-    private static final TopicPartition TP = new TopicPartition("stage.delivery", 0);
-
     @Test
-    void allSuccessfulCommitsPastLastRecord() {
-        OffsetTracker tracker = new OffsetTracker();
-        tracker.recordSuccess(TP, 10);
-        tracker.recordSuccess(TP, 11);
-        tracker.recordSuccess(TP, 12);
-        assertEquals(Map.of(TP, 13L), tracker.committableOffsets());
+    void doesNotPauseBelowCeiling() {
+        assertFalse(KafkaIo.shouldPause(0, 100, false));
+        assertFalse(KafkaIo.shouldPause(99, 100, false));
     }
 
     @Test
-    void failureInMiddleOfBatchDoesNotSkipPastFailedRecord() {
-        OffsetTracker tracker = new OffsetTracker();
-        tracker.recordSuccess(TP, 10);
-        tracker.recordFailure(TP);
-        assertTrue(tracker.isSuspended(TP));
-        assertEquals(Map.of(TP, 11L), tracker.committableOffsets());
+    void pausesAtCeiling() {
+        assertTrue(KafkaIo.shouldPause(100, 100, false));
+        assertTrue(KafkaIo.shouldPause(140, 100, false));
     }
 
     @Test
-    void independentPartitionsTrackedSeparately() {
-        TopicPartition tp0 = new TopicPartition("stage.delivery", 0);
-        TopicPartition tp1 = new TopicPartition("stage.delivery", 1);
-        OffsetTracker tracker = new OffsetTracker();
-
-        tracker.recordSuccess(tp0, 5);
-        tracker.recordFailure(tp1);
-        tracker.recordSuccess(tp0, 6);
-
-        assertEquals(Map.of(tp0, 7L), tracker.committableOffsets());
-        assertTrue(tracker.isSuspended(tp1));
+    void staysPausedUntilHalfDrained() {
+        // Гистерезис: без него счётчик колеблется вокруг потолка и цикл
+        // дёргает pause/resume на каждой итерации, сбрасывая накопленный фетч.
+        assertTrue(KafkaIo.shouldPause(99, 100, true));
+        assertTrue(KafkaIo.shouldPause(51, 100, true));
+        assertFalse(KafkaIo.shouldPause(50, 100, true));
+        assertFalse(KafkaIo.shouldPause(0, 100, true));
     }
 
     @Test
-    void noSuccessMeansNothingToCommit() {
-        OffsetTracker tracker = new OffsetTracker();
-        tracker.recordFailure(TP);
-        assertEquals(Map.of(), tracker.committableOffsets());
+    void ceilingOfOneStillMakesProgress() {
+        // Патологическая настройка DELIVERY_MAX_IN_FLIGHT=1 не должна
+        // залипать: с нулём in-flight опрос обязан возобновиться.
+        assertTrue(KafkaIo.shouldPause(1, 1, false));
+        assertFalse(KafkaIo.shouldPause(0, 1, true));
     }
 }

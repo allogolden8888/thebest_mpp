@@ -3,16 +3,28 @@ package uz.mpp.delivery;
 import io.lettuce.core.LettuceFutures;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisFuture;
+import io.lettuce.core.RedisNoScriptException;
+import io.lettuce.core.ScriptOutputType;
 import io.lettuce.core.SetArgs;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.async.RedisAsyncCommands;
 import io.lettuce.core.api.sync.RedisCommands;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import uz.mpp.delivery.DeliveryService.SubmitOutcome;
 import uz.mpp.platformcontracts.common.v1.Outcome;
 
@@ -43,6 +55,8 @@ import uz.mpp.platformcontracts.common.v1.Outcome;
  * такого использования, тест это подтверждает поведенчески.
  */
 public final class SubmitIdempotencyStore {
+
+    private static final Logger LOG = Logger.getLogger(SubmitIdempotencyStore.class.getName());
 
     private static final Duration TTL = Duration.ofHours(24);
 
@@ -85,6 +99,31 @@ public final class SubmitIdempotencyStore {
 
     private final RedisClient client;
     private final StatefulRedisConnection<String, String> connection;
+
+    /** {@code submit_claim.lua} — ресурс classpath, тем же способом, что {@code BillingAccountStore}. */
+    private static final String CLAIM_SCRIPT = loadScript("submit_claim.lua");
+
+    /**
+     * SHA1 скрипта считается локально, а не через {@code SCRIPT LOAD}: Redis
+     * определяет digest ровно как SHA1 тела скрипта, поэтому отдельный
+     * round trip на загрузку не нужен — первый же {@code EVAL} кладёт скрипт
+     * в кэш под этим самым digest'ом.
+     */
+    private static final String CLAIM_SHA = sha1Hex(CLAIM_SCRIPT);
+
+    /**
+     * Известно ли, что скрипт уже лежит в кэше ЭТОГО Redis-инстанса.
+     * {@code false} -> идём через {@code EVAL} (он и загрузит), дальше — через
+     * {@code EVALSHA} (не гоняем тело скрипта по сети на каждое сообщение).
+     *
+     * Сбрасывается обратно в {@code false} по {@code NOSCRIPT}: после
+     * рестарта Redis скрипт-кэш пуст (равно как и после {@code SCRIPT FLUSH}
+     * или переключения на другую реплику), и без этого фоллбэка claim падал
+     * бы на КАЖДОМ сообщении до рестарта сервиса — сценарий не гипотетический,
+     * переживаемость рестарта Redis на этом стенде уже была отдельной
+     * проблемой.
+     */
+    private volatile boolean claimScriptCached = false;
 
     public SubmitIdempotencyStore(String redisUrl) {
         this(redisUrl, DEFAULT_FAST_PATH_TTL);
@@ -158,21 +197,40 @@ public final class SubmitIdempotencyStore {
     }
 
     /**
-     * {@code cas_transition}-подобный claim, но без Lua: единственная
-     * операция, которой нужна атомарность — "занять этот stage_execution_id
-     * под submit, если ещё не занят" — это ровно то, что делает {@code HSETNX}
-     * на одном поле одной командой.
+     * {@code cas_transition}-подобный claim — один атомарный Lua-вызов
+     * ({@code submit_claim.lua}, ресурс classpath), тем же способом, что
+     * {@code apply_atomic_charge} в billing-service и
+     * {@code cas_transition}/{@code finalize} в pipeline-engine.
+     *
+     * <p>Семантика не изменилась: вернуть, удалось ли захватить claim, а если
+     * нет — переиспользовать уже записанный исход/queue_msg_id. Изменилось
+     * ЧИСЛО round trip'ов и атомарность — полное обоснование (замеры, класс
+     * утечки ключей без TTL) в шапке {@code submit_claim.lua}: раньше это были
+     * две последовательные команды в КАЖДОЙ ветке (HSETNX+EXPIRE либо
+     * HSETNX+HGETALL), и падение процесса между HSETNX и EXPIRE оставляло
+     * ключ без TTL навсегда.
      */
     public ClaimResult claim(String stageExecutionId, String deterministicQueueMsgId) {
-        RedisCommands<String, String> commands = connection.sync();
         String k = key(stageExecutionId);
-        boolean won = commands.hsetnx(k, "queue_msg_id", deterministicQueueMsgId);
-        if (won) {
-            commands.expire(k, TTL);
+        List<Object> result = evalClaim(k, deterministicQueueMsgId);
+
+        if (result.isEmpty()) {
+            // По контракту скрипта невозможно — но молча трактовать пустой
+            // ответ как "claim захвачен" нельзя: это был бы реальный дубль
+            // submit'а абоненту, ради предотвращения которого класс и написан.
+            throw new IllegalStateException("submit_claim.lua вернул пустой ответ для " + k);
+        }
+        if ("WON".equals(result.get(0))) {
             return new ClaimResult.Won(deterministicQueueMsgId);
         }
 
-        Map<String, String> existing = commands.hgetall(k);
+        // {"EXISTS", field, value, ...} — плоский HGETALL, прочитанный тем же
+        // неделимым шагом, что и HSETNX (см. шапку скрипта).
+        Map<String, String> existing = new HashMap<>();
+        for (int i = 1; i + 1 < result.size(); i += 2) {
+            existing.put((String) result.get(i), (String) result.get(i + 1));
+        }
+
         String queueMsgId = existing.getOrDefault("queue_msg_id", deterministicQueueMsgId);
         if ("DONE".equals(existing.get("status"))) {
             Outcome outcome = Outcome.valueOf(existing.get("outcome"));
@@ -181,6 +239,52 @@ public final class SubmitIdempotencyStore {
             return new ClaimResult.AlreadyDone(cached, queueMsgId);
         }
         return new ClaimResult.AmbiguousInFlight(queueMsgId);
+    }
+
+    /**
+     * {@code EVALSHA} с фоллбэком на {@code EVAL} по {@code NOSCRIPT} —
+     * см. {@link #claimScriptCached} про рестарт Redis.
+     */
+    private List<Object> evalClaim(String key, String deterministicQueueMsgId) {
+        RedisCommands<String, String> commands = connection.sync();
+        String[] keys = {key};
+        String ttlSeconds = String.valueOf(TTL.toSeconds());
+
+        if (claimScriptCached) {
+            try {
+                return commands.evalsha(CLAIM_SHA, ScriptOutputType.MULTI, keys, deterministicQueueMsgId, ttlSeconds);
+            } catch (RedisNoScriptException e) {
+                claimScriptCached = false; // кэш скриптов Redis пуст — ниже EVAL заполнит его заново
+            }
+        }
+
+        List<Object> result = commands.eval(CLAIM_SCRIPT, ScriptOutputType.MULTI, keys, deterministicQueueMsgId, ttlSeconds);
+        claimScriptCached = true;
+        return result;
+    }
+
+    private static String loadScript(String resourceName) {
+        try (InputStream in = SubmitIdempotencyStore.class.getClassLoader().getResourceAsStream(resourceName)) {
+            if (in == null) {
+                throw new IllegalStateException(resourceName + " не найден в classpath");
+            }
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new UncheckedIOException("не удалось прочитать " + resourceName, e);
+        }
+    }
+
+    private static String sha1Hex(String script) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-1").digest(script.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(digest.length * 2);
+            for (byte b : digest) {
+                sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
+            }
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-1 обязан быть доступен в любой JVM", e);
+        }
     }
 
     /** Записывает исход состоявшегося (или трактованного как UNKNOWN) submit'а. */
@@ -255,6 +359,47 @@ public final class SubmitIdempotencyStore {
         }
 
         return pending;
+    }
+
+    /**
+     * Освобождение ключей {@code dlvsubmit:{stage_execution_id}} записей,
+     * оффсеты которых УЖЕ подтверждённо закоммичены.
+     *
+     * <p>Требование сформулировано явно: состояние сообщения, дошедшего до
+     * терминальной стадии, не должно оставаться ни в Redis, ни в Kafka.
+     * Раньше ключ жил до 24-часового TTL независимо от судьбы сообщения, и
+     * Runtime Redis рос до 1.16ГБ — на этой машине нехватка памяти бьёт по
+     * хвостам латентности напрямую. TTL остаётся страховкой ровно для того,
+     * для чего и нужен: записи, не дошедшие до подтверждённого коммита.
+     *
+     * <p>{@code UNLINK}, а не {@code DEL}: освобождение памяти уходит в
+     * фоновый поток Redis, вызывающий не платит за него на горячем пути.
+     *
+     * <p>Ждать здесь нечего и намеренно не ждём — потеря освобождения не
+     * влияет на корректность (ключ доживёт до TTL), а поток опроса, из
+     * которого это вызывается, обязан немедленно вернуться к {@code poll()}.
+     * Ошибка логируется, но не пробрасывается: сорвать цикл опроса из-за
+     * неудавшейся уборки было бы несоразмерно.
+     *
+     * <p><b>Вызывать ТОЛЬКО после подтверждённого коммита оффсета.</b>
+     * Обоснование и разобранный опасный вариант — в javadoc
+     * {@code KafkaIo.ClaimReleaser}: освобождение раньше коммита открывает
+     * повторный submit тому же абоненту.
+     */
+    public void releaseAsync(Collection<String> stageExecutionIds) {
+        if (stageExecutionIds == null || stageExecutionIds.isEmpty()) {
+            return;
+        }
+        String[] keys = stageExecutionIds.stream().map(SubmitIdempotencyStore::key).toArray(String[]::new);
+        try {
+            connection.async().unlink(keys).exceptionally(error -> {
+                LOG.log(Level.WARNING, "не удалось освободить " + keys.length
+                    + " ключей dlvsubmit — уйдут по TTL", error);
+                return null;
+            });
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "освобождение ключей dlvsubmit не отправлено — уйдут по TTL", e);
+        }
     }
 
     /** Ожидание записей, отданных {@link #recordOutcomeAsync}. */

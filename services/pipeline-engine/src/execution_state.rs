@@ -358,15 +358,58 @@ mod tests {
         assert_eq!(d, Decision::Next(NextStageDecision { node_id: "n5_delivery".into(), stage_name: "DELIVERY".into() }));
         assert_eq!(state.route_id.as_deref(), Some("beeline_smpp_primary"));
 
-        // Delivery SUCCEEDED -> DeliveryReconciliation
+        // Delivery SUCCEEDED -> Terminal. Оператор ПРИНЯЛ submit — исход
+        // отправки известен, реконсилировать нечего (stage_contract.proto,
+        // DeliveryReconciliationExtension.triggering_outcome: "сегодня всегда
+        // SUBMISSION_OUTCOME_UNKNOWN"). Раньше граф вёл этот SUCCEEDED в
+        // n6_reconciliation, и на живом стенде это дало 16 187 сообщений с
+        // DELIVERY=SUCCEEDED и одновременно
+        // DELIVERY_RECONCILIATION=CONFIRMED_NOT_SUBMITTED — платформа
+        // объявляла успешно отправленные сообщения неотправленными.
         dispatch(&mut state, "se5");
         let d = handle_stage_completed(&mut state, &pipeline, &completed("se5", StageName::Delivery, Outcome::Succeeded, None), 0);
+        assert_eq!(d, Decision::Terminal, "успешный submit терминален — в реконсиляцию идёт только НЕИЗВЕСТНЫЙ исход");
+    }
+
+    /// Ветка, ради которой реконсиляция вообще существует: исход отправки
+    /// реально неизвестен (обрыв ответа/таймаут SMPP — DeliveryService.java
+    /// эмитит OUTCOME_SUBMISSION_OUTCOME_UNKNOWN), и только он обязан вести
+    /// в n6_reconciliation. До исправления графа этого ребра не было в
+    /// `next` ВООБЩЕ — то есть единственный случай, который реконсиляция
+    /// должна разбирать, молча терминировал, а вместо него туда шли все
+    /// успешные отправки (16 187 ложных CONFIRMED_NOT_SUBMITTED на стенде).
+    #[test]
+    fn delivery_submission_outcome_unknown_routes_to_reconciliation_then_terminates() {
+        let pipeline = real_pipeline();
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "acme".into(), false);
+        state.current_node_id = "n5_delivery".to_string();
+        dispatch(&mut state, "se5");
+
+        let d = handle_stage_completed(&mut state, &pipeline, &completed("se5", StageName::Delivery, Outcome::SubmissionOutcomeUnknown, None), 0);
         assert_eq!(d, Decision::Next(NextStageDecision { node_id: "n6_reconciliation".into(), stage_name: "DELIVERY_RECONCILIATION".into() }));
+        assert_eq!(state.current_node_id, "n6_reconciliation");
 
         // DeliveryReconciliation SUCCEEDED -> Terminal (null в графе)
         dispatch(&mut state, "se6");
         let d = handle_stage_completed(&mut state, &pipeline, &completed("se6", StageName::DeliveryReconciliation, Outcome::Succeeded, None), 0);
         assert_eq!(d, Decision::Terminal);
+    }
+
+    /// Парный к тесту выше: DELIVERY:SUCCEEDED обязан быть терминальным.
+    /// Отдельным тестом (а не только внутри happy-path), потому что именно
+    /// это ребро было инвертировано и именно оно порождало порчу данных —
+    /// регресс здесь должен падать явно и адресно.
+    #[test]
+    fn delivery_succeeded_is_terminal_and_never_enters_reconciliation() {
+        let pipeline = real_pipeline();
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "acme".into(), false);
+        state.current_node_id = "n5_delivery".to_string();
+        dispatch(&mut state, "se5");
+
+        let d = handle_stage_completed(&mut state, &pipeline, &completed("se5", StageName::Delivery, Outcome::Succeeded, None), 0);
+
+        assert_eq!(d, Decision::Terminal);
+        assert_eq!(state.current_node_id, "n5_delivery", "терминал не двигает узел — и уж точно не в n6_reconciliation");
     }
 
     #[test]

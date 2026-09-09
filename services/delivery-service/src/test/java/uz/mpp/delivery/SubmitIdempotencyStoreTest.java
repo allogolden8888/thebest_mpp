@@ -67,6 +67,47 @@ class SubmitIdempotencyStoreTest {
         assertEquals("dlv-" + stageExecutionId, won.queueMsgId());
     }
 
+    /**
+     * Регрессия на реальный класс утечки: раньше claim делал HSETNX и EXPIRE
+     * ДВУМЯ отдельными командами — падение процесса между ними оставляло
+     * ключ dlvsubmit:* без TTL навсегда (вечный рост Runtime Redis, чья
+     * нехватка памяти и была источником хвостов латентности, см. шапку
+     * submit_claim.lua). Теперь это один Lua-вызов; проверяем TTL напрямую,
+     * а не по косвенным признакам.
+     */
+    @Test
+    void claimSetsTtlInTheSameCall() {
+        store.claim(stageExecutionId, "dlv-" + stageExecutionId);
+
+        try (StatefulRedisConnection<String, String> conn = rawClient.connect()) {
+            long ttl = conn.sync().ttl("dlvsubmit:" + stageExecutionId);
+            assertTrue(ttl > 0 && ttl <= Duration.ofHours(24).getSeconds(),
+                "TTL claim'а = " + ttl + "с, ожидали (0; 86400] — ключ без TTL живёт в Redis вечно");
+        }
+    }
+
+    /**
+     * Скрипт-кэш Redis пуст после его рестарта (а также после SCRIPT FLUSH и
+     * при переключении на другую реплику) — EVALSHA в этот момент возвращает
+     * NOSCRIPT. Без фоллбэка на EVAL claim падал бы на КАЖДОМ сообщении до
+     * рестарта самого сервиса; переживаемость рестарта Redis на этом стенде
+     * уже была отдельной проблемой, поэтому проверяется явно.
+     */
+    @Test
+    void claimSurvivesEmptyRedisScriptCache() {
+        // Первый вызов гарантированно кладёт скрипт в кэш Redis.
+        store.claim(stageExecutionId, "dlv-" + stageExecutionId);
+
+        try (StatefulRedisConnection<String, String> conn = rawClient.connect()) {
+            conn.sync().scriptFlush(); // ровно то, что делает рестарт Redis со скрипт-кэшем
+        }
+
+        SubmitIdempotencyStore.ClaimResult afterFlush = store.claim(stageExecutionId, "dlv-" + stageExecutionId);
+        SubmitIdempotencyStore.ClaimResult.AmbiguousInFlight ambiguous =
+            assertInstanceOf(SubmitIdempotencyStore.ClaimResult.AmbiguousInFlight.class, afterFlush);
+        assertEquals("dlv-" + stageExecutionId, ambiguous.queueMsgId());
+    }
+
     @Test
     void secondClaimBeforeOutcomeRecordedIsAmbiguousNotResubmitted() {
         store.claim(stageExecutionId, "dlv-" + stageExecutionId);

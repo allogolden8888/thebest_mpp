@@ -114,7 +114,24 @@ func main() {
 	}
 	retainHours := 48
 	if v := os.Getenv("DLR_CORRELATION_RETAIN_HOURS"); v != "" {
+		// Верхняя граница — не косметика. time.Duration это int64 наносекунд,
+		// поэтому time.Duration(retainHours)*time.Hour переполняется примерно
+		// на 2 562 047 часах и становится ОТРИЦАТЕЛЬНЫМ. Отрицательный maxPast
+		// в SetPartitionWindow означает, что ни один реальный submitted_at не
+		// попадёт в окно: PlanPartitions отвергнет всё, запись встанет
+		// полностью. Ровно этот класс отказа уже стоил сервису 18 дней
+		// простоя (партиции не создавались, вставки падали с SQLSTATE 23514),
+		// и обнаружился он только когда мы пошли искать, почему нет DLR.
+		// Опечатка в env (лишние нули) не должна давать тот же результат
+		// молча, поэтому значение зажимается, а не отбрасывается: зажатое
+		// окно оставляет сервис рабочим, отброшенное — тоже, но человек,
+		// поставивший число, не узнает, что оно не применилось.
+		const maxRetainHours = 24 * 365 // год — заведомо больше любого разумного окна корреляции
 		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			if parsed > maxRetainHours {
+				log.Printf("dlr-correlation-writer: DLR_CORRELATION_RETAIN_HOURS=%d выходит за верхнюю границу, зажато до %d", parsed, maxRetainHours)
+				parsed = maxRetainHours
+			}
 			retainHours = parsed
 		}
 	}

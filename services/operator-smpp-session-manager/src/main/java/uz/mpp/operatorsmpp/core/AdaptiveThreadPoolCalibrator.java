@@ -59,7 +59,8 @@ public final class AdaptiveThreadPoolCalibrator {
     // стартовую точку своей бухгалтерии, не перечитывая их состояние.
     private int appliedSize;
     private double bestP95 = Double.MAX_VALUE;
-    private final long calibrationStartMs;
+    // не final: окно калибровки перезапускается, если оно истекло на простое (см. maybeTick)
+    private long calibrationStartMs;
     private long lastTickMs;
 
     public AdaptiveThreadPoolCalibrator(ThreadPoolExecutor pool, ResizableSemaphore semaphore, BooleanSupplier sessionAlive,
@@ -117,6 +118,33 @@ public final class AdaptiveThreadPoolCalibrator {
         }
 
         if (now - calibrationStartMs >= windowDurationMs) {
+            // ИЗМЕРЕНО: раньше здесь безусловно вызывался lock(). Но
+            // maybeTick() дёргается ТОЛЬКО из recordTaskLatency(), то есть
+            // только когда submit реально завершился. Если трафика не было,
+            // тиков не было тоже — и первый же вызов после начала нагрузки
+            // видел уже истёкшее окно и фиксировал пул, не собрав НИ ОДНОГО
+            // сэмпла. В логах operator-smpp-session-manager это видно до сих
+            // пор как нетронутый Double.MAX_VALUE:
+            //   "thread pool calibrated: 32 threads (p95=1.7976931348623157E308ms)"
+            // — решение принято вообще без данных, а "find once, lock, done"
+            // закрепляет его навсегда. Здесь цена ошибки выше, чем в
+            // delivery-service/billing-service, где тот же баг уже исправлен:
+            // этот калибратор в лок-степе держит и размер pacerWorkerPool, и
+            // число permits concurrentSubmitPermits, то есть залипание без
+            // данных фиксирует и реальную пропускную способность SMPP-сессии.
+            //
+            // Чиним минимально и ровно так же, как в delivery-service: если
+            // за окно не набралось ни одного валидного p95, значит окно
+            // прошло на простое — фиксировать нечего, отсчитываем его заново
+            // от момента, когда трафик реально пошёл.
+            Double atExpiry = latencyWindow.p95();
+            if (bestP95 == Double.MAX_VALUE) {
+                if (atExpiry == null) {
+                    calibrationStartMs = now;
+                    return;
+                }
+                bestP95 = atExpiry; // данные набрались ровно к истечению окна
+            }
             lock();
             return;
         }

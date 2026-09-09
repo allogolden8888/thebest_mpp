@@ -35,7 +35,7 @@
     {
       "node_id": "n5_delivery",
       "stage_name": "DELIVERY",
-      "next": { "SUCCEEDED": "n6_reconciliation", "FAILED": null, "TIMED_OUT": "n6_reconciliation", "RETRY_EXHAUSTED": "n6_reconciliation" }
+      "next": { "SUCCEEDED": null, "SUBMISSION_OUTCOME_UNKNOWN": "n6_reconciliation", "FAILED": null, "TIMED_OUT": "n6_reconciliation", "RETRY_EXHAUSTED": "n6_reconciliation" }
     },
     {
       "node_id": "n6_reconciliation",

@@ -97,4 +97,42 @@ class AdaptiveThreadPoolCalibratorTest {
         assertEquals(AdaptiveThreadPoolCalibrator.FLOOR, pool.getMaximumPoolSize());
         assertEquals(AdaptiveThreadPoolCalibrator.FLOOR, sem.availablePermits());
     }
+
+    /**
+     * Регрессия на реальную находку: {@code maybeTick()} вызывается ТОЛЬКО из
+     * {@code recordTaskLatency()}, поэтому калибровочное окно могло целиком
+     * пройти на простое — и первый же вызов после начала нагрузки фиксировал
+     * пул, не собрав ни одного сэмпла. В логах operator-smpp-session-manager
+     * это до сих пор видно как нетронутый Double.MAX_VALUE:
+     * "thread pool calibrated: 32 threads (p95=1.7976931348623157E308ms)".
+     * Тот же баг уже исправлен в delivery-service и billing-service; здесь он
+     * дороже, потому что залипший размер держит ещё и число permits
+     * SMPP-сессии.
+     */
+    @Test
+    void неФиксируетсяПоИстечениюОкнаЕслиТрафикаНеБыло() {
+        ThreadPoolExecutor pool = newPool();
+        ResizableSemaphore sem = new ResizableSemaphore(AdaptiveThreadPoolCalibrator.FLOOR);
+        // windowDurationMs=0 — окно калибровки истекает мгновенно.
+        AdaptiveThreadPoolCalibrator calibrator = new AdaptiveThreadPoolCalibrator(
+            pool, sem, () -> true, 512, 0, 0);
+
+        // Меньше порога значимости LatencyWindow — валидного p95 нет.
+        for (int i = 0; i < 5; i++) {
+            calibrator.recordTaskLatency(10);
+        }
+
+        assertTrue(!calibrator.isLocked(),
+            "без единого валидного p95 фиксировать нечего — окно должно отсчитываться заново");
+        assertEquals(AdaptiveThreadPoolCalibrator.FLOOR, pool.getMaximumPoolSize(),
+            "пул не должен шевелиться, пока окно перезапускается");
+        assertEquals(AdaptiveThreadPoolCalibrator.FLOOR, sem.availablePermits(),
+            "семафор не должен шевелиться, пока окно перезапускается");
+
+        // Как только данные реально набрались — фиксация происходит штатно.
+        for (int i = 0; i < 25; i++) {
+            calibrator.recordTaskLatency(10);
+        }
+        assertTrue(calibrator.isLocked(), "с набранными сэмплами истечение окна обязано зафиксировать пул");
+    }
 }

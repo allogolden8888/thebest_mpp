@@ -29,4 +29,45 @@ public record Evidence(
     public Evidence withQuerySm(QuerySmOutcome outcome) {
         return new Evidence(submitAcceptedObserved, deliveryStatusObserved, outcome);
     }
+
+    /**
+     * Объединение двух наборов свидетельств об ОДНОМ сообщении.
+     *
+     * <p>Нужно потому, что свидетельство теперь копится в двух местах:
+     * в {@code reconciliation_cases.evidence} (когда case уже есть) и в
+     * {@code reconciliation.early_evidence} (когда свидетельство обогнало
+     * создание case'а — измеренная гонка, DLR приходит через 20–70 мс после
+     * submit, см. migrations/V032). В момент создания case'а и при каждом
+     * последующем свидетельстве обе половины сливаются здесь.
+     *
+     * <p>Слияние монотонно по каждому полю: «наблюдалось» никогда не
+     * возвращается в «не наблюдалось», поэтому повторное применение того же
+     * свидетельства (at-least-once Kafka) ничего не меняет —
+     * {@code a.merge(b).merge(b) == a.merge(b)}. Именно эта идемпотентность
+     * позволяет не бояться, что drain раннего evidence выполнится дважды
+     * (двумя consumer-потоками или после передоставки).
+     *
+     * <p>Если оба набора несут РАЗНЫЕ терминальные значения одного поля
+     * (напр. DLR SUCCESS в case'е и FAILURE в раннем) — побеждает {@code other}
+     * (last-writer-wins). Такой конфликт означает два противоречивых DLR по
+     * одному сообщению; выбор произвольный, но детерминированный, и он не
+     * влияет на предмет находки: ни одно из значений не даёт
+     * CONFIRMED_NOT_SUBMITTED (см. {@code OutcomeResolver.resolve}).
+     */
+    public Evidence merge(Evidence other) {
+        return new Evidence(
+            submitAcceptedObserved || other.submitAcceptedObserved,
+            other.deliveryStatusObserved != DeliveryOutcome.NONE ? other.deliveryStatusObserved : deliveryStatusObserved,
+            other.querySmObserved != QuerySmOutcome.NOT_CALLED ? other.querySmObserved : querySmObserved
+        );
+    }
+
+    /**
+     * Есть ли здесь хоть какое-то свидетельство. {@code false} — ровно тот
+     * случай, ради которого дедлайн и существует: за всё окно реконсиляции
+     * не пришло ничего.
+     */
+    public boolean isEmpty() {
+        return equals(empty());
+    }
 }

@@ -15,6 +15,7 @@ import uz.mpp.deliveryreconciliation.core.OutcomeResolver;
 import uz.mpp.deliveryreconciliation.health.HealthServer;
 import uz.mpp.deliveryreconciliation.kafkaio.StageCompletedBuilder;
 import uz.mpp.deliveryreconciliation.kafkaio.StageCompletedPublisher;
+import uz.mpp.deliveryreconciliation.store.CaseStore;
 import uz.mpp.deliveryreconciliation.store.ReconciliationCase;
 import uz.mpp.deliveryreconciliation.store.ReconciliationStore;
 import uz.mpp.platformcontracts.common.v1.ReconciliationOutcome;
@@ -30,6 +31,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -70,6 +72,20 @@ public final class Main {
         Duration.ofMinutes(Long.parseLong(env("RECONCILIATION_WINDOW_MINUTES", "30")));
 
     /**
+     * Сколько держать «раннее» свидетельство (reconciliation.early_evidence,
+     * migrations/V032) для сообщения, у которого case так и не появился.
+     *
+     * <p>По умолчанию — ровно окно реконсиляции: свидетельство старше окна
+     * заведомо некому забрать, потому что любой case, который мог бы его
+     * подхватить, к этому моменту уже закрыт по дедлайну. Отдельный env — на
+     * случай, если pipeline-engine отстаёт сильнее окна и case создаётся
+     * позже: тогда TTL поднимают, не трогая само окно.
+     */
+    private static final Duration EARLY_EVIDENCE_TTL = Duration.ofMinutes(
+        Long.parseLong(env("RECONCILIATION_EARLY_EVIDENCE_TTL_MINUTES",
+            String.valueOf(RECONCILIATION_WINDOW.toMinutes()))));
+
+    /**
      * CODE_REVIEW.md #11 — per-case lock для read-modify-write поверх
      * evidence JSONB. {@code operator.submit.accepted} и {@code delivery.status}
      * консюмятся в двух независимых потоках и оба вызывают
@@ -98,10 +114,10 @@ public final class Main {
         // (см. {@link #caseLocks}) остаются единственным механизмом
         // сериализации read-modify-write, они от соединения не зависели.
         List<Connection> connections = new ArrayList<>();
-        ReconciliationStore sweepStore = openStore(connections);
-        ReconciliationStore executeStore = openStore(connections);
-        ReconciliationStore submitAcceptedStore = openStore(connections);
-        ReconciliationStore deliveryStatusStore = openStore(connections);
+        CaseStore sweepStore = openStore(connections);
+        CaseStore executeStore = openStore(connections);
+        CaseStore submitAcceptedStore = openStore(connections);
+        CaseStore deliveryStatusStore = openStore(connections);
 
         StageCompletedPublisher publisher = new StageCompletedPublisher(env("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap.mpp.svc:9092"));
 
@@ -130,18 +146,22 @@ public final class Main {
         scheduler.scheduleWithFixedDelay(() -> sweepDeadlines(sweepStore, publisher, sweepBatchSize),
             sweepIntervalMs, sweepIntervalMs, TimeUnit.MILLISECONDS);
 
-        Thread executeConsumerThread = new Thread(() -> runExecuteConsumer(executeStore), "reconciliation-execute-consumer");
+        // publisher передаётся и в consumer'ы, а не только в sweep: с этой
+        // правки case закрывается СРАЗУ по терминальному свидетельству, а не
+        // ждёт дедлайна (см. applyToCase). KafkaProducer потокобезопасен —
+        // один экземпляр на все потоки, как и раньше.
+        Thread executeConsumerThread = new Thread(() -> runExecuteConsumer(executeStore, publisher), "reconciliation-execute-consumer");
         executeConsumerThread.setDaemon(true);
         executeConsumerThread.start();
 
         // CODE_REVIEW.md #11 — collect_evidence: до этой находки эти два
         // топика не консюмились нигде, поэтому sweepDeadlines всегда резолвил
         // Evidence.empty() (см. докстринг sweepDeadlines).
-        Thread submitAcceptedConsumerThread = new Thread(() -> runSubmitAcceptedConsumer(submitAcceptedStore), "reconciliation-submit-accepted-consumer");
+        Thread submitAcceptedConsumerThread = new Thread(() -> runSubmitAcceptedConsumer(submitAcceptedStore, publisher), "reconciliation-submit-accepted-consumer");
         submitAcceptedConsumerThread.setDaemon(true);
         submitAcceptedConsumerThread.start();
 
-        Thread deliveryStatusConsumerThread = new Thread(() -> runDeliveryStatusConsumer(deliveryStatusStore), "reconciliation-delivery-status-consumer");
+        Thread deliveryStatusConsumerThread = new Thread(() -> runDeliveryStatusConsumer(deliveryStatusStore, publisher), "reconciliation-delivery-status-consumer");
         deliveryStatusConsumerThread.setDaemon(true);
         deliveryStatusConsumerThread.start();
 
@@ -165,7 +185,7 @@ public final class Main {
     }
 
     /** handle_reconciliation_execute — consumer stage.delivery-reconciliation (StageExecuteCommand). */
-    private static void runExecuteConsumer(ReconciliationStore store) {
+    private static void runExecuteConsumer(CaseStore store, StageCompletedPublisher publisher) {
         try (KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(consumerProps("delivery-reconciliation-service"))) {
             consumer.subscribe(Collections.singletonList("stage.delivery-reconciliation"));
             while (true) {
@@ -176,8 +196,7 @@ public final class Main {
                         UUID messageId = UUID.fromString(cmd.getMessageId());
                         UUID stageExecutionId = UUID.fromString(cmd.getStageExecutionId());
                         String operatorId = cmd.getDeliveryReconciliation().getQueueMsgId(); // placeholder — см. README
-                        store.loadByMessageId(messageId)
-                            .orElseGet(() -> store.create(messageId, stageExecutionId, operatorId, Instant.now().plus(RECONCILIATION_WINDOW)));
+                        openCase(store, publisher, messageId, stageExecutionId, operatorId);
                     } catch (Exception e) {
                         System.err.println("handle_reconciliation_execute failed: " + e.getMessage());
                     }
@@ -187,13 +206,37 @@ public final class Main {
     }
 
     /**
+     * handle_reconciliation_execute — создание case'а и НЕМЕДЛЕННЫЙ подхват
+     * свидетельства, которое пришло раньше него.
+     *
+     * <p>Ради второго шага (drain) всё и затевалось. Замер на стенде: DLR от
+     * SMSC приходит через 20–70 мс после submit — SMSC стоит в одной сети со
+     * стендом, — а case создаётся длинным путём delivery-service ->
+     * stage.completed -> pipeline-engine -> stage.delivery-reconciliation.
+     * Свидетельство регулярно выигрывает эту гонку, и раньше в этом случае
+     * молча выбрасывалось ({@code loadByMessageId(...).ifPresent(...)}: нет
+     * case'а — нет и получателя). Это одна из двух причин, по которым на
+     * стенде 16 187 сообщений получили финальный CONFIRMED_NOT_SUBMITTED,
+     * имея при этом DELIVERY = SUCCEEDED.
+     */
+    static void openCase(CaseStore store, StageCompletedPublisher publisher,
+                         UUID messageId, UUID stageExecutionId, String operatorId) {
+        ReconciliationCase caze = store.loadByMessageId(messageId)
+            .orElseGet(() -> store.create(messageId, stageExecutionId, operatorId, Instant.now().plus(RECONCILIATION_WINDOW)));
+        // Своего свидетельства эта ветка не несёт (Evidence.empty()) — она
+        // только забирает накопленное ранним путём и, если его уже достаточно
+        // для однозначного вывода, тут же закрывает case.
+        applyToCase(store, publisher, caze, Evidence.empty());
+    }
+
+    /**
      * CODE_REVIEW.md #11 — collect_evidence, ветка {@code operator.submit.accepted}.
      * Позднее подтверждение, что оператор принял submit — единственный
      * положительный сигнал, если DLR/query_sm так и не пришли до дедлайна
      * (см. {@code OutcomeResolver.resolve}, ветка
      * {@code RECONCILIATION_OUTCOME_CONFIRMED_SUBMITTED}).
      */
-    private static void runSubmitAcceptedConsumer(ReconciliationStore store) {
+    private static void runSubmitAcceptedConsumer(CaseStore store, StageCompletedPublisher publisher) {
         try (KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(consumerProps("delivery-reconciliation-service-submit-accepted"))) {
             consumer.subscribe(Collections.singletonList("operator.submit.accepted"));
             while (true) {
@@ -202,7 +245,7 @@ public final class Main {
                     try {
                         OperatorSubmitAccepted event = OperatorSubmitAccepted.parseFrom(record.value());
                         UUID messageId = UUID.fromString(event.getMessageId());
-                        mergeEvidence(store, messageId, Evidence::withSubmitAccepted);
+                        mergeEvidence(store, publisher, messageId, Evidence.empty().withSubmitAccepted());
                     } catch (Exception e) {
                         System.err.println("collect_evidence (operator.submit.accepted) failed: " + e.getMessage());
                     }
@@ -217,7 +260,7 @@ public final class Main {
      * (побеждает независимо от прочего), поэтому это — самое важное из двух
      * новых consumer'ов с точки зрения корректности итогового исхода.
      */
-    private static void runDeliveryStatusConsumer(ReconciliationStore store) {
+    private static void runDeliveryStatusConsumer(CaseStore store, StageCompletedPublisher publisher) {
         try (KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(consumerProps("delivery-reconciliation-service-delivery-status"))) {
             consumer.subscribe(Collections.singletonList("delivery.status"));
             while (true) {
@@ -228,7 +271,7 @@ public final class Main {
                         UUID messageId = UUID.fromString(event.getMessageId());
                         Evidence.DeliveryOutcome outcome = mapNormalizedStatus(event.getNormalizedStatus());
                         if (outcome != null) {
-                            mergeEvidence(store, messageId, e -> e.withDeliveryStatus(outcome));
+                            mergeEvidence(store, publisher, messageId, Evidence.empty().withDeliveryStatus(outcome));
                         }
                     } catch (Exception e) {
                         System.err.println("collect_evidence (delivery.status) failed: " + e.getMessage());
@@ -256,29 +299,131 @@ public final class Main {
     }
 
     /**
-     * CODE_REVIEW.md #11 — read-modify-write поверх evidence JSONB конкретного
-     * case'а, с блокировкой per-caseId (см. докстринг {@link #caseLocks}).
-     * Case, закрытый до прихода этого evidence (поздний DLR/submit_accepted
-     * после дедлайна), — не ошибка: получателя для evidence уже нет, тихо
+     * collect_evidence — приём одного свидетельства о сообщении.
+     *
+     * <p><b>Что здесь было сломано.</b> Раньше тело метода целиком было
+     * {@code store.loadByMessageId(messageId).ifPresent(...)}: если case ещё
+     * не создан, {@code ifPresent} просто ничего не делал — свидетельство
+     * молча выбрасывалось. И это не редкий угол: SMSC стенда стоит в одной
+     * сети с машиной, DLR измеренно приходит через 20–70 мс после submit, а
+     * case создаётся длинным путём delivery-service -> stage.completed ->
+     * pipeline-engine -> stage.delivery-reconciliation. Свидетельство
+     * регулярно приходит раньше case'а. Итог замерен на живом стенде
+     * (ClickHouse): 16 187 сообщений с финальным
+     * RECONCILIATION_OUTCOME_CONFIRMED_NOT_SUBMITTED, у ВСЕХ 16 187 стадия
+     * DELIVERY при этом SUCCEEDED — платформа объявляла успешно отправленные
+     * сообщения неотправленными.
+     *
+     * <p><b>Порядок здесь — не косметика, он и закрывает гонку.</b> Сначала
+     * свидетельство приземляется в {@code reconciliation.early_evidence}
+     * (migrations/V032), и только ПОТОМ идёт повторная проверка case'а.
+     * Аргумент, почему при таком порядке свидетельство не может потеряться
+     * ни при каком чередовании с созданием case'а в pipeline-engine:
+     * <ul>
+     *   <li>приземление (t1) строго раньше повторной проверки (t2);</li>
+     *   <li>создатель case'а сначала вставляет case, потом делает drain
+     *       ({@link #openCase});</li>
+     *   <li>если case существовал на t2 — свидетельство влил сюда мы сами;</li>
+     *   <li>если нет — значит, вставка case'а произойдёт позже t2 &gt; t1, а
+     *       её drain читает строку, которая к тому моменту уже записана.</li>
+     * </ul>
+     * Третьего варианта нет. При этом сам delta всегда едет с потоком «в
+     * руках» и вливается в case напрямую, так что параллельное удаление
+     * строки чужим drain'ом ничего не теряет.
+     *
+     * <p>Идемпотентность (at-least-once по всему репозиторию): и приземление
+     * ({@code ON CONFLICT DO UPDATE} по своей колонке), и слияние
+     * ({@code Evidence.merge} монотонен) переносят повтор того же события без
+     * изменения результата.
+     *
+     * <p>Case, закрытый до прихода этого evidence (поздний DLR после
+     * дедлайна), — не ошибка: получателя для evidence уже нет, тихо
      * игнорируем (тот же паттерн, что at-least-once-редоставка везде в этой
      * сессии — не каждое сообщение обязано на что-то повлиять).
+     *
+     * @param delta свидетельство ЭТОГО события — {@code Evidence.empty()} с
+     *              одним заполненным полем (раньше передавался
+     *              {@code UnaryOperator<Evidence>}; сменено на значение, т.к.
+     *              одно и то же свидетельство теперь надо и записать в
+     *              early_evidence, и слить с накопленным — мутатор в SQL не
+     *              отправишь)
      */
-    private static void mergeEvidence(ReconciliationStore store, UUID messageId, UnaryOperator<Evidence> mutator) {
-        store.loadByMessageId(messageId).ifPresent(initial -> {
-            if (!"open".equals(initial.status())) {
+    static void mergeEvidence(CaseStore store, StageCompletedPublisher publisher, UUID messageId, Evidence delta) {
+        Optional<ReconciliationCase> existing = store.loadByMessageId(messageId);
+        if (existing.isPresent()) {
+            applyToCase(store, publisher, existing.get(), delta);
+            return;
+        }
+        store.recordEarlyEvidence(messageId, delta);
+        store.loadByMessageId(messageId)
+            .ifPresent(caze -> applyToCase(store, publisher, caze, delta));
+    }
+
+    /**
+     * CODE_REVIEW.md #11 — read-modify-write поверх evidence JSONB конкретного
+     * case'а, с блокировкой per-caseId (см. докстринг {@link #caseLocks}),
+     * плюс два новых шага: подхват раннего свидетельства и немедленное
+     * закрытие case'а.
+     *
+     * <p><b>Почему drain безусловный.</b> Чтение early_evidence делается на
+     * каждом свидетельстве, даже когда case уже был на месте. Можно было бы
+     * доказать, что в этой ветке ранней строки быть не должно, — но цена
+     * ошибки в таком рассуждении ровно та, ради которой всё это и пишется
+     * (потерянное свидетельство и ложный CONFIRMED_NOT_SUBMITTED), а цена
+     * лишнего SELECT'а мала: после исправления графа пайплайна в
+     * реконсиляцию идёт только SUBMISSION_OUTCOME_UNKNOWN, т.е. ветка «case
+     * уже есть» — редкая, а не 300/с.
+     *
+     * <p><b>Фикс задержки: закрываем сразу, а не по дедлайну.</b> Раньше
+     * закрытие было только в sweep'е по {@code findExpiredOpenCases}, т.е.
+     * даже полностью разрешённый case висел открытым до
+     * RECONCILIATION_WINDOW (на стенде — 2 минуты). Это и задержка финального
+     * статуса, и удержание состояния: пока case открыт, pipeline-engine не
+     * зовёт finalize_pipeline и ключи exec:/msgctx: (+4 на сообщение) живут в
+     * Runtime Redis — при 300 сообщ/с окно в 2 минуты само по себе держит
+     * ~36 000 сообщений «в полёте» на пустом месте. Теперь дедлайн остаётся
+     * ровно для одного случая: свидетельства так и не пришло.
+     *
+     * <p><b>Второго пути закрытия не появилось.</b> Решение принимает тот же
+     * {@code OutcomeResolver.resolve}, публикацию и закрытие делает тот же
+     * {@link #sweepBatch} — просто на списке из одного case'а. Если resolve
+     * говорит «ещё рано» (вернул null — так бывает, когда виден только
+     * submit_accepted: DLR сильнее и может прийти следом, см.
+     * OutcomeResolver), sweepBatch ничего не публикует и case честно ждёт
+     * дедлайна. Дублирующее закрытие sweep'ом практически исключено (он
+     * выбирает только ПРОСРОЧЕННЫЕ case'ы, а сюда мы попадаем за десятки
+     * миллисекунд от submit при окне в минуты), а если бы и случилось —
+     * closeCases идемпотентен, а stage.completed и так at-least-once.
+     */
+    private static void applyToCase(CaseStore store, StageCompletedPublisher publisher,
+                                    ReconciliationCase initial, Evidence delta) {
+        if (!"open".equals(initial.status())) {
+            return;
+        }
+        Object lock = caseLocks.computeIfAbsent(initial.caseId(), id -> new Object());
+        synchronized (lock) {
+            ReconciliationCase fresh = store.loadByMessageId(initial.messageId()).orElse(initial);
+            if (!"open".equals(fresh.status())) {
                 return;
             }
-            Object lock = caseLocks.computeIfAbsent(initial.caseId(), id -> new Object());
-            synchronized (lock) {
-                ReconciliationCase fresh = store.loadByMessageId(messageId).orElse(initial);
-                if (!"open".equals(fresh.status())) {
-                    return;
-                }
-                Evidence current = EvidenceCodec.decode(fresh.evidenceJson());
-                Evidence updated = mutator.apply(current);
+            Evidence current = EvidenceCodec.decode(fresh.evidenceJson());
+            Optional<Evidence> early = store.loadEarlyEvidence(fresh.messageId());
+            Evidence updated = current.merge(delta);
+            if (early.isPresent()) {
+                updated = updated.merge(early.get());
+            }
+            if (!updated.equals(current)) {
                 store.persistEvidence(fresh.caseId(), EvidenceCodec.encode(updated));
             }
-        });
+            if (early.isPresent()) {
+                // Строка влита в case — она больше не нужна. Удаление под тем
+                // же локом; если параллельный consumer допишет в неё новое
+                // свидетельство между чтением и удалением, оно не потеряется:
+                // тот поток несёт свой delta с собой и вольёт его в case сам.
+                store.deleteEarlyEvidence(fresh.messageId());
+            }
+            sweepBatch(store, publisher, List.of(fresh.withEvidenceJson(EvidenceCodec.encode(updated))));
+        }
     }
 
     /**
@@ -289,9 +434,16 @@ public final class Main {
      * не кончатся, а не одним неограниченным SELECT'ом: так пиковое
      * потребление памяти не зависит от размера бэклога, но догон при этом не
      * растягивается на много тактов таймера.
+     *
+     * <p><b>Дедлайн теперь — не единственный, а последний путь закрытия.</b>
+     * Case с достаточным свидетельством закрывается сразу при его получении
+     * ({@link #applyToCase}); сюда доезжают те, по кому за всё окно
+     * реконсиляции не пришло ничего однозначного. Разбирает их та же
+     * {@link #sweepBatch}, что и немедленный путь.
      */
-    private static void sweepDeadlines(ReconciliationStore store, StageCompletedPublisher publisher, int batchSize) {
+    private static void sweepDeadlines(CaseStore store, StageCompletedPublisher publisher, int batchSize) {
         try {
+            purgeEarlyEvidence(store);
             while (true) {
                 List<ReconciliationCase> expiredCases = store.findExpiredOpenCases(Instant.now(), batchSize);
                 if (expiredCases.isEmpty()) {
@@ -312,6 +464,31 @@ public final class Main {
             }
         } catch (Exception e) {
             System.err.println("sweep_deadlines failed: " + e);
+        }
+    }
+
+    /**
+     * Чистка «раннего» свидетельства, которое так и не пригодилось: сообщения,
+     * чей case не появился за {@link #EARLY_EVIDENCE_TTL}. После исправления
+     * графа пайплайна в реконсиляцию идёт только SUBMISSION_OUTCOME_UNKNOWN —
+     * т.е. для подавляющего большинства сообщений case не появится никогда, и
+     * без этой чистки reconciliation.early_evidence росла бы линейно по
+     * трафику (при 300 сообщ/с — десятки миллионов строк в сутки). Свежее
+     * свидетельство чистка не трогает: строка старше окна реконсиляции всё
+     * равно никому не нужна — case, который мог бы её забрать, к этому моменту
+     * уже закрыт по дедлайну.
+     *
+     * <p>Выполняется в потоке sweep'а и на его соединении — отдельный поток
+     * или соединение ради одного DELETE по индексу не нужны.
+     */
+    private static void purgeEarlyEvidence(CaseStore store) {
+        try {
+            store.purgeEarlyEvidence(Instant.now().minus(EARLY_EVIDENCE_TTL));
+        } catch (Exception e) {
+            // Не должно мешать основной работе прогона: неубранные строки —
+            // это про место на диске, а неразобранные case'ы — про
+            // корректность финальных статусов.
+            System.err.println("purge_early_evidence failed: " + e.getMessage());
         }
     }
 
@@ -345,9 +522,17 @@ public final class Main {
      * одной записи не тянет за собой соседей по чанку, потому что решение
      * принимается по каждому Future отдельно.
      *
+     * <p><b>Единственная точка закрытия case'а.</b> Сюда приходят и чанк
+     * просроченных case'ов из {@link #sweepDeadlines}, и одиночный case,
+     * разрешённый досрочно по терминальному свидетельству
+     * ({@link #applyToCase}). Решение в обоих случаях принимает
+     * {@code OutcomeResolver.resolve}, публикация и закрытие — этот код;
+     * второго пути закрытия в сервисе нет намеренно, иначе логика двух путей
+     * неминуемо разъедется.
+     *
      * @return сколько case'ов реально закрыто
      */
-    private static int sweepBatch(ReconciliationStore store, StageCompletedPublisher publisher, List<ReconciliationCase> batch) {
+    private static int sweepBatch(CaseStore store, StageCompletedPublisher publisher, List<ReconciliationCase> batch) {
         List<InFlight> inFlight = new ArrayList<>(batch.size());
         int sendFailures = 0;
         String lastSendError = null;
@@ -357,6 +542,25 @@ public final class Main {
             Evidence evidence = EvidenceCodec.decode(c.evidenceJson());
             ReconciliationOutcome outcome = OutcomeResolver.resolve(evidence, deadlineState);
             if (outcome == null) {
+                continue;
+            }
+            // Защита от возврата ровно той порчи данных, ради которой писалась
+            // эта правка: 16 187 сообщений на стенде получили
+            // CONFIRMED_NOT_SUBMITTED, имея DELIVERY = SUCCEEDED. По
+            // построению OutcomeResolver этот исход недостижим, если виден
+            // хоть какой-то положительный след отправки (submit_accepted или
+            // DLR) — проверка сторожит именно инвариант, а не гипотетический
+            // ввод, и стоит один if на case. Сработает — значит, сломан
+            // resolve_outcome или evidence разъехался при чтении: тогда лучше
+            // громко не закрыть case (он останется open и попадёт в следующий
+            // прогон), чем тихо опубликовать ложный финальный статус, по
+            // которому платформа объявит доставленное сообщение
+            // неотправленным.
+            if (outcome == ReconciliationOutcome.RECONCILIATION_OUTCOME_CONFIRMED_NOT_SUBMITTED
+                && (evidence.submitAcceptedObserved() || evidence.deliveryStatusObserved() != Evidence.DeliveryOutcome.NONE)) {
+                System.err.println("ИНВАРИАНТ НАРУШЕН: resolve_outcome вернул CONFIRMED_NOT_SUBMITTED при наличии"
+                    + " свидетельства отправки (case_id=" + c.caseId() + ", message_id=" + c.messageId()
+                    + ", evidence=" + c.evidenceJson() + ") — case НЕ закрывается, публикация не выполняется");
                 continue;
             }
             String finalStatus = outcome == ReconciliationOutcome.RECONCILIATION_OUTCOME_DELIVERY_UNRESOLVED ? "unresolved" : "resolved";

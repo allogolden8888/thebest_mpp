@@ -605,6 +605,22 @@ services:
   # не получал Decision::Terminal, значит никогда не звал finalize_pipeline,
   # значит exec:{message_id} жил все ~25 часов своего TTL-бэкстопа.
   #
+  # 2026-09-08, ГРАФ ИСПРАВЛЕН — абзац выше описывает СТАРУЮ маршрутизацию,
+  # оставлен как история находки. DELIVERY:SUCCEEDED (оператор ПРИНЯЛ submit)
+  # больше не ведёт в реконсиляцию — он терминален; в n6_reconciliation теперь
+  # идёт DELIVERY:SUBMISSION_OUTCOME_UNKNOWN, ровно как предписывает
+  # platform-contracts/common/stage_contract.proto
+  # (DeliveryReconciliationExtension.triggering_outcome: "сегодня всегда
+  # SUBMISSION_OUTCOME_UNKNOWN"), плюс TIMED_OUT/RETRY_EXHAUSTED как и раньше.
+  # Причина: инвертированный граф давал 16 187 сообщений с DELIVERY=SUCCEEDED
+  # и одновременно DELIVERY_RECONCILIATION=CONFIRMED_NOT_SUBMITTED (измерено
+  # в ClickHouse на живом стенде) — успешно отправленные объявлялись
+  # неотправленными. Побочный эффект исправления, важный для этого стенда:
+  # успешные отправки теперь финализируются сразу после DELIVERY, а не висят
+  # в exec:/msgctx: всё окно реконсиляции — основной поток больше не держит
+  # Runtime Redis. Сам сервис нужен по-прежнему: ветка неизвестного исхода
+  # без консьюмера так же не терминируется.
+  #
   # Измерено на живой системе: 373 821 сообщение в топике при НУЛЕ consumer
   # group'ов, 1.48 млн ключей и 1.16ГБ в Runtime Redis (у которого при этом
   # maxmemory=0/noeviction — отдельная дыра, лимита нет вовсе). Это и есть

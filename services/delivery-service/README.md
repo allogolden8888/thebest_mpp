@@ -46,7 +46,8 @@ mvn test
 26 тестов:
 * `SegmentMessage` (11) — границы GSM-7/UCS-2 (160/161, 306/307, escape-символ, кириллица, 70/71-code-unit границы UCS-2, fail-safe откат на несовпадение encoding-подсказки).
 * `DeliveryService` (8) — все 4 `SubmitOutcomeStatus` → `Outcome` маппинги (включая `UNRECOGNIZED`/`UNSPECIFIED` → `SUBMISSION_OUTCOME_UNKNOWN`, не крашится на неизвестном enum-значении), gRPC-транспортный сбой тоже маппится в `SUBMISSION_OUTCOME_UNKNOWN`, не `FAILED` (нельзя утверждать, что оператор бы отклонил — обрыв мог случиться уже после реального accept), **регрессия на `resolved_operator_id`** (`buildSubmitRequestCarriesOperatorIdFromDeliveryExtensionNotRouteId`), `retryable` флаг верно завязан на `outcome`.
-* `KafkaIo.OffsetTracker` (4) — тот же паттерн проверки, что в billing-service (см. его README/`KafkaIoTest.java`), применённый здесь с первого коммита, не после отдельной находки.
+* `OffsetWatermarkTracker` (11) — семантика коммита непрерывного цикла опроса (батч-барьер убран, записи завершаются не по порядку): watermark идёт только по непрерывному префиксу завершённых оффсетов, дыра держит коммит, повторные завершения его не двигают, завершения прошлой эпохи (после ребаланса) отбрасываются, poison-pill завершение разблокирует партицию. Заменил прежний `KafkaIo.OffsetTracker`, который был безопасен только потому, что цикл ждал весь батч перед коммитом.
+* `KafkaIo.shouldPause` (4) — backpressure по числу in-flight записей с гистерезисом (`pause()` на потолке, `resume()` на половине).
 * `HealthServer` (3) — реальный HTTP round-trip на эфемерном порту.
 
 ## Что НЕ реализовано на этом шаге (честно, не спрятано)
