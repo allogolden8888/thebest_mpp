@@ -40,6 +40,10 @@ struct PartitionState {
     /// получения), не через `mark_done` (порядок завершения).
     next_to_commit: Option<i64>,
     completed_out_of_order: BTreeSet<i64>,
+    /// Что уже реально отправлено в Kafka. Нужно, чтобы периодический
+    /// коммит не слал одно и то же значение повторно, когда за интервал
+    /// watermark не двигался.
+    last_committed: Option<i64>,
 }
 
 pub struct OffsetTracker {
@@ -89,6 +93,40 @@ impl OffsetTracker {
             advanced = true;
         }
         if advanced { state.next_to_commit } else { None }
+    }
+
+    /// Партиции, чей watermark продвинулся с прошлого вызова.
+    ///
+    /// ЗАЧЕМ. `mark_done` возвращает новый watermark практически на КАЖДОЙ
+    /// записи (в обычном случае обработка завершается по порядку), и
+    /// вызывающий шлёт на каждую из них отдельный `consumer.commit`. При 300
+    /// TPS это ~300 коммитов/с у incoming-цикла и ~1500/с у completed-цикла
+    /// (пять stage.completed на сообщение), плюс столько же у каждого
+    /// Rust-сервиса стадии — тысячи запросов OffsetCommit в секунду к
+    /// одному брокеру. Коммит асинхронный и сам по себе не блокирует
+    /// обработку, но это постоянная фоновая нагрузка на тот же брокер,
+    /// через который идёт весь полезный трафик.
+    ///
+    /// Семантика не ослабляется: коммитится ровно тот же сплошной префикс,
+    /// просто реже. Незакоммиченный к моменту падения хвост
+    /// передоставляется — at-least-once, как и раньше. Единственное
+    /// следствие более редкого коммита — больше передоставок при аварийной
+    /// остановке, что этот конвейер и так обязан переживать.
+    ///
+    /// Тот же переход уже сделан в delivery-service (KafkaIo: commitAsync по
+    /// таймеру вместо commitSync на батч).
+    pub fn take_advanced(&self) -> Vec<(PartitionKey, i64)> {
+        let mut partitions = self.partitions.lock().expect("offset tracker mutex poisoned");
+        let mut out = Vec::new();
+        for (key, state) in partitions.iter_mut() {
+            let Some(next) = state.next_to_commit else { continue };
+            if state.last_committed == Some(next) {
+                continue; // за интервал не продвинулись — брокер не тревожим
+            }
+            state.last_committed = Some(next);
+            out.push((key.clone(), next));
+        }
+        out
     }
 }
 

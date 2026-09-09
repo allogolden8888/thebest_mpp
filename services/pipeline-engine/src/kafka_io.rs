@@ -70,6 +70,35 @@ fn commit_watermark(consumer: &StreamConsumer, key: &PartitionKey, next_offset: 
     }
 }
 
+/// Периодический коммит вместо коммита на каждую запись.
+///
+/// Управляется `PIPELINE_COMMIT_INTERVAL_MS`: 0 (или отсутствие) сохраняет
+/// прежнее поведение — коммит немедленно на каждое продвижение watermark.
+/// Значение > 0 включает фоновую задачу, которая раз в интервал забирает у
+/// трекера продвинувшиеся партиции и коммитит их одним заходом.
+///
+/// Флаг оставлен намеренно: это изменение надо было измерить A/B на одном и
+/// том же образе, а не сравнивать две сборки — за эту сессию уже дважды
+/// оказывалось, что сравнивались разные вещи, чем казалось.
+fn commit_interval_ms() -> u64 {
+    std::env::var("PIPELINE_COMMIT_INTERVAL_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+}
+
+fn spawn_periodic_committer(consumer: Arc<StreamConsumer>, tracker: Arc<OffsetTracker>, interval_ms: u64) {
+    if interval_ms == 0 {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_millis(interval_ms));
+        loop {
+            ticker.tick().await;
+            for (key, next_offset) in tracker.take_advanced() {
+                commit_watermark(&consumer, &key, next_offset);
+            }
+        }
+    });
+}
+
 pub const INCOMING_TOPIC: &str = "incoming.messages";
 pub const COMPLETED_TOPIC: &str = "stage.completed";
 
@@ -304,6 +333,8 @@ pub async fn run_incoming_loop(
     let semaphore = Arc::new(Semaphore::new(concurrency_limit("PIPELINE_INCOMING_CONCURRENCY", 256)));
     let tracker = Arc::new(OffsetTracker::new());
     let process_timeout = timeout_secs("PIPELINE_INCOMING_PROCESS_TIMEOUT_SECS", 30);
+    let commit_every_ms = commit_interval_ms();
+    spawn_periodic_committer(consumer.clone(), tracker.clone(), commit_every_ms);
 
     loop {
         match consumer.recv().await {
@@ -314,7 +345,7 @@ pub async fn run_incoming_loop(
 
                 let Some(payload) = msg.payload() else {
                     if let Some(commit_to) = tracker.mark_done(&key, offset) {
-                        commit_watermark(&consumer, &key, commit_to);
+                        if commit_every_ms == 0 { commit_watermark(&consumer, &key, commit_to); }
                     }
                     continue;
                 };
@@ -351,7 +382,10 @@ pub async fn run_incoming_loop(
                     };
                     if done {
                         if let Some(commit_to) = tracker_task.mark_done(&key_task, offset) {
-                            commit_watermark(&consumer_task, &key_task, commit_to);
+                            // При включённом периодическом коммите watermark
+                            // уже обновлён в трекере — отправку берёт на себя
+                            // фоновая задача.
+                            if commit_every_ms == 0 { commit_watermark(&consumer_task, &key_task, commit_to); }
                         }
                     }
                     // done=false — не помечаем: watermark для этой партиции
@@ -521,6 +555,8 @@ pub async fn run_completed_loop(
     let consumer = Arc::new(consumer);
     let semaphore = Arc::new(Semaphore::new(concurrency_limit("PIPELINE_COMPLETED_CONCURRENCY", 256)));
     let tracker = Arc::new(OffsetTracker::new());
+    let commit_every_ms = commit_interval_ms();
+    spawn_periodic_committer(consumer.clone(), tracker.clone(), commit_every_ms);
     let process_timeout = timeout_secs("PIPELINE_COMPLETED_PROCESS_TIMEOUT_SECS", 30);
 
     loop {
@@ -532,7 +568,7 @@ pub async fn run_completed_loop(
 
                 let Some(payload) = msg.payload() else {
                     if let Some(commit_to) = tracker.mark_done(&key, offset) {
-                        commit_watermark(&consumer, &key, commit_to);
+                        if commit_every_ms == 0 { commit_watermark(&consumer, &key, commit_to); }
                     }
                     continue;
                 };
@@ -565,7 +601,10 @@ pub async fn run_completed_loop(
                     };
                     if done {
                         if let Some(commit_to) = tracker_task.mark_done(&key_task, offset) {
-                            commit_watermark(&consumer_task, &key_task, commit_to);
+                            // При включённом периодическом коммите watermark
+                            // уже обновлён в трекере — отправку берёт на себя
+                            // фоновая задача.
+                            if commit_every_ms == 0 { commit_watermark(&consumer_task, &key_task, commit_to); }
                         }
                     }
                 });
@@ -733,6 +772,8 @@ pub async fn run_retry_trigger_loop(
     let consumer = Arc::new(consumer);
     let semaphore = Arc::new(Semaphore::new(concurrency_limit("PIPELINE_RETRY_TRIGGER_CONCURRENCY", 64)));
     let tracker = Arc::new(OffsetTracker::new());
+    let commit_every_ms = commit_interval_ms();
+    spawn_periodic_committer(consumer.clone(), tracker.clone(), commit_every_ms);
     let process_timeout = timeout_secs("PIPELINE_RETRY_TRIGGER_PROCESS_TIMEOUT_SECS", 30);
 
     loop {
@@ -744,7 +785,7 @@ pub async fn run_retry_trigger_loop(
 
                 let Some(payload) = msg.payload() else {
                     if let Some(commit_to) = tracker.mark_done(&key, offset) {
-                        commit_watermark(&consumer, &key, commit_to);
+                        if commit_every_ms == 0 { commit_watermark(&consumer, &key, commit_to); }
                     }
                     continue;
                 };
@@ -777,7 +818,10 @@ pub async fn run_retry_trigger_loop(
                     };
                     if done {
                         if let Some(commit_to) = tracker_task.mark_done(&key_task, offset) {
-                            commit_watermark(&consumer_task, &key_task, commit_to);
+                            // При включённом периодическом коммите watermark
+                            // уже обновлён в трекере — отправку берёт на себя
+                            // фоновая задача.
+                            if commit_every_ms == 0 { commit_watermark(&consumer_task, &key_task, commit_to); }
                         }
                     }
                 });
