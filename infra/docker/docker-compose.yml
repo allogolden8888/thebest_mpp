@@ -653,8 +653,15 @@ services:
       kafka:
         condition: service_healthy
 
+  # 2026-09-09: лимит снижен 1g -> 768m и добавлен явный MaxRAMPercentage.
+  # Сервис поднимается после 4 суток простоя (за это время lifecycle_status
+  # был пуст у 1 133 808 событий), а свободной памяти на VM оставалось 1983МБ
+  # при уже задействованном свопе 580/1024. Kafka на этой машине уже дважды
+  # получала OOM-kill именно из-за суммы «щедрых» лимитов, поэтому новый
+  # потребитель въезжает по тому же режиму, что остальные JVM здесь.
   message-state-resolver:
     image: mpp/message-state-resolver:test
+    mem_limit: 768m
     ports:
       - "9100:9090"
     environment:
@@ -662,11 +669,16 @@ services:
     # Оценка (estimate) — единственный "тяжёлый" момент старта: полный
     # restore message-state.changelog из Kafka в память до readyz=true;
     # устоявшийся steady-state расход ниже billing/delivery (нет
-    # REDIS_*_CONCURRENCY-пула потоков). 1g даёт ~750m heap на 75%. Не
-    # откалибровано отдельным нагрузочным прогоном под этим лимитом — см.
-    # LATENCY_INVESTIGATION_1500TPS.md, нужна проверка, особенно на объём
-    # changelog при более длительных прогонах.
-    mem_limit: 1g
+    # REDIS_*_CONCURRENCY-пула потоков). Не откалибровано отдельным
+    # нагрузочным прогоном — см. LATENCY_INVESTIGATION_1500TPS.md, нужна
+    # проверка, особенно на объём changelog при длительных прогонах.
+    # 2026-09-09: снижено 1g -> 768m (объявлено выше). Сервис поднимается
+    # после 4 суток простоя, за которые lifecycle_status был пуст у 1 133 808
+    # событий. Свободной памяти на VM оставалось 1983МБ при задействованном
+    # свопе 580/1024, а Kafka здесь уже дважды получала OOM-kill именно из-за
+    # суммы щедрых лимитов — новый потребитель въезжает в общий режим.
+    # Риск restore смягчён тем, что том Kafka пересоздаётся: changelog
+    # начинается с нуля, а не с четырёхсуточного хвоста.
     depends_on:
       kafka:
         condition: service_healthy
@@ -1312,8 +1324,12 @@ services:
   # messaging.message_read_model/message_lifecycle_history/dlq_record —
   # раньше нигде не был поднят, обе read-model таблицы стояли пустые.
   # Основа для A2P-браузера сообщений (и в backoffice-ui, и в partner-portal-ui).
+  # Go-сервис, потребление скромное, но лимита не было вовсе — на машине,
+  # где память и есть связывающее ограничение, безлимитный контейнер это
+  # просто отложенный OOM соседа.
   lifecycle-writer:
     image: mpp/lifecycle-writer:test
+    mem_limit: 256m
     ports:
       - "9114:9090"
     environment:
