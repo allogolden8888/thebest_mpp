@@ -5,6 +5,8 @@ package store
 import (
 	"context"
 	"fmt"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -15,10 +17,130 @@ import (
 
 type Store struct {
 	pool *pgxpool.Pool
+
+	// ensuredHours — какие часы уже созданы этим процессом. Без кэша
+	// EnsurePartitionsForBatch делал бы round trip на каждый час каждого
+	// батча; с ним установившийся поток (один-два часа) не делает ни
+	// одного после первого раза.
+	mu           sync.Mutex
+	ensuredHours map[time.Time]struct{}
+	maxPast      time.Duration
+	maxFuture    time.Duration
 }
 
+// Окно партиций по умолчанию. maxPast щедрый намеренно: replay после
+// длительного простоя — штатный сценарий этого сервиса, и именно на нём
+// прежняя логика ломалась.
+const (
+	DefaultPartitionMaxPast   = 48 * time.Hour
+	DefaultPartitionMaxFuture = 24 * time.Hour
+)
+
 func New(pool *pgxpool.Pool) *Store {
-	return &Store{pool: pool}
+	return &Store{
+		pool:         pool,
+		ensuredHours: make(map[time.Time]struct{}),
+		maxPast:      DefaultPartitionMaxPast,
+		maxFuture:    DefaultPartitionMaxFuture,
+	}
+}
+
+// SetPartitionWindow — окно связывается с retention (см. main.go): писать в
+// час, который DropOldPartitions удалит следующим проходом, бессмысленно.
+func (s *Store) SetPartitionWindow(maxPast, maxFuture time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maxPast, s.maxFuture = maxPast, maxFuture
+}
+
+// PartitionPlan — какие часы создать и какие строки не принимать.
+type PartitionPlan struct {
+	Hours    []time.Time
+	Accepted []core.LifecycleHistoryRow
+	Rejected []core.LifecycleHistoryRow
+}
+
+// PlanHistoryPartitions — ИЗМЕРЕННЫЙ БАГ, не гипотеза.
+//
+// Прежняя версия создавала партиции только под now и now+1h, тогда как
+// ключ партиционирования — occurred_at САМОГО СОБЫТИЯ, а не время flush'а.
+// При replay после простоя occurred_at лежит в прошлых часах, партиции для
+// них нет, и BatchInsertLifecycleHistory падает с SQLSTATE 23514. Поскольку
+// офсеты коммитятся только после успеха ВСЕХ шагов flush, одна такая
+// ошибка блокирует продвижение consumer'а по всем трём топикам разом и
+// повторяется вечно.
+//
+// Замерено на живом стенде: 8 684 одинаковые ошибки подряд, по одной в
+// секунду; lag incoming.messages 69 946; офсет message.lifecycle не
+// зафиксирован ни разу; сервис жёг 131% CPU НА ПРОСТОЕ, повторяя одну и ту
+// же неуспешную вставку. Прогон, во время которого это происходило, был
+// признан недействительным как замер производительности платформы.
+//
+// Ровно эта же правка уже сделана в dlr-correlation-writer
+// (writer.PlanPartitions) после того, как тот по той же причине простоял
+// 18 суток. Здесь она перенесена тем же способом.
+//
+// Строки вне окна отбрасываются, а не переносятся: партиция под них будет
+// удалена retention'ом, и бесконечный повтор превратил бы их в poison pill
+// того же класса, который здесь и лечится. Отбрасывание логируется
+// вызывающим.
+func PlanHistoryPartitions(rows []core.LifecycleHistoryRow, now time.Time, maxPast, maxFuture time.Duration) PartitionPlan {
+	nowHour := now.UTC().Truncate(time.Hour)
+	earliest := now.UTC().Add(-maxPast).Truncate(time.Hour)
+	latest := now.UTC().Add(maxFuture).Truncate(time.Hour)
+
+	plan := PartitionPlan{Accepted: make([]core.LifecycleHistoryRow, 0, len(rows))}
+	seen := make(map[time.Time]struct{}, len(rows))
+	addHour := func(hour time.Time) {
+		if _, ok := seen[hour]; ok {
+			return
+		}
+		seen[hour] = struct{}{}
+		plan.Hours = append(plan.Hours, hour)
+	}
+	// Текущий и следующий час нужны даже при пустом батче: буфер может
+	// пересечь границу часа между первой записью и flush'ем.
+	addHour(nowHour)
+	addHour(nowHour.Add(time.Hour))
+
+	for _, r := range rows {
+		hour := r.OccurredAt.UTC().Truncate(time.Hour)
+		if hour.Before(earliest) || hour.After(latest) {
+			plan.Rejected = append(plan.Rejected, r)
+			continue
+		}
+		addHour(hour)
+		plan.Accepted = append(plan.Accepted, r)
+	}
+	sort.Slice(plan.Hours, func(i, j int) bool { return plan.Hours[i].Before(plan.Hours[j]) })
+	return plan
+}
+
+// EnsurePartitionsForBatch — создаёт недостающие партиции под ФАКТИЧЕСКИЕ
+// occurred_at батча перед вставкой. Число round trip'ов ограничено сверху
+// шириной окна (48+24 = максимум 73 часа), на практике — нулём благодаря
+// кэшу ensuredHours.
+func (s *Store) EnsurePartitionsForBatch(ctx context.Context, rows []core.LifecycleHistoryRow, now time.Time) (PartitionPlan, error) {
+	s.mu.Lock()
+	maxPast, maxFuture := s.maxPast, s.maxFuture
+	s.mu.Unlock()
+
+	plan := PlanHistoryPartitions(rows, now, maxPast, maxFuture)
+	for _, hour := range plan.Hours {
+		s.mu.Lock()
+		_, done := s.ensuredHours[hour]
+		s.mu.Unlock()
+		if done {
+			continue
+		}
+		if err := s.EnsurePartition(ctx, hour); err != nil {
+			return plan, err
+		}
+		s.mu.Lock()
+		s.ensuredHours[hour] = struct{}{}
+		s.mu.Unlock()
+	}
+	return plan, nil
 }
 
 // EnsurePartition — реальный, воспроизведённый вживую баг (не гипотеза):

@@ -104,11 +104,29 @@ services:
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      # auto-create — упрощение только для локальной проверки; в k8s топики
-      # создаются явно из infra/kafka/rendered/kafka-topics.yaml
-      # (infra/kafka/generate_kafka_topics.py), с реальными partition-counts,
-      # не дефолтом.
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # 2026-09-09: ВЫКЛЮЧЕНО. Раньше стояло "true" как "упрощение для
+      # локальной проверки", и это упрощение стоило недействительного
+      # нагрузочного прогона.
+      #
+      # Механизм вреда, измеренный: auto-create создаёт топик с ДЕФОЛТНЫМ
+      # числом партиций (1) при первом же обращении. Дальнейший
+      # create_topics.sh с --if-not-exists уже ничего не меняет — топик
+      # существует. В результате stage.completed работал на ОДНОЙ партиции
+      # вместо 26, заявленных в infra/docker/create_topics.sh, хотя через
+      # него идёт по пять событий на сообщение (~1500/с при 300 TPS).
+      # Тестировалась не та конфигурация, которая описана в документации, и
+      # разойтись они могли молча.
+      #
+      # Второй вред — маскировка: auto-create срабатывает только по
+      # УСПЕШНОМУ обращению, а первый produce к несуществующему топику всё
+      # равно падает и сообщение теряется. Из-за этого стартовые потери
+      # выглядели как "молчаливая потеря под нагрузкой".
+      #
+      # Теперь топики обязан создать create_topics.sh ДО старта сервисов, а
+      # verify_topics.sh проверяет фактические partition counts против него.
+      # Отсутствующий топик теперь падает громко, а не превращается в
+      # однопартиционный суррогат.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       # Дефолт образа (num.network.threads=3) — под 6 сервисами, у каждого
       # несколько consumer/producer-подключений на 30 топиков — реальная

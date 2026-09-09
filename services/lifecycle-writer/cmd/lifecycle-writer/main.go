@@ -306,16 +306,32 @@ func flush(ctx context.Context, db *store.Store, client *kgo.Client, buf *buffer
 	// буфер может пересечь границу часа между первой записью в него и
 	// flush'ем.
 	now := time.Now()
-	if err := db.EnsurePartition(ctx, now); err != nil {
-		log.Printf("ensure_partition(now) failed, flush отложен: %v", err)
-		return
-	}
-	if err := db.EnsurePartition(ctx, now.Add(time.Hour)); err != nil {
-		log.Printf("ensure_partition(now+1h) failed, flush отложен: %v", err)
-		return
-	}
 
 	inserts, updates, history, dlq, records := buf.drain()
+
+	// Партиции создаются под ФАКТИЧЕСКИЕ occurred_at батча, а не только под
+	// текущий час. Прежняя версия делала EnsurePartition(now) и
+	// EnsurePartition(now+1h) ДО drain'а, то есть даже не смотрела, за какие
+	// часы пришли записи. При replay после простоя occurred_at лежит в
+	// прошлом, партиции нет, вставка падает с SQLSTATE 23514 — и так вечно,
+	// блокируя коммит офсетов по всем трём топикам разом.
+	// Замерено: 8 684 одинаковые ошибки подряд, 131% CPU на простое, lag
+	// incoming.messages 69 946. См. store.PlanHistoryPartitions.
+	plan, err := db.EnsurePartitionsForBatch(ctx, history, now)
+	if err != nil {
+		log.Printf("ensure_partitions_for_batch failed, flush отложен: %v", err)
+		buf.restore(inserts, updates, history, dlq, records)
+		return
+	}
+	if len(plan.Rejected) > 0 {
+		// Вне окна партиций: партиция под них всё равно будет удалена
+		// retention'ом. Повторять вечно значило бы создать poison pill того
+		// же класса, который здесь и лечится, поэтому отбрасываем — но
+		// ГРОМКО, потерю данных нельзя проводить молча.
+		log.Printf("ВНИМАНИЕ: %d записей lifecycle_history вне окна партиций (older than %v / newer than %v) ОТБРОШЕНО",
+			len(plan.Rejected), store.DefaultPartitionMaxPast, store.DefaultPartitionMaxFuture)
+	}
+	history = plan.Accepted
 
 	if err := db.BatchInsertReadModel(ctx, inserts); err != nil {
 		log.Printf("flush_batch (message_read_model insert) failed, будет повторено: %v", err)
