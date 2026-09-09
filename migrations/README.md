@@ -36,6 +36,7 @@ V027__credentials.sql
 V028__incident.sql
 V029__message_read_model_sandbox.sql
 V030__category_ctn_entity_types.sql
+V031__staff_accounts.sql
 ```
 
 Применить локально:
@@ -100,6 +101,10 @@ V028__incident.sql оставлен как есть — оба существо�
 ## V030 — luminous-hugging-charm.md, BACKOFFICE_DESIGN_SPEC.md Экраны 32/23
 
 `category`/`ctn` добавлены в `config_versions_entity_type_check`. Категории сообщений (SERVICE/TRANSACTION/ADVERTISING/UNTEMPLATED/BLOCKED) раньше жили только как соглашение в документации (`BACKOFFICE_DESIGN_SPEC.md` §1.4) — не proto-enum, не CHECK-enum, не отдельная таблица; `policy_template.category`/`billing_tariff.price_per_segment` уже были свободной строкой (проверено кодом до миграции, не предположение). `category` становится управляемой config-версионируемой сущностью (name/regex/count_in_cdr) — слой метаданных поверх уже свободного поля, **не** новая валидация в `policy-service`/`billing-service` (они продолжают принимать любую строку). Существующие 5 значений засеяны как первые активные версии, чтобы ничего не сломалось. `ctn` — новая сущность для офлайн телеком-биллинга, привязка `(partner_id, category) -> ctn/service_name`; сам CDR-экспорт (генерация файла для сверки с оператором) спланирован в `BACKOFFICE_ROADMAP.md`, не реализован здесь.
+
+## V031 — luminous-hugging-charm.md, BACKOFFICE_DESIGN_SPEC.md Экран 33
+
+`iam.staff_accounts` — реальный Keycloak не развёрнут нигде в этом репозитории (проверено кодом до миграции: `LoginView.vue` принимает вставленный JWT в textarea, ни одного HTTP-раунд-трипа при логине; `iam.staff_role_assignments.external_id` — свободная строка без FK, ни одной таблицы идентичности для staff, в отличие от `iam.partner_portal_users`, V025). Пользователь явно отклонил LDAP, реальный Keycloak — отдельная, сильно более поздняя задача. До этого — полноценный локальный логин/пароль. `external_id = username` (нет Keycloak `sub`, взять неоткуда). Backfill заводит заглушки для уже существующих `staff_role_assignments.external_id` (`active=false`, заведомо невалидный bcrypt-хеш) перед добавлением FK — не ломает уже выданные роли, администратор должен явно завести пароль через новый экран, чтобы такой аккаунт снова заработал.
 
 ## Найдено только на этапе реального DDL (не было видно на уровне концептуальной спеки)
 

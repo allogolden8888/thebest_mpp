@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type Role struct {
@@ -29,9 +30,33 @@ type StaffAssignment struct {
 	GrantedAt  time.Time
 }
 
+// bcryptCost — luminous-hugging-charm.md, BACKOFFICE_DESIGN_SPEC.md Экран
+// 33. Первый credential store в этой кодовой базе (grep bcrypt/argon2/
+// scrypt по всему репозиторию — ноль совпадений до этой фичи), нет
+// существующего прецедента, cost 12 — стандартный, не занижен ради
+// скорости dev-окружения (это было бы неверным выбором именно потому, что
+// потом легко забыть поднять его для прода).
+const bcryptCost = 12
+
+// dummyHash — luminous-hugging-charm.md Экран 33: посчитан один раз при
+// старте, используется VerifyStaffCredentials, когда username не найден,
+// чтобы всё равно выполнить bcrypt.CompareHashAndPassword той же
+// стоимости — иначе "неизвестный username" отвечал бы заметно быстрее
+// "неверный пароль", раскрывая существование аккаунта по времени ответа.
+var dummyHash = func() []byte {
+	h, err := bcrypt.GenerateFromPassword([]byte("timing-safety-dummy-password"), bcryptCost)
+	if err != nil {
+		panic(fmt.Sprintf("precompute dummy bcrypt hash: %v", err))
+	}
+	return h
+}()
+
 var (
 	// ErrRoleNotFound — имя роли не существует в iam.roles.
 	ErrRoleNotFound = errors.New("роль не найдена")
+	// ErrUsernameTaken — CreateStaffAccount с уже занятым username
+	// (уникальный индекс iam.staff_accounts.username).
+	ErrUsernameTaken = errors.New("username уже занят")
 	// ErrAlreadyAssigned — (external_id, role) уже активно назначены
 	// (уникальный частичный индекс staff_role_assignments_active_unique).
 	ErrAlreadyAssigned = errors.New("роль уже назначена этому пользователю")
@@ -348,4 +373,138 @@ func (p *Postgres) RevokePartnerPortalRole(ctx context.Context, externalID, role
 		return false, fmt.Errorf("RevokePartnerPortalRole: commit: %w", err)
 	}
 	return true, nil
+}
+
+type StaffAccount struct {
+	ExternalID  string
+	Username    string
+	DisplayName string
+	Active      bool
+	CreatedAt   time.Time
+}
+
+// CreateStaffAccount — external_id = username (V031 комментарий: нет
+// Keycloak sub, взять неоткуда до реального Keycloak). Пароль хешируется
+// здесь, никогда не покидает этот процесс как plaintext дальше вызова.
+func (p *Postgres) CreateStaffAccount(ctx context.Context, username, password, displayName, createdBy string) (StaffAccount, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
+	if err != nil {
+		return StaffAccount{}, fmt.Errorf("CreateStaffAccount: hash password: %w", err)
+	}
+
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return StaffAccount{}, fmt.Errorf("CreateStaffAccount: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var a StaffAccount
+	err = tx.QueryRow(ctx, `
+		INSERT INTO iam.staff_accounts (external_id, username, password_hash, display_name, created_by)
+		VALUES ($1, $1, $2, $3, $4)
+		RETURNING external_id, username, display_name, active, created_at`,
+		username, string(hash), displayName, createdBy).
+		Scan(&a.ExternalID, &a.Username, &a.DisplayName, &a.Active, &a.CreatedAt)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return StaffAccount{}, ErrUsernameTaken
+		}
+		return StaffAccount{}, fmt.Errorf("CreateStaffAccount: insert: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO iam.identity_audit (actor, action, target) VALUES ($1, 'STAFF_ACCOUNT_CREATED', $2)`,
+		createdBy, username); err != nil {
+		return StaffAccount{}, fmt.Errorf("CreateStaffAccount: audit: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return StaffAccount{}, fmt.Errorf("CreateStaffAccount: commit: %w", err)
+	}
+	return a, nil
+}
+
+func (p *Postgres) ListStaffAccounts(ctx context.Context, activeOnly bool) ([]StaffAccount, error) {
+	rows, err := p.pool.Query(ctx, `
+		SELECT external_id, username, display_name, active, created_at
+		FROM iam.staff_accounts
+		WHERE ($1 = false OR active = true)
+		ORDER BY username`, activeOnly)
+	if err != nil {
+		return nil, fmt.Errorf("ListStaffAccounts: %w", err)
+	}
+	defer rows.Close()
+
+	var out []StaffAccount
+	for rows.Next() {
+		var a StaffAccount
+		if err := rows.Scan(&a.ExternalID, &a.Username, &a.DisplayName, &a.Active, &a.CreatedAt); err != nil {
+			return nil, fmt.Errorf("ListStaffAccounts: scan: %w", err)
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// DeactivateStaffAccount — deactivated=false, если аккаунт уже неактивен
+// или не существует — не ошибка, идемпотентно (тот же контракт, что
+// RevokeStaffRole).
+func (p *Postgres) DeactivateStaffAccount(ctx context.Context, externalID, actor string) (bool, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("DeactivateStaffAccount: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx, `
+		UPDATE iam.staff_accounts SET active = false
+		WHERE external_id = $1 AND active = true`, externalID)
+	if err != nil {
+		return false, fmt.Errorf("DeactivateStaffAccount: update: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return false, nil
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO iam.identity_audit (actor, action, target) VALUES ($1, 'STAFF_ACCOUNT_DEACTIVATED', $2)`,
+		actor, externalID); err != nil {
+		return false, fmt.Errorf("DeactivateStaffAccount: audit: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("DeactivateStaffAccount: commit: %w", err)
+	}
+	return true, nil
+}
+
+// VerifyStaffCredentials — bcrypt-сравнение целиком здесь, хеш никогда не
+// покидает store/gRPC-границу IamService наружу (внешний ответ — только
+// external_id/ok, см. VerifyStaffCredentialsResponse). Неизвестный
+// username и неактивный аккаунт — оба ok=false без различимой ошибки для
+// вызывающего (backoffice-api/frontend видят одинаковый отказ), но ВСЕГДА
+// выполняют bcrypt.CompareHashAndPassword одной и той же стоимости
+// (dummyHash при неизвестном username) — не раскрываем существование
+// аккаунта по времени ответа.
+func (p *Postgres) VerifyStaffCredentials(ctx context.Context, username, password string) (string, bool, error) {
+	var externalID, hash string
+	var active bool
+	err := p.pool.QueryRow(ctx, `
+		SELECT external_id, password_hash, active FROM iam.staff_accounts WHERE username = $1`, username).
+		Scan(&externalID, &hash, &active)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return "", false, fmt.Errorf("VerifyStaffCredentials: lookup: %w", err)
+		}
+		_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(password))
+		return "", false, nil
+	}
+
+	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
+		return "", false, nil
+	}
+	if !active {
+		return "", false, nil
+	}
+	return externalID, true, nil
 }

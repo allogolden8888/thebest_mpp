@@ -1027,6 +1027,482 @@ func (x *RevokePartnerPortalRoleResponse) GetRevoked() bool {
 	return false
 }
 
+type StaffAccount struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ExternalId    string                 `protobuf:"bytes,1,opt,name=external_id,json=externalId,proto3" json:"external_id,omitempty"` // = username, см. package doc CreateStaffAccount выше.
+	Username      string                 `protobuf:"bytes,2,opt,name=username,proto3" json:"username,omitempty"`
+	DisplayName   string                 `protobuf:"bytes,3,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	Active        bool                   `protobuf:"varint,4,opt,name=active,proto3" json:"active,omitempty"`
+	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StaffAccount) Reset() {
+	*x = StaffAccount{}
+	mi := &file_grpc_iam_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StaffAccount) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StaffAccount) ProtoMessage() {}
+
+func (x *StaffAccount) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StaffAccount.ProtoReflect.Descriptor instead.
+func (*StaffAccount) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *StaffAccount) GetExternalId() string {
+	if x != nil {
+		return x.ExternalId
+	}
+	return ""
+}
+
+func (x *StaffAccount) GetUsername() string {
+	if x != nil {
+		return x.Username
+	}
+	return ""
+}
+
+func (x *StaffAccount) GetDisplayName() string {
+	if x != nil {
+		return x.DisplayName
+	}
+	return ""
+}
+
+func (x *StaffAccount) GetActive() bool {
+	if x != nil {
+		return x.Active
+	}
+	return false
+}
+
+func (x *StaffAccount) GetCreatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return nil
+}
+
+type CreateStaffAccountRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Username      string                 `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"`
+	Password      string                 `protobuf:"bytes,2,opt,name=password,proto3" json:"password,omitempty"` // plaintext на этом единственном hop'е (gRPC internal, mTLS-периметр), хешируется внутри IamService, никогда не логируется.
+	DisplayName   string                 `protobuf:"bytes,3,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	CreatedBy     string                 `protobuf:"bytes,4,opt,name=created_by,json=createdBy,proto3" json:"created_by,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateStaffAccountRequest) Reset() {
+	*x = CreateStaffAccountRequest{}
+	mi := &file_grpc_iam_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateStaffAccountRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateStaffAccountRequest) ProtoMessage() {}
+
+func (x *CreateStaffAccountRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateStaffAccountRequest.ProtoReflect.Descriptor instead.
+func (*CreateStaffAccountRequest) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *CreateStaffAccountRequest) GetUsername() string {
+	if x != nil {
+		return x.Username
+	}
+	return ""
+}
+
+func (x *CreateStaffAccountRequest) GetPassword() string {
+	if x != nil {
+		return x.Password
+	}
+	return ""
+}
+
+func (x *CreateStaffAccountRequest) GetDisplayName() string {
+	if x != nil {
+		return x.DisplayName
+	}
+	return ""
+}
+
+func (x *CreateStaffAccountRequest) GetCreatedBy() string {
+	if x != nil {
+		return x.CreatedBy
+	}
+	return ""
+}
+
+type CreateStaffAccountResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Account       *StaffAccount          `protobuf:"bytes,1,opt,name=account,proto3" json:"account,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateStaffAccountResponse) Reset() {
+	*x = CreateStaffAccountResponse{}
+	mi := &file_grpc_iam_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateStaffAccountResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateStaffAccountResponse) ProtoMessage() {}
+
+func (x *CreateStaffAccountResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateStaffAccountResponse.ProtoReflect.Descriptor instead.
+func (*CreateStaffAccountResponse) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *CreateStaffAccountResponse) GetAccount() *StaffAccount {
+	if x != nil {
+		return x.Account
+	}
+	return nil
+}
+
+type ListStaffAccountsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ActiveOnly    bool                   `protobuf:"varint,1,opt,name=active_only,json=activeOnly,proto3" json:"active_only,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListStaffAccountsRequest) Reset() {
+	*x = ListStaffAccountsRequest{}
+	mi := &file_grpc_iam_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListStaffAccountsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListStaffAccountsRequest) ProtoMessage() {}
+
+func (x *ListStaffAccountsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListStaffAccountsRequest.ProtoReflect.Descriptor instead.
+func (*ListStaffAccountsRequest) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *ListStaffAccountsRequest) GetActiveOnly() bool {
+	if x != nil {
+		return x.ActiveOnly
+	}
+	return false
+}
+
+type ListStaffAccountsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Accounts      []*StaffAccount        `protobuf:"bytes,1,rep,name=accounts,proto3" json:"accounts,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListStaffAccountsResponse) Reset() {
+	*x = ListStaffAccountsResponse{}
+	mi := &file_grpc_iam_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListStaffAccountsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListStaffAccountsResponse) ProtoMessage() {}
+
+func (x *ListStaffAccountsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListStaffAccountsResponse.ProtoReflect.Descriptor instead.
+func (*ListStaffAccountsResponse) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *ListStaffAccountsResponse) GetAccounts() []*StaffAccount {
+	if x != nil {
+		return x.Accounts
+	}
+	return nil
+}
+
+type DeactivateStaffAccountRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ExternalId    string                 `protobuf:"bytes,1,opt,name=external_id,json=externalId,proto3" json:"external_id,omitempty"`
+	Actor         string                 `protobuf:"bytes,2,opt,name=actor,proto3" json:"actor,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeactivateStaffAccountRequest) Reset() {
+	*x = DeactivateStaffAccountRequest{}
+	mi := &file_grpc_iam_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeactivateStaffAccountRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeactivateStaffAccountRequest) ProtoMessage() {}
+
+func (x *DeactivateStaffAccountRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeactivateStaffAccountRequest.ProtoReflect.Descriptor instead.
+func (*DeactivateStaffAccountRequest) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *DeactivateStaffAccountRequest) GetExternalId() string {
+	if x != nil {
+		return x.ExternalId
+	}
+	return ""
+}
+
+func (x *DeactivateStaffAccountRequest) GetActor() string {
+	if x != nil {
+		return x.Actor
+	}
+	return ""
+}
+
+type DeactivateStaffAccountResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Deactivated   bool                   `protobuf:"varint,1,opt,name=deactivated,proto3" json:"deactivated,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeactivateStaffAccountResponse) Reset() {
+	*x = DeactivateStaffAccountResponse{}
+	mi := &file_grpc_iam_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeactivateStaffAccountResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeactivateStaffAccountResponse) ProtoMessage() {}
+
+func (x *DeactivateStaffAccountResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeactivateStaffAccountResponse.ProtoReflect.Descriptor instead.
+func (*DeactivateStaffAccountResponse) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *DeactivateStaffAccountResponse) GetDeactivated() bool {
+	if x != nil {
+		return x.Deactivated
+	}
+	return false
+}
+
+type VerifyStaffCredentialsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Username      string                 `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"`
+	Password      string                 `protobuf:"bytes,2,opt,name=password,proto3" json:"password,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VerifyStaffCredentialsRequest) Reset() {
+	*x = VerifyStaffCredentialsRequest{}
+	mi := &file_grpc_iam_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VerifyStaffCredentialsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VerifyStaffCredentialsRequest) ProtoMessage() {}
+
+func (x *VerifyStaffCredentialsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VerifyStaffCredentialsRequest.ProtoReflect.Descriptor instead.
+func (*VerifyStaffCredentialsRequest) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *VerifyStaffCredentialsRequest) GetUsername() string {
+	if x != nil {
+		return x.Username
+	}
+	return ""
+}
+
+func (x *VerifyStaffCredentialsRequest) GetPassword() string {
+	if x != nil {
+		return x.Password
+	}
+	return ""
+}
+
+type VerifyStaffCredentialsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ok            bool                   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	ExternalId    string                 `protobuf:"bytes,2,opt,name=external_id,json=externalId,proto3" json:"external_id,omitempty"` // пусто, если ok=false
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VerifyStaffCredentialsResponse) Reset() {
+	*x = VerifyStaffCredentialsResponse{}
+	mi := &file_grpc_iam_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VerifyStaffCredentialsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VerifyStaffCredentialsResponse) ProtoMessage() {}
+
+func (x *VerifyStaffCredentialsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VerifyStaffCredentialsResponse.ProtoReflect.Descriptor instead.
+func (*VerifyStaffCredentialsResponse) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *VerifyStaffCredentialsResponse) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *VerifyStaffCredentialsResponse) GetExternalId() string {
+	if x != nil {
+		return x.ExternalId
+	}
+	return ""
+}
+
 var File_grpc_iam_proto protoreflect.FileDescriptor
 
 const file_grpc_iam_proto_rawDesc = "" +
@@ -1112,7 +1588,42 @@ const file_grpc_iam_proto_rawDesc = "" +
 	"\n" +
 	"revoked_by\x18\x03 \x01(\tR\trevokedBy\";\n" +
 	"\x1fRevokePartnerPortalRoleResponse\x12\x18\n" +
-	"\arevoked\x18\x01 \x01(\bR\arevoked2\xd1\x06\n" +
+	"\arevoked\x18\x01 \x01(\bR\arevoked\"\xc1\x01\n" +
+	"\fStaffAccount\x12\x1f\n" +
+	"\vexternal_id\x18\x01 \x01(\tR\n" +
+	"externalId\x12\x1a\n" +
+	"\busername\x18\x02 \x01(\tR\busername\x12!\n" +
+	"\fdisplay_name\x18\x03 \x01(\tR\vdisplayName\x12\x16\n" +
+	"\x06active\x18\x04 \x01(\bR\x06active\x129\n" +
+	"\n" +
+	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\x95\x01\n" +
+	"\x19CreateStaffAccountRequest\x12\x1a\n" +
+	"\busername\x18\x01 \x01(\tR\busername\x12\x1a\n" +
+	"\bpassword\x18\x02 \x01(\tR\bpassword\x12!\n" +
+	"\fdisplay_name\x18\x03 \x01(\tR\vdisplayName\x12\x1d\n" +
+	"\n" +
+	"created_by\x18\x04 \x01(\tR\tcreatedBy\"Q\n" +
+	"\x1aCreateStaffAccountResponse\x123\n" +
+	"\aaccount\x18\x01 \x01(\v2\x19.mpp.grpc.v1.StaffAccountR\aaccount\";\n" +
+	"\x18ListStaffAccountsRequest\x12\x1f\n" +
+	"\vactive_only\x18\x01 \x01(\bR\n" +
+	"activeOnly\"R\n" +
+	"\x19ListStaffAccountsResponse\x125\n" +
+	"\baccounts\x18\x01 \x03(\v2\x19.mpp.grpc.v1.StaffAccountR\baccounts\"V\n" +
+	"\x1dDeactivateStaffAccountRequest\x12\x1f\n" +
+	"\vexternal_id\x18\x01 \x01(\tR\n" +
+	"externalId\x12\x14\n" +
+	"\x05actor\x18\x02 \x01(\tR\x05actor\"B\n" +
+	"\x1eDeactivateStaffAccountResponse\x12 \n" +
+	"\vdeactivated\x18\x01 \x01(\bR\vdeactivated\"W\n" +
+	"\x1dVerifyStaffCredentialsRequest\x12\x1a\n" +
+	"\busername\x18\x01 \x01(\tR\busername\x12\x1a\n" +
+	"\bpassword\x18\x02 \x01(\tR\bpassword\"Q\n" +
+	"\x1eVerifyStaffCredentialsResponse\x12\x0e\n" +
+	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x1f\n" +
+	"\vexternal_id\x18\x02 \x01(\tR\n" +
+	"externalId2\x82\n" +
+	"\n" +
 	"\n" +
 	"IamService\x12\\\n" +
 	"\x0fCheckPermission\x12#.mpp.grpc.v1.CheckPermissionRequest\x1a$.mpp.grpc.v1.CheckPermissionResponse\x12J\n" +
@@ -1122,7 +1633,11 @@ const file_grpc_iam_proto_rawDesc = "" +
 	"\x0fRevokeStaffRole\x12#.mpp.grpc.v1.RevokeStaffRoleRequest\x1a$.mpp.grpc.v1.RevokeStaffRoleResponse\x12\x83\x01\n" +
 	"\x1cListPartnerPortalAssignments\x120.mpp.grpc.v1.ListPartnerPortalAssignmentsRequest\x1a1.mpp.grpc.v1.ListPartnerPortalAssignmentsResponse\x12t\n" +
 	"\x17AssignPartnerPortalRole\x12+.mpp.grpc.v1.AssignPartnerPortalRoleRequest\x1a,.mpp.grpc.v1.AssignPartnerPortalRoleResponse\x12t\n" +
-	"\x17RevokePartnerPortalRole\x12+.mpp.grpc.v1.RevokePartnerPortalRoleRequest\x1a,.mpp.grpc.v1.RevokePartnerPortalRoleResponseBJ\n" +
+	"\x17RevokePartnerPortalRole\x12+.mpp.grpc.v1.RevokePartnerPortalRoleRequest\x1a,.mpp.grpc.v1.RevokePartnerPortalRoleResponse\x12e\n" +
+	"\x12CreateStaffAccount\x12&.mpp.grpc.v1.CreateStaffAccountRequest\x1a'.mpp.grpc.v1.CreateStaffAccountResponse\x12b\n" +
+	"\x11ListStaffAccounts\x12%.mpp.grpc.v1.ListStaffAccountsRequest\x1a&.mpp.grpc.v1.ListStaffAccountsResponse\x12q\n" +
+	"\x16DeactivateStaffAccount\x12*.mpp.grpc.v1.DeactivateStaffAccountRequest\x1a+.mpp.grpc.v1.DeactivateStaffAccountResponse\x12q\n" +
+	"\x16VerifyStaffCredentials\x12*.mpp.grpc.v1.VerifyStaffCredentialsRequest\x1a+.mpp.grpc.v1.VerifyStaffCredentialsResponseBJ\n" +
 	" uz.mpp.platformcontracts.grpc.v1P\x01Z$mpp/platformcontracts/grpc/v1;grpcv1b\x06proto3"
 
 var (
@@ -1137,7 +1652,7 @@ func file_grpc_iam_proto_rawDescGZIP() []byte {
 	return file_grpc_iam_proto_rawDescData
 }
 
-var file_grpc_iam_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_grpc_iam_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
 var file_grpc_iam_proto_goTypes = []any{
 	(*CheckPermissionRequest)(nil),               // 0: mpp.grpc.v1.CheckPermissionRequest
 	(*CheckPermissionResponse)(nil),              // 1: mpp.grpc.v1.CheckPermissionResponse
@@ -1158,37 +1673,57 @@ var file_grpc_iam_proto_goTypes = []any{
 	(*AssignPartnerPortalRoleResponse)(nil),      // 16: mpp.grpc.v1.AssignPartnerPortalRoleResponse
 	(*RevokePartnerPortalRoleRequest)(nil),       // 17: mpp.grpc.v1.RevokePartnerPortalRoleRequest
 	(*RevokePartnerPortalRoleResponse)(nil),      // 18: mpp.grpc.v1.RevokePartnerPortalRoleResponse
-	(*timestamppb.Timestamp)(nil),                // 19: google.protobuf.Timestamp
+	(*StaffAccount)(nil),                         // 19: mpp.grpc.v1.StaffAccount
+	(*CreateStaffAccountRequest)(nil),            // 20: mpp.grpc.v1.CreateStaffAccountRequest
+	(*CreateStaffAccountResponse)(nil),           // 21: mpp.grpc.v1.CreateStaffAccountResponse
+	(*ListStaffAccountsRequest)(nil),             // 22: mpp.grpc.v1.ListStaffAccountsRequest
+	(*ListStaffAccountsResponse)(nil),            // 23: mpp.grpc.v1.ListStaffAccountsResponse
+	(*DeactivateStaffAccountRequest)(nil),        // 24: mpp.grpc.v1.DeactivateStaffAccountRequest
+	(*DeactivateStaffAccountResponse)(nil),       // 25: mpp.grpc.v1.DeactivateStaffAccountResponse
+	(*VerifyStaffCredentialsRequest)(nil),        // 26: mpp.grpc.v1.VerifyStaffCredentialsRequest
+	(*VerifyStaffCredentialsResponse)(nil),       // 27: mpp.grpc.v1.VerifyStaffCredentialsResponse
+	(*timestamppb.Timestamp)(nil),                // 28: google.protobuf.Timestamp
 }
 var file_grpc_iam_proto_depIdxs = []int32{
 	2,  // 0: mpp.grpc.v1.ListRolesResponse.roles:type_name -> mpp.grpc.v1.Role
-	19, // 1: mpp.grpc.v1.StaffAssignment.granted_at:type_name -> google.protobuf.Timestamp
+	28, // 1: mpp.grpc.v1.StaffAssignment.granted_at:type_name -> google.protobuf.Timestamp
 	5,  // 2: mpp.grpc.v1.ListStaffAssignmentsResponse.assignments:type_name -> mpp.grpc.v1.StaffAssignment
 	5,  // 3: mpp.grpc.v1.AssignStaffRoleResponse.assignment:type_name -> mpp.grpc.v1.StaffAssignment
-	19, // 4: mpp.grpc.v1.PartnerPortalAssignment.granted_at:type_name -> google.protobuf.Timestamp
+	28, // 4: mpp.grpc.v1.PartnerPortalAssignment.granted_at:type_name -> google.protobuf.Timestamp
 	12, // 5: mpp.grpc.v1.ListPartnerPortalAssignmentsResponse.assignments:type_name -> mpp.grpc.v1.PartnerPortalAssignment
 	12, // 6: mpp.grpc.v1.AssignPartnerPortalRoleResponse.assignment:type_name -> mpp.grpc.v1.PartnerPortalAssignment
-	0,  // 7: mpp.grpc.v1.IamService.CheckPermission:input_type -> mpp.grpc.v1.CheckPermissionRequest
-	3,  // 8: mpp.grpc.v1.IamService.ListRoles:input_type -> mpp.grpc.v1.ListRolesRequest
-	6,  // 9: mpp.grpc.v1.IamService.ListStaffAssignments:input_type -> mpp.grpc.v1.ListStaffAssignmentsRequest
-	8,  // 10: mpp.grpc.v1.IamService.AssignStaffRole:input_type -> mpp.grpc.v1.AssignStaffRoleRequest
-	10, // 11: mpp.grpc.v1.IamService.RevokeStaffRole:input_type -> mpp.grpc.v1.RevokeStaffRoleRequest
-	13, // 12: mpp.grpc.v1.IamService.ListPartnerPortalAssignments:input_type -> mpp.grpc.v1.ListPartnerPortalAssignmentsRequest
-	15, // 13: mpp.grpc.v1.IamService.AssignPartnerPortalRole:input_type -> mpp.grpc.v1.AssignPartnerPortalRoleRequest
-	17, // 14: mpp.grpc.v1.IamService.RevokePartnerPortalRole:input_type -> mpp.grpc.v1.RevokePartnerPortalRoleRequest
-	1,  // 15: mpp.grpc.v1.IamService.CheckPermission:output_type -> mpp.grpc.v1.CheckPermissionResponse
-	4,  // 16: mpp.grpc.v1.IamService.ListRoles:output_type -> mpp.grpc.v1.ListRolesResponse
-	7,  // 17: mpp.grpc.v1.IamService.ListStaffAssignments:output_type -> mpp.grpc.v1.ListStaffAssignmentsResponse
-	9,  // 18: mpp.grpc.v1.IamService.AssignStaffRole:output_type -> mpp.grpc.v1.AssignStaffRoleResponse
-	11, // 19: mpp.grpc.v1.IamService.RevokeStaffRole:output_type -> mpp.grpc.v1.RevokeStaffRoleResponse
-	14, // 20: mpp.grpc.v1.IamService.ListPartnerPortalAssignments:output_type -> mpp.grpc.v1.ListPartnerPortalAssignmentsResponse
-	16, // 21: mpp.grpc.v1.IamService.AssignPartnerPortalRole:output_type -> mpp.grpc.v1.AssignPartnerPortalRoleResponse
-	18, // 22: mpp.grpc.v1.IamService.RevokePartnerPortalRole:output_type -> mpp.grpc.v1.RevokePartnerPortalRoleResponse
-	15, // [15:23] is the sub-list for method output_type
-	7,  // [7:15] is the sub-list for method input_type
-	7,  // [7:7] is the sub-list for extension type_name
-	7,  // [7:7] is the sub-list for extension extendee
-	0,  // [0:7] is the sub-list for field type_name
+	28, // 7: mpp.grpc.v1.StaffAccount.created_at:type_name -> google.protobuf.Timestamp
+	19, // 8: mpp.grpc.v1.CreateStaffAccountResponse.account:type_name -> mpp.grpc.v1.StaffAccount
+	19, // 9: mpp.grpc.v1.ListStaffAccountsResponse.accounts:type_name -> mpp.grpc.v1.StaffAccount
+	0,  // 10: mpp.grpc.v1.IamService.CheckPermission:input_type -> mpp.grpc.v1.CheckPermissionRequest
+	3,  // 11: mpp.grpc.v1.IamService.ListRoles:input_type -> mpp.grpc.v1.ListRolesRequest
+	6,  // 12: mpp.grpc.v1.IamService.ListStaffAssignments:input_type -> mpp.grpc.v1.ListStaffAssignmentsRequest
+	8,  // 13: mpp.grpc.v1.IamService.AssignStaffRole:input_type -> mpp.grpc.v1.AssignStaffRoleRequest
+	10, // 14: mpp.grpc.v1.IamService.RevokeStaffRole:input_type -> mpp.grpc.v1.RevokeStaffRoleRequest
+	13, // 15: mpp.grpc.v1.IamService.ListPartnerPortalAssignments:input_type -> mpp.grpc.v1.ListPartnerPortalAssignmentsRequest
+	15, // 16: mpp.grpc.v1.IamService.AssignPartnerPortalRole:input_type -> mpp.grpc.v1.AssignPartnerPortalRoleRequest
+	17, // 17: mpp.grpc.v1.IamService.RevokePartnerPortalRole:input_type -> mpp.grpc.v1.RevokePartnerPortalRoleRequest
+	20, // 18: mpp.grpc.v1.IamService.CreateStaffAccount:input_type -> mpp.grpc.v1.CreateStaffAccountRequest
+	22, // 19: mpp.grpc.v1.IamService.ListStaffAccounts:input_type -> mpp.grpc.v1.ListStaffAccountsRequest
+	24, // 20: mpp.grpc.v1.IamService.DeactivateStaffAccount:input_type -> mpp.grpc.v1.DeactivateStaffAccountRequest
+	26, // 21: mpp.grpc.v1.IamService.VerifyStaffCredentials:input_type -> mpp.grpc.v1.VerifyStaffCredentialsRequest
+	1,  // 22: mpp.grpc.v1.IamService.CheckPermission:output_type -> mpp.grpc.v1.CheckPermissionResponse
+	4,  // 23: mpp.grpc.v1.IamService.ListRoles:output_type -> mpp.grpc.v1.ListRolesResponse
+	7,  // 24: mpp.grpc.v1.IamService.ListStaffAssignments:output_type -> mpp.grpc.v1.ListStaffAssignmentsResponse
+	9,  // 25: mpp.grpc.v1.IamService.AssignStaffRole:output_type -> mpp.grpc.v1.AssignStaffRoleResponse
+	11, // 26: mpp.grpc.v1.IamService.RevokeStaffRole:output_type -> mpp.grpc.v1.RevokeStaffRoleResponse
+	14, // 27: mpp.grpc.v1.IamService.ListPartnerPortalAssignments:output_type -> mpp.grpc.v1.ListPartnerPortalAssignmentsResponse
+	16, // 28: mpp.grpc.v1.IamService.AssignPartnerPortalRole:output_type -> mpp.grpc.v1.AssignPartnerPortalRoleResponse
+	18, // 29: mpp.grpc.v1.IamService.RevokePartnerPortalRole:output_type -> mpp.grpc.v1.RevokePartnerPortalRoleResponse
+	21, // 30: mpp.grpc.v1.IamService.CreateStaffAccount:output_type -> mpp.grpc.v1.CreateStaffAccountResponse
+	23, // 31: mpp.grpc.v1.IamService.ListStaffAccounts:output_type -> mpp.grpc.v1.ListStaffAccountsResponse
+	25, // 32: mpp.grpc.v1.IamService.DeactivateStaffAccount:output_type -> mpp.grpc.v1.DeactivateStaffAccountResponse
+	27, // 33: mpp.grpc.v1.IamService.VerifyStaffCredentials:output_type -> mpp.grpc.v1.VerifyStaffCredentialsResponse
+	22, // [22:34] is the sub-list for method output_type
+	10, // [10:22] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_grpc_iam_proto_init() }
@@ -1202,7 +1737,7 @@ func file_grpc_iam_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_grpc_iam_proto_rawDesc), len(file_grpc_iam_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   19,
+			NumMessages:   28,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

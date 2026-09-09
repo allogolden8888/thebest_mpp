@@ -327,3 +327,121 @@ func handleIamRevokePartnerPortalRole(client grpcv1.IamServiceClient) http.Handl
 		}{Revoked: resp.GetRevoked()})
 	}
 }
+
+type iamStaffAccountResponse struct {
+	ExternalID  string `json:"external_id"`
+	Username    string `json:"username"`
+	DisplayName string `json:"display_name"`
+	Active      bool   `json:"active"`
+	CreatedAt   string `json:"created_at"`
+}
+
+func toIamStaffAccountResponse(a *grpcv1.StaffAccount) iamStaffAccountResponse {
+	return iamStaffAccountResponse{
+		ExternalID:  a.GetExternalId(),
+		Username:    a.GetUsername(),
+		DisplayName: a.GetDisplayName(),
+		Active:      a.GetActive(),
+		CreatedAt:   formatTimestamp(a.GetCreatedAt()),
+	}
+}
+
+// handleIamListStaffAccounts — GET /v1/iam/staff-accounts?active_only=true.
+// Пароль/хеш никогда не покидают IamService — см. StaffAccount package doc
+// (iam.proto).
+func handleIamListStaffAccounts(client grpcv1.IamServiceClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		activeOnly := r.URL.Query().Get("active_only") == "true"
+		resp, err := client.ListStaffAccounts(r.Context(), &grpcv1.ListStaffAccountsRequest{ActiveOnly: activeOnly})
+		if err != nil {
+			internalError(w, http.StatusBadGateway, "iam_list_staff_accounts: gRPC-вызов IAM Service не удался", err)
+			return
+		}
+
+		accounts := make([]iamStaffAccountResponse, 0, len(resp.GetAccounts()))
+		for _, a := range resp.GetAccounts() {
+			accounts = append(accounts, toIamStaffAccountResponse(a))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(struct {
+			Accounts []iamStaffAccountResponse `json:"accounts"`
+		}{Accounts: accounts})
+	}
+}
+
+type createStaffAccountRequestBody struct {
+	Username    string `json:"username"`
+	Password    string `json:"password"`
+	DisplayName string `json:"display_name"`
+}
+
+// handleIamCreateStaffAccount — POST /v1/iam/staff-accounts. created_by —
+// claims.Subject, НЕ из тела (тот же принцип, что granted_by/revoked_by
+// везде в этом файле).
+func handleIamCreateStaffAccount(client grpcv1.IamServiceClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := auth.ClaimsFromContext(r.Context())
+		if !ok {
+			http.Error(w, "нет claims в контексте", http.StatusInternalServerError)
+			return
+		}
+
+		var body createStaffAccountRequestBody
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "неверное тело запроса: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if body.Username == "" || body.Password == "" || body.DisplayName == "" {
+			http.Error(w, "требуются username, password и display_name", http.StatusBadRequest)
+			return
+		}
+
+		resp, err := client.CreateStaffAccount(r.Context(), &grpcv1.CreateStaffAccountRequest{
+			Username:    body.Username,
+			Password:    body.Password,
+			DisplayName: body.DisplayName,
+			CreatedBy:   claims.Subject,
+		})
+		if err != nil {
+			writeIamGRPCError(w, "iam_create_staff_account", err)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(struct {
+			Account iamStaffAccountResponse `json:"account"`
+		}{Account: toIamStaffAccountResponse(resp.GetAccount())})
+	}
+}
+
+// handleIamDeactivateStaffAccount — POST /v1/iam/staff-accounts/
+// {external_id}/deactivate (тот же POST-action паттерн, что
+// /v1/config/versions/archive — не DELETE, потому что деактивация не
+// удаляет строку, только переключает флаг). actor — claims.Subject.
+func handleIamDeactivateStaffAccount(client grpcv1.IamServiceClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := auth.ClaimsFromContext(r.Context())
+		if !ok {
+			http.Error(w, "нет claims в контексте", http.StatusInternalServerError)
+			return
+		}
+
+		externalID := chi.URLParam(r, "external_id")
+
+		resp, err := client.DeactivateStaffAccount(r.Context(), &grpcv1.DeactivateStaffAccountRequest{
+			ExternalId: externalID,
+			Actor:      claims.Subject,
+		})
+		if err != nil {
+			writeIamGRPCError(w, "iam_deactivate_staff_account", err)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(struct {
+			Deactivated bool `json:"deactivated"`
+		}{Deactivated: resp.GetDeactivated()})
+	}
+}

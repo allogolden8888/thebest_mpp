@@ -36,6 +36,20 @@ type fakeStore struct {
 	ppLastAssignedExt string
 	ppLastAssignedRol string
 	ppLastGrantedBy   string
+
+	staffAccounts        []store.StaffAccount
+	createAccountErr     error
+	deactivateResult     bool
+	deactivateErr        error
+	verifyExternalID     string
+	verifyOK             bool
+	verifyErr            error
+	lastVerifyUsername   string
+	lastVerifyPassword   string
+	lastCreatedUsername  string
+	lastCreatedPassword  string
+	lastCreatedDisplay   string
+	lastCreatedCreatedBy string
 }
 
 func (f *fakeStore) CheckPermission(_ context.Context, _, _ string) (bool, []string, error) {
@@ -76,6 +90,36 @@ func (f *fakeStore) AssignPartnerPortalRole(_ context.Context, externalID, role,
 
 func (f *fakeStore) RevokePartnerPortalRole(_ context.Context, _, _, _ string) (bool, error) {
 	return f.ppRevokeResult, f.ppRevokeErr
+}
+
+func (f *fakeStore) CreateStaffAccount(_ context.Context, username, password, displayName, createdBy string) (store.StaffAccount, error) {
+	f.lastCreatedUsername, f.lastCreatedPassword, f.lastCreatedDisplay, f.lastCreatedCreatedBy = username, password, displayName, createdBy
+	if f.createAccountErr != nil {
+		return store.StaffAccount{}, f.createAccountErr
+	}
+	return store.StaffAccount{ExternalID: username, Username: username, DisplayName: displayName, Active: true, CreatedAt: time.Unix(0, 0)}, nil
+}
+
+func (f *fakeStore) ListStaffAccounts(_ context.Context, activeOnly bool) ([]store.StaffAccount, error) {
+	if !activeOnly {
+		return f.staffAccounts, nil
+	}
+	var out []store.StaffAccount
+	for _, a := range f.staffAccounts {
+		if a.Active {
+			out = append(out, a)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) DeactivateStaffAccount(_ context.Context, _, _ string) (bool, error) {
+	return f.deactivateResult, f.deactivateErr
+}
+
+func (f *fakeStore) VerifyStaffCredentials(_ context.Context, username, password string) (string, bool, error) {
+	f.lastVerifyUsername, f.lastVerifyPassword = username, password
+	return f.verifyExternalID, f.verifyOK, f.verifyErr
 }
 
 func grpcCode(t *testing.T, err error) codes.Code {
@@ -277,5 +321,103 @@ func TestRevokePartnerPortalRoleReturnsFalseWithoutErrorWhenNothingToRevoke(t *t
 	}
 	if resp.GetRevoked() {
 		t.Errorf("ожидали revoked=false, не ошибку, когда нечего отзывать")
+	}
+}
+
+func TestCreateStaffAccountValidatesRequiredFields(t *testing.T) {
+	s := New(&fakeStore{})
+
+	cases := []*grpcv1.CreateStaffAccountRequest{
+		{Password: "pw", DisplayName: "d", CreatedBy: "admin"},
+		{Username: "u", DisplayName: "d", CreatedBy: "admin"},
+		{Username: "u", Password: "pw", CreatedBy: "admin"},
+		{Username: "u", Password: "pw", DisplayName: "d"},
+	}
+	for _, req := range cases {
+		if _, err := s.CreateStaffAccount(context.Background(), req); grpcCode(t, err) != codes.InvalidArgument {
+			t.Errorf("запрос %+v должен давать InvalidArgument, получили %v", req, err)
+		}
+	}
+}
+
+func TestCreateStaffAccountMapsUsernameTakenToAlreadyExists(t *testing.T) {
+	s := New(&fakeStore{createAccountErr: store.ErrUsernameTaken})
+	_, err := s.CreateStaffAccount(context.Background(), &grpcv1.CreateStaffAccountRequest{
+		Username: "u", Password: "pw", DisplayName: "d", CreatedBy: "admin",
+	})
+	if grpcCode(t, err) != codes.AlreadyExists {
+		t.Errorf("ожидали codes.AlreadyExists, получили %v", err)
+	}
+}
+
+func TestCreateStaffAccountPassesThroughToStoreAndNeverEchoesPassword(t *testing.T) {
+	fs := &fakeStore{}
+	s := New(fs)
+
+	resp, err := s.CreateStaffAccount(context.Background(), &grpcv1.CreateStaffAccountRequest{
+		Username: "u1", Password: "hunter2", DisplayName: "User One", CreatedBy: "admin-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateStaffAccount: %v", err)
+	}
+	if fs.lastCreatedUsername != "u1" || fs.lastCreatedPassword != "hunter2" || fs.lastCreatedDisplay != "User One" || fs.lastCreatedCreatedBy != "admin-1" {
+		t.Errorf("store не получил ожидаемые аргументы: %+v", fs)
+	}
+	if resp.GetAccount().GetExternalId() != "u1" || resp.GetAccount().GetUsername() != "u1" {
+		t.Errorf("неожиданный ответ: %+v", resp)
+	}
+}
+
+func TestDeactivateStaffAccountValidatesRequiredFields(t *testing.T) {
+	s := New(&fakeStore{})
+
+	cases := []*grpcv1.DeactivateStaffAccountRequest{
+		{Actor: "admin"},
+		{ExternalId: "u1"},
+	}
+	for _, req := range cases {
+		if _, err := s.DeactivateStaffAccount(context.Background(), req); grpcCode(t, err) != codes.InvalidArgument {
+			t.Errorf("запрос %+v должен давать InvalidArgument, получили %v", req, err)
+		}
+	}
+}
+
+func TestVerifyStaffCredentialsReturnsOkFalseWithoutErrorOnMismatch(t *testing.T) {
+	s := New(&fakeStore{verifyOK: false})
+
+	resp, err := s.VerifyStaffCredentials(context.Background(), &grpcv1.VerifyStaffCredentialsRequest{Username: "u1", Password: "wrong"})
+	if err != nil {
+		t.Fatalf("VerifyStaffCredentials: %v", err)
+	}
+	if resp.GetOk() || resp.GetExternalId() != "" {
+		t.Errorf("ожидали ok=false external_id='', получили %+v", resp)
+	}
+}
+
+func TestVerifyStaffCredentialsReturnsExternalIdOnSuccess(t *testing.T) {
+	s := New(&fakeStore{verifyOK: true, verifyExternalID: "u1"})
+
+	resp, err := s.VerifyStaffCredentials(context.Background(), &grpcv1.VerifyStaffCredentialsRequest{Username: "u1", Password: "correct"})
+	if err != nil {
+		t.Fatalf("VerifyStaffCredentials: %v", err)
+	}
+	if !resp.GetOk() || resp.GetExternalId() != "u1" {
+		t.Errorf("ожидали ok=true external_id=u1, получили %+v", resp)
+	}
+}
+
+func TestVerifyStaffCredentialsMissingFieldsReturnsOkFalseWithoutCallingStore(t *testing.T) {
+	fs := &fakeStore{verifyOK: true, verifyExternalID: "should-not-be-returned"}
+	s := New(fs)
+
+	resp, err := s.VerifyStaffCredentials(context.Background(), &grpcv1.VerifyStaffCredentialsRequest{Username: "", Password: ""})
+	if err != nil {
+		t.Fatalf("VerifyStaffCredentials: %v", err)
+	}
+	if resp.GetOk() {
+		t.Errorf("пустые username/password не должны проходить, даже если store сконфигурирован отвечать ok=true")
+	}
+	if fs.lastVerifyUsername != "" {
+		t.Errorf("store не должен вызываться при пустых username/password")
 	}
 }

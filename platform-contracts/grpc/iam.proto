@@ -43,6 +43,21 @@ service IamService {
   rpc ListPartnerPortalAssignments(ListPartnerPortalAssignmentsRequest) returns (ListPartnerPortalAssignmentsResponse);
   rpc AssignPartnerPortalRole(AssignPartnerPortalRoleRequest) returns (AssignPartnerPortalRoleResponse);
   rpc RevokePartnerPortalRole(RevokePartnerPortalRoleRequest) returns (RevokePartnerPortalRoleResponse);
+
+  // luminous-hugging-charm.md, BACKOFFICE_DESIGN_SPEC.md Экран 33 "Admin
+  // users" — реальный Keycloak не развёрнут нигде (backoffice-ui's
+  // LoginView.vue сегодня буквально принимает вставленный JWT в textarea,
+  // HTTP-раунд-трипа при логине нет), LDAP пользователем явно отклонён,
+  // "сильно позже" будет настоящий Keycloak. До этого — полноценное
+  // локальное управление аккаунтами (iam.staff_accounts): создать
+  // сотрудника с логином/паролем прямо из бэкофиса. bcrypt-сравнение
+  // целиком внутри IamService (VerifyStaffCredentials) — хеш пароля
+  // никогда не пересекает границу процесса наружу, backoffice-api видит
+  // только external_id/ok.
+  rpc CreateStaffAccount(CreateStaffAccountRequest) returns (CreateStaffAccountResponse);
+  rpc ListStaffAccounts(ListStaffAccountsRequest) returns (ListStaffAccountsResponse);
+  rpc DeactivateStaffAccount(DeactivateStaffAccountRequest) returns (DeactivateStaffAccountResponse);
+  rpc VerifyStaffCredentials(VerifyStaffCredentialsRequest) returns (VerifyStaffCredentialsResponse);
 }
 
 message CheckPermissionRequest {
@@ -147,4 +162,52 @@ message RevokePartnerPortalRoleRequest {
 
 message RevokePartnerPortalRoleResponse {
   bool revoked = 1;
+}
+
+message StaffAccount {
+  string external_id = 1; // = username, см. package doc CreateStaffAccount выше.
+  string username = 2;
+  string display_name = 3;
+  bool active = 4;
+  google.protobuf.Timestamp created_at = 5;
+  // Пароль/хеш никогда не покидают IamService — этого поля здесь
+  // намеренно нет, не "забыто".
+}
+
+message CreateStaffAccountRequest {
+  string username = 1;
+  string password = 2; // plaintext на этом единственном hop'е (gRPC internal, mTLS-периметр), хешируется внутри IamService, никогда не логируется.
+  string display_name = 3;
+  string created_by = 4;
+}
+
+message CreateStaffAccountResponse {
+  StaffAccount account = 1;
+}
+
+message ListStaffAccountsRequest {
+  bool active_only = 1;
+}
+
+message ListStaffAccountsResponse {
+  repeated StaffAccount accounts = 1;
+}
+
+message DeactivateStaffAccountRequest {
+  string external_id = 1;
+  string actor = 2;
+}
+
+message DeactivateStaffAccountResponse {
+  bool deactivated = 1;
+}
+
+message VerifyStaffCredentialsRequest {
+  string username = 1;
+  string password = 2;
+}
+
+message VerifyStaffCredentialsResponse {
+  bool ok = 1;
+  string external_id = 2; // пусто, если ok=false
 }

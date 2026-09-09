@@ -1,0 +1,1469 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+<meta name="design_doc_mode" content="canvas">
+<style>
+  body { margin: 0; }
+  [data-theme="dark"] {
+    --bg-app:#0a0c10; --bg-panel:#12151b; --bg-panel-2:#171a21; --bg-elevated:#1c2029; --bg-hover:#1c2029;
+    --border:#242833; --border-strong:#333947; --text:#e7e9ee; --text-dim:#9aa1ae; --text-faint:#6b7280;
+    --accent:#2dd4bf; --accent-dim:rgba(45,212,191,0.12); --accent-strong:#5eead4; --accent-text:#0a0c10;
+    --blue:#60a5fa; --blue-dim:rgba(96,165,250,0.12);
+    --green:#34d399; --green-dim:rgba(52,211,153,0.12);
+    --red:#f87171; --red-dim:rgba(248,113,113,0.12);
+    --orange:#fb923c; --orange-dim:rgba(251,146,60,0.14);
+    --yellow:#facc15; --yellow-dim:rgba(250,204,21,0.12);
+    --gray:#9aa1ae; --gray-dim:rgba(154,161,174,0.12);
+    --shadow: 0 4px 20px rgba(0,0,0,0.35);
+  }
+  [data-theme="light"] {
+    --bg-app:#f2f3f5; --bg-panel:#ffffff; --bg-panel-2:#f8f9fb; --bg-elevated:#ffffff; --bg-hover:#f1f2f5;
+    --border:#e2e4ea; --border-strong:#cbcfd8; --text:#181b20; --text-dim:#5a6170; --text-faint:#8891a0;
+    --accent:#0d9488; --accent-dim:rgba(13,148,136,0.10); --accent-strong:#0f766e; --accent-text:#ffffff;
+    --blue:#2563eb; --blue-dim:rgba(37,99,235,0.08);
+    --green:#059669; --green-dim:rgba(5,150,105,0.08);
+    --red:#dc2626; --red-dim:rgba(220,38,38,0.08);
+    --orange:#ea580c; --orange-dim:rgba(234,88,12,0.10);
+    --yellow:#ca8a04; --yellow-dim:rgba(202,138,4,0.10);
+    --gray:#5a6170; --gray-dim:rgba(90,97,112,0.08);
+    --shadow: 0 4px 16px rgba(20,20,30,0.08);
+  }
+  a { color: var(--accent); }
+  a:hover { color: var(--accent-strong); }
+  ::selection { background: var(--accent-dim); color: var(--text); }
+  * { box-sizing: border-box; font-family: 'Archivo', sans-serif; }
+  .mono { font-family: 'Roboto Mono', monospace; }
+</style>
+</helmet>
+
+<div data-theme="{{ theme }}" style="background:var(--bg-app); min-height:100vh; color:var(--text); font-family:'Archivo',sans-serif;">
+
+  <div style="position:sticky; top:0; z-index:50; display:flex; align-items:center; justify-content:space-between; height:60px; padding:0 24px; background:var(--bg-panel); border-bottom:1px solid var(--border);">
+    <div style="display:flex; align-items:center; gap:12px;">
+      <span style="font-weight:800; font-size:16px; letter-spacing:-.01em;">MPP Backoffice</span>
+      <span style="font-size:11px; font-weight:600; padding:3px 8px; border-radius:20px; border:1px solid var(--border-strong); color:var(--text-dim);">read-only</span>
+    </div>
+    <div style="display:flex; align-items:center; gap:16px;">
+      <span style="font-size:12px; color:var(--text-faint);">Обзор всех экранов — референс дизайна</span>
+      <span style="display:flex; align-items:center; gap:8px; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:6px 12px; color:var(--text-faint); font-size:12px; width:200px;">🔍 Поиск… <span style="margin-left:auto; font-size:11px; border:1px solid var(--border-strong); border-radius:4px; padding:1px 5px;">⌘K</span></span>
+      <button onclick="{{ toggleTheme }}" style="display:flex; align-items:center; gap:8px; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:20px; padding:5px 12px; color:var(--text); font-size:12px; font-weight:600; cursor:pointer;">
+        <span style="width:8px; height:8px; border-radius:50%; background:var(--accent);"></span>
+        {{ themeLabel }}
+      </button>
+      <button style="background:transparent; border:1px solid var(--border-strong); border-radius:6px; padding:7px 14px; color:var(--text); font-size:13px; font-weight:600; cursor:pointer;">Выйти</button>
+    </div>
+  </div>
+
+  <div style="display:flex; align-items:flex-start;">
+    <nav style="position:sticky; top:60px; width:248px; flex-shrink:0; height:calc(100vh - 60px); overflow-y:auto; padding:20px 12px; border-right:1px solid var(--border); background:var(--bg-panel);">
+      <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-faint); padding:8px 10px 6px;">Обзор</div>
+      <a href="#s01" style="display:block; padding:8px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13.5px; font-weight:500;">01 · Dashboard</a>
+      <a href="#s20" style="display:block; padding:8px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13.5px; font-weight:500;">20 · Ops Health</a>
+      <a href="#s19" style="display:block; padding:8px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13.5px; font-weight:500;">19 · Incidents</a>
+      <a href="#s18" style="display:block; padding:8px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13.5px; font-weight:500;">18 · Audit Log</a>
+
+      <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-faint); padding:14px 10px 6px;">Сообщения</div>
+      <a href="#s02" style="display:block; padding:8px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13.5px; font-weight:500;">02 · Messages</a>
+      <a href="#s03" style="display:block; padding:8px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13.5px; font-weight:500;">03 · Карточка сообщения</a>
+      <a href="#s04" style="display:block; padding:8px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13.5px; font-weight:500;">04 · Sandbox</a>
+      <a href="#s06" style="display:block; padding:8px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13.5px; font-weight:500;">06 · MT / MO</a>
+
+      <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-faint); padding:14px 10px 6px;">Биллинг</div>
+      <a href="#s05" style="display:block; padding:8px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13.5px; font-weight:500;">05 · Биллинг</a>
+
+      <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-faint); padding:14px 10px 6px;">Конфигурация</div>
+      <a href="#s07" style="display:block; padding:8px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13.5px; font-weight:500;">07 · Шаблоны</a>
+      <a href="#s08" style="display:block; padding:8px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13.5px; font-weight:500;">08 · Модерация шаблонов</a>
+      <a href="#s09" style="display:block; padding:8px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13.5px; font-weight:500;">09 · Конфигурация</a>
+      <a href="#s10" style="display:block; padding:8px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13.5px; font-weight:500;">10 · Антиспам / Банворды</a>
+      <a href="#s11" style="display:block; padding:8px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13.5px; font-weight:500;">11 · Операторы и маршруты</a>
+      <a href="#s12" style="display:block; padding:8px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13.5px; font-weight:500;">12 · Партнёры</a>
+      <a href="#s13" style="display:block; padding:8px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13.5px; font-weight:500;">13 · Blacklist / Согласия</a>
+
+      <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-faint); padding:14px 10px 6px;">Операции</div>
+      <a href="#s14" style="display:block; padding:8px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13.5px; font-weight:500;">14 · DLQ / Replay</a>
+      <a href="#s15" style="display:block; padding:8px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13.5px; font-weight:500;">15 · Execution Control</a>
+      <a href="#s16" style="display:block; padding:8px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13.5px; font-weight:500;">16 · Users & Roles</a>
+      <a href="#s17" style="display:block; padding:8px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13.5px; font-weight:500;">17 · Ключи и секреты</a>
+
+      <div style="margin-top:14px; padding-top:10px; border-top:1px dashed var(--border-strong);"></div>
+      <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--accent); padding:8px 10px 6px;">A2P Admin — доп. спецификация</div>
+      <a href="#s21" style="display:block; padding:8px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13.5px; font-weight:500;">21 · Home</a>
+
+      <div style="font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-faint); padding:10px 10px 4px;">Moderation</div>
+      <a href="#s22" style="display:block; padding:7px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13px;">22 · Senders</a>
+      <a href="#s23" style="display:block; padding:7px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13px;">23 · CTNs</a>
+      <a href="#s24" style="display:block; padding:7px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13px;">24 · Patterns</a>
+      <a href="#s25" style="display:block; padding:7px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13px;">25 · Requests</a>
+      <a href="#s26" style="display:block; padding:7px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13px;">26 · Partners</a>
+      <a href="#s27" style="display:block; padding:7px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13px;">27 · Chat</a>
+      <a href="#s28" style="display:block; padding:7px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13px;">28 · Blacklist numbers</a>
+
+      <div style="font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-faint); padding:10px 10px 4px;">Monitoring</div>
+      <a href="#s29" style="display:block; padding:7px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13px;">29 · TPS</a>
+      <a href="#s30" style="display:block; padding:7px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13px;">30 · MT Sessions</a>
+      <a href="#s31" style="display:block; padding:7px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13px;">31 · Statistics</a>
+
+      <div style="font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-faint); padding:10px 10px 4px;">System Settings</div>
+      <a href="#s32" style="display:block; padding:7px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13px;">32 · Categories</a>
+      <a href="#s33" style="display:block; padding:7px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13px;">33 · Admin users</a>
+      <a href="#s34" style="display:block; padding:7px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13px;">34 · Roles</a>
+      <a href="#s35" style="display:block; padding:7px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13px;">35 · Partner Users</a>
+      <a href="#s36" style="display:block; padding:7px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13px;">36 · Regex Patterns</a>
+      <a href="#s37" style="display:block; padding:7px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13px;">37 · Spam Patterns</a>
+
+      <div style="font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-faint); padding:10px 10px 4px;">Messages</div>
+      <a href="#s38" style="display:block; padding:7px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13px;">38 · A2P</a>
+      <a href="#s39" style="display:block; padding:7px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13px;">39 · P2A</a>
+      <a href="#s40" style="display:block; padding:7px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13px;">40 · DLRs</a>
+
+      <div style="font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-faint); padding:10px 10px 4px;">Guide</div>
+      <a href="#s41" style="display:block; padding:7px 10px; border-radius:6px; color:var(--text-dim); text-decoration:none; font-size:13px; margin-bottom:10px;">41 · Guides / Guide management</a>
+    </nav>
+
+    <main style="flex:1; min-width:0;">
+
+      <!-- ============ 01 DASHBOARD ============ -->
+      <section id="s01" data-screen-label="01" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+          <h1 style="margin:0; font-size:24px; font-weight:800;">Dashboard</h1>
+          <span style="display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:20px; background:var(--orange-dim);"><span style="width:6px;height:6px;border-radius:50%;background:var(--orange);"></span><span style="font-size:11px; font-weight:700; color:var(--orange); text-transform:uppercase; letter-spacing:.03em;">собирается из 4 API</span></span>
+        </div>
+        <p style="margin:0 0 24px; color:var(--text-dim); font-size:14px; max-width:720px;">Главная страница: KPI за период, здоровье платформы, графики и блок «требует внимания».</p>
+
+        <div style="display:flex; align-items:center; gap:10px; padding:12px 16px; background:var(--red-dim); border:1px solid transparent; border-radius:8px; margin-bottom:20px;">
+          <span style="width:8px;height:8px;border-radius:50%;background:var(--red); flex-shrink:0;"></span>
+          <span style="font-size:13px; color:var(--text);">Источник данных (ClickHouse) недоступен — KPI и графики временно без данных. Ниже показано именно это состояние.</span>
+        </div>
+
+        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:14px; margin-bottom:24px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px;">
+            <div style="font-size:12px; color:var(--text-faint); margin-bottom:8px;">Всего сообщений</div>
+            <div style="font-size:22px; font-weight:800; color:var(--text-faint);">—</div>
+            <div style="font-size:11px; color:var(--red); margin-top:4px;">нет данных</div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px;">
+            <div style="font-size:12px; color:var(--text-faint); margin-bottom:8px;">Доставлено</div>
+            <div style="font-size:22px; font-weight:800; color:var(--text-faint);">—</div>
+            <div style="font-size:11px; color:var(--red); margin-top:4px;">нет данных</div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px;">
+            <div style="font-size:12px; color:var(--text-faint); margin-bottom:8px;">Отклонено</div>
+            <div style="font-size:22px; font-weight:800; color:var(--text-faint);">—</div>
+            <div style="font-size:11px; color:var(--red); margin-top:4px;">нет данных</div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px;">
+            <div style="font-size:12px; color:var(--text-faint); margin-bottom:8px;">Ошибки / недоставлено</div>
+            <div style="font-size:22px; font-weight:800; color:var(--text-faint);">—</div>
+            <div style="font-size:11px; color:var(--red); margin-top:4px;">нет данных</div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px;">
+            <div style="font-size:12px; color:var(--text-faint); margin-bottom:8px;">Списано, UZS</div>
+            <div style="font-size:22px; font-weight:800; color:var(--text-faint);">—</div>
+            <div style="font-size:11px; color:var(--orange); margin-top:4px;">строится</div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px;">
+            <div style="font-size:12px; color:var(--text-faint); margin-bottom:8px;">Активных партнёров</div>
+            <div style="font-size:22px; font-weight:800; color:var(--text-faint);">—</div>
+            <div style="font-size:11px; color:var(--orange); margin-top:4px;">строится</div>
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:minmax(0,2fr) minmax(0,1fr); gap:16px; margin-bottom:24px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px;">
+            <div style="font-size:14px; font-weight:700; margin-bottom:12px;">Здоровье платформы</div>
+            <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:14px;">
+              <sc-for list="{{ healthDots }}" as="dot" hint-placeholder-count="23">
+                <span style="width:14px; height:14px; border-radius:3px; background:{{ dot.color }}; display:inline-block;"></span>
+              </sc-for>
+            </div>
+            <div style="display:flex; gap:20px; font-size:12px; color:var(--text-dim);">
+              <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--green);margin-right:6px;"></span>20 сервисов ready</span>
+              <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--yellow);margin-right:6px;"></span>2 сервиса с lag &gt; порога</span>
+              <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--red);margin-right:6px;"></span>1 not ready</span>
+            </div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px;">
+            <div style="font-size:14px; font-weight:700; margin-bottom:12px;">Требует внимания</div>
+            <div style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border); font-size:13px;"><span style="color:var(--text-dim);">Открытые инциденты</span><span style="font-weight:700; color:var(--orange);">3</span></div>
+            <div style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border); font-size:13px;"><span style="color:var(--text-dim);">DLQ pending</span><span style="font-weight:700; color:var(--red);">27</span></div>
+            <div style="display:flex; justify-content:space-between; padding:8px 0; font-size:13px;"><span style="color:var(--text-dim);">Reconciliation open</span><span style="font-weight:700; color:var(--orange);">5</span></div>
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:16px;">
+          <div style="background:var(--bg-panel); border:1px dashed var(--border-strong); border-radius:10px; padding:20px; min-height:160px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px;">
+            <div style="font-size:12px; font-weight:600; color:var(--text-dim);">Сообщения по часам</div>
+            <div style="font-size:11px; color:var(--text-faint);">нет данных — источник недоступен</div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px dashed var(--border-strong); border-radius:10px; padding:20px; min-height:160px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px;">
+            <div style="font-size:12px; font-weight:600; color:var(--text-dim);">Топ-10 партнёров</div>
+            <div style="font-size:11px; color:var(--text-faint);">нет данных — источник недоступен</div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px dashed var(--border-strong); border-radius:10px; padding:20px; min-height:160px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px;">
+            <div style="font-size:12px; font-weight:600; color:var(--text-dim);">Категории (донат)</div>
+            <div style="font-size:11px; color:var(--text-faint);">нет данных — источник недоступен</div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px dashed var(--border-strong); border-radius:10px; padding:20px; min-height:160px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px;">
+            <div style="font-size:12px; font-weight:600; color:var(--text-dim);">Топ-10 alpha-имён</div>
+            <div style="font-size:11px; color:var(--text-faint);">поле sender_id ещё не в аналитике</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 02 MESSAGES LIST ============ -->
+      <section id="s02" data-screen-label="02" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+          <h1 style="margin:0; font-size:24px; font-weight:800;">Сообщения — список</h1>
+          <span style="display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:20px; background:var(--green-dim);"><span style="width:6px;height:6px;border-radius:50%;background:var(--green);"></span><span style="font-size:11px; font-weight:700; color:var(--green); text-transform:uppercase;">API есть</span></span>
+        </div>
+        <p style="margin:0 0 20px; color:var(--text-dim); font-size:14px; max-width:760px;">GET /v1/messages. Поиск возможен только по message_id / trace_id — поиск по msisdn архитектурно невозможен (номер не индексируется реверсивно).</p>
+
+        <div style="display:grid; grid-template-columns:repeat(5,minmax(0,1fr)) auto; gap:12px; align-items:end; background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px; margin-bottom:20px;">
+          <div>
+            <div style="font-size:11px; color:var(--text-faint); margin-bottom:6px;">partner_id</div>
+            <input placeholder="click_uz" style="width:100%; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px 10px; color:var(--text); font-size:13px;"/>
+          </div>
+          <div>
+            <div style="font-size:11px; color:var(--text-faint); margin-bottom:6px;">current_status</div>
+            <select style="width:100%; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px 10px; color:var(--text); font-size:13px;"><option>Все</option><option>SUBMITTED</option><option>DELIVERED</option><option>REJECTED</option></select>
+          </div>
+          <div>
+            <div style="font-size:11px; color:var(--text-faint); margin-bottom:6px;">terminal</div>
+            <select style="width:100%; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px 10px; color:var(--text); font-size:13px;"><option>Все</option><option>Да</option><option>Нет</option></select>
+          </div>
+          <div style="opacity:.5;">
+            <div style="font-size:11px; color:var(--text-faint); margin-bottom:6px;">период — строится</div>
+            <input disabled placeholder="от — до" style="width:100%; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px 10px; color:var(--text); font-size:13px;"/>
+          </div>
+          <div style="opacity:.5;">
+            <div style="font-size:11px; color:var(--text-faint); margin-bottom:6px;">msisdn — недоступно</div>
+            <input disabled placeholder="поиск невозможен" style="width:100%; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px 10px; color:var(--text); font-size:13px;"/>
+          </div>
+          <button style="background:var(--accent); color:var(--accent-text); border:none; border-radius:6px; padding:9px 18px; font-weight:700; font-size:13px; cursor:pointer;">Обновить</button>
+        </div>
+
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow-x:auto; margin-bottom:12px;">
+          <table style="width:100%; min-width:820px; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;">
+              <th style="padding:12px 16px; font-weight:600; color:var(--text-dim);">message_id</th>
+              <th style="padding:12px 16px; font-weight:600; color:var(--text-dim);">партнёр</th>
+              <th style="padding:12px 16px; font-weight:600; color:var(--text-dim);">приложение</th>
+              <th style="padding:12px 16px; font-weight:600; color:var(--text-dim);">статус</th>
+              <th style="padding:12px 16px; font-weight:600; color:var(--text-dim);">терминальный</th>
+              <th style="padding:12px 16px; font-weight:600; color:var(--text-dim);">создано</th>
+              <th style="padding:12px 16px; font-weight:600; color:var(--text-dim);"></th>
+            </tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border);">
+                <td style="padding:12px 16px;" class="mono">bc415c5f-7017…e0<span style="color:var(--accent); margin-left:8px; cursor:pointer;">⧉</span></td>
+                <td style="padding:12px 16px;">click_uz</td><td style="padding:12px 16px;">click_uz_main</td>
+                <td style="padding:12px 16px;"><span style="padding:3px 10px; border-radius:6px; background:var(--blue-dim); color:var(--blue); font-size:12px; font-weight:600;">SUBMITTED</span></td>
+                <td style="padding:12px 16px; color:var(--text-faint);">нет</td><td style="padding:12px 16px; color:var(--text-dim);" class="mono">19.08 11:31</td>
+                <td style="padding:12px 16px;"><a href="#s03" style="font-size:12px; font-weight:600;">Детали →</a></td>
+              </tr>
+              <tr style="border-top:1px solid var(--border);">
+                <td style="padding:12px 16px;" class="mono">ff506add-57e4…f3<span style="color:var(--accent); margin-left:8px; cursor:pointer;">⧉</span></td>
+                <td style="padding:12px 16px;">click_uz</td><td style="padding:12px 16px;">click_uz_main</td>
+                <td style="padding:12px 16px;"><span style="padding:3px 10px; border-radius:6px; background:var(--gray-dim); color:var(--gray); font-size:12px; font-weight:600;">RECEIVED</span></td>
+                <td style="padding:12px 16px; color:var(--text-faint);">нет</td><td style="padding:12px 16px; color:var(--text-dim);" class="mono">19.08 10:31</td>
+                <td style="padding:12px 16px;"><a href="#s03" style="font-size:12px; font-weight:600;">Детали →</a></td>
+              </tr>
+              <tr style="border-top:1px solid var(--border);">
+                <td style="padding:12px 16px;" class="mono">9a12ee40-31bd…7c<span style="color:var(--accent); margin-left:8px; cursor:pointer;">⧉</span></td>
+                <td style="padding:12px 16px;">uzum_bank</td><td style="padding:12px 16px;">uzum_notify</td>
+                <td style="padding:12px 16px;"><span style="padding:3px 10px; border-radius:6px; background:var(--green-dim); color:var(--green); font-size:12px; font-weight:600;">DELIVERED</span></td>
+                <td style="padding:12px 16px; color:var(--text-faint);">да</td><td style="padding:12px 16px; color:var(--text-dim);" class="mono">19.08 09:02</td>
+                <td style="padding:12px 16px;"><a href="#s03" style="font-size:12px; font-weight:600;">Детали →</a></td>
+              </tr>
+              <tr style="border-top:1px solid var(--border);">
+                <td style="padding:12px 16px;" class="mono">2f7c9b18-6a90…d1<span style="color:var(--accent); margin-left:8px; cursor:pointer;">⧉</span></td>
+                <td style="padding:12px 16px;">click_uz</td><td style="padding:12px 16px;">click_uz_main</td>
+                <td style="padding:12px 16px;"><span style="padding:3px 10px; border-radius:6px; background:var(--red-dim); color:var(--red); font-size:12px; font-weight:600;">REJECTED</span></td>
+                <td style="padding:12px 16px; color:var(--text-faint);">да</td><td style="padding:12px 16px; color:var(--text-dim);" class="mono">18.08 22:14</td>
+                <td style="padding:12px 16px;"><a href="#s03" style="font-size:12px; font-weight:600;">Детали →</a></td>
+              </tr>
+              <tr style="border-top:1px solid var(--border);">
+                <td style="padding:12px 16px;" class="mono">7bd410aa-88fe…4b<span style="color:var(--accent); margin-left:8px; cursor:pointer;">⧉</span></td>
+                <td style="padding:12px 16px;">payme_uz</td><td style="padding:12px 16px;">payme_main</td>
+                <td style="padding:12px 16px;"><span style="padding:3px 10px; border-radius:6px; background:var(--orange-dim); color:var(--orange); font-size:12px; font-weight:600;">DELIVERY_UNRESOLVED</span></td>
+                <td style="padding:12px 16px; color:var(--text-faint);">да</td><td style="padding:12px 16px; color:var(--text-dim);" class="mono">18.08 18:47</td>
+                <td style="padding:12px 16px;"><a href="#s03" style="font-size:12px; font-weight:600;">Детали →</a></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:28px;">
+          <span style="font-size:12px; color:var(--text-faint);">Total count не возвращается API — только «Пред / След», без «страница X из Y»</span>
+          <div style="display:flex; gap:8px;">
+            <button style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:7px 14px; color:var(--text-dim); font-size:13px;" disabled>← Пред</button>
+            <button style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:7px 14px; color:var(--text); font-size:13px; cursor:pointer;">След →</button>
+          </div>
+        </div>
+
+        <div style="font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--text-faint); margin-bottom:10px;">Пустые состояния</div>
+        <div style="display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:24px; text-align:center; min-height:120px; display:flex; flex-direction:column; justify-content:center; gap:6px;">
+            <div style="font-size:13px; font-weight:600;">Нет сообщений вообще</div>
+            <div style="font-size:12px; color:var(--text-faint);">Партнёр ещё ничего не отправил</div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:24px; text-align:center; min-height:120px; display:flex; flex-direction:column; justify-content:center; gap:6px;">
+            <div style="font-size:13px; font-weight:600;">Нет по текущим фильтрам</div>
+            <div style="font-size:12px; color:var(--text-faint);">Попробуйте изменить условия поиска</div>
+          </div>
+          <div style="background:var(--red-dim); border:1px solid transparent; border-radius:10px; padding:24px; text-align:center; min-height:120px; display:flex; flex-direction:column; justify-content:center; gap:6px;">
+            <div style="font-size:13px; font-weight:600; color:var(--red);">Источник недоступен</div>
+            <div style="font-size:12px; color:var(--text-faint);">Ошибка запроса к API, повторите позже</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 03 MESSAGE DETAIL ============ -->
+      <section id="s03" data-screen-label="03" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+          <h1 style="margin:0; font-size:24px; font-weight:800;">Сообщение — детальная карточка</h1>
+          <span style="display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:20px; background:var(--accent-dim);"><span style="font-size:11px; font-weight:700; color:var(--accent);">★ ключевой экран</span></span>
+        </div>
+        <p style="margin:0 0 24px; color:var(--text-dim); font-size:14px;">GET /v1/messages/{id}. Пять блоков: шапка, хронология стадий, SMPP/DLR, лента статусов, биллинг.</p>
+
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px; margin-bottom:16px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+            <div style="display:flex; align-items:center; gap:10px;">
+              <span style="font-size:14px; font-weight:700;">Блок A — Атрибуты</span>
+              <span style="padding:3px 8px; border-radius:20px; background:var(--green-dim); color:var(--green); font-size:10px; font-weight:700;">ЕСТЬ</span>
+            </div>
+            <span style="padding:4px 10px; border-radius:6px; background:var(--blue-dim); color:var(--blue); font-size:12px; font-weight:700;">SUBMITTED</span>
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:16px; font-size:13px;">
+            <div><div style="color:var(--text-faint); font-size:11px; margin-bottom:3px;">message_id</div><div class="mono">bc415c5f-7017…e0</div></div>
+            <div><div style="color:var(--text-faint); font-size:11px; margin-bottom:3px;">partner_id</div><div>click_uz</div></div>
+            <div><div style="color:var(--text-faint); font-size:11px; margin-bottom:3px;">application_id</div><div>click_uz_main</div></div>
+            <div><div style="color:var(--text-faint); font-size:11px; margin-bottom:3px;">trace_id</div><div class="mono">9f21…c04</div></div>
+            <div><div style="color:var(--text-faint); font-size:11px; margin-bottom:3px;">pipeline / version</div><div>a2p_default / 3</div></div>
+            <div><div style="color:var(--text-faint); font-size:11px; margin-bottom:3px;">terminal</div><div>нет</div></div>
+            <div><div style="color:var(--text-faint); font-size:11px; margin-bottom:3px;">created_at</div><div class="mono">11:31:36.622</div></div>
+            <div><div style="color:var(--text-faint); font-size:11px; margin-bottom:3px;">updated_at</div><div class="mono">11:31:36.911</div></div>
+          </div>
+          <div style="margin-top:16px; padding-top:14px; border-top:1px dashed var(--border-strong); display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:16px; font-size:13px; opacity:.55;">
+            <div><div style="color:var(--text-faint); font-size:11px; margin-bottom:3px;">sender_id 🔨</div><div>CLICK</div></div>
+            <div><div style="color:var(--text-faint); font-size:11px; margin-bottom:3px;">msisdn 🔨</div><div>998901234567</div></div>
+            <div><div style="color:var(--text-faint); font-size:11px; margin-bottom:3px;">category 🔨</div><div>SERVICE</div></div>
+            <div><div style="color:var(--text-faint); font-size:11px; margin-bottom:3px;">operator_id 🔨</div><div>beeline_uz</div></div>
+          </div>
+        </div>
+
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px; margin-bottom:16px;">
+          <div style="display:flex; align-items:center; gap:10px; margin-bottom:18px;">
+            <span style="font-size:14px; font-weight:700;">Блок B — Хронология стадий</span>
+            <span style="padding:3px 8px; border-radius:20px; background:var(--orange-dim); color:var(--orange); font-size:10px; font-weight:700;">СТРОИТСЯ · 1-2 ДНЯ</span>
+          </div>
+          <div style="display:flex; align-items:flex-start; gap:0;">
+            <div style="flex:1; text-align:center; position:relative;">
+              <div style="width:100%; height:3px; background:var(--green); position:absolute; top:9px; left:-50%; z-index:0;"></div>
+              <div style="width:20px; height:20px; border-radius:50%; background:var(--green); margin:0 auto; position:relative; z-index:1; display:flex; align-items:center; justify-content:center; color:#fff; font-size:11px;">✓</div>
+              <div style="font-size:11px; font-weight:600; margin-top:8px;">DESTINATION_<br/>RESOLUTION</div><div style="font-size:11px; color:var(--text-faint); margin-top:2px;">79 ms</div>
+            </div>
+            <div style="flex:1; text-align:center; position:relative;">
+              <div style="width:100%; height:3px; background:var(--green); position:absolute; top:9px; left:-50%; z-index:0;"></div>
+              <div style="width:20px; height:20px; border-radius:50%; background:var(--green); margin:0 auto; position:relative; z-index:1; display:flex; align-items:center; justify-content:center; color:#fff; font-size:11px;">✓</div>
+              <div style="font-size:11px; font-weight:600; margin-top:8px;">POLICY</div><div style="font-size:11px; color:var(--text-faint); margin-top:2px;">34 ms</div>
+            </div>
+            <div style="flex:1; text-align:center; position:relative;">
+              <div style="width:100%; height:3px; background:var(--green); position:absolute; top:9px; left:-50%; z-index:0;"></div>
+              <div style="width:20px; height:20px; border-radius:50%; background:var(--green); margin:0 auto; position:relative; z-index:1; display:flex; align-items:center; justify-content:center; color:#fff; font-size:11px;">✓</div>
+              <div style="font-size:11px; font-weight:600; margin-top:8px;">BILLING</div><div style="font-size:11px; color:var(--text-faint); margin-top:2px;">51 ms</div>
+            </div>
+            <div style="flex:1; text-align:center; position:relative;">
+              <div style="width:100%; height:3px; background:var(--green); position:absolute; top:9px; left:-50%; z-index:0;"></div>
+              <div style="width:20px; height:20px; border-radius:50%; background:var(--green); margin:0 auto; position:relative; z-index:1; display:flex; align-items:center; justify-content:center; color:#fff; font-size:11px;">✓</div>
+              <div style="font-size:11px; font-weight:600; margin-top:8px;">ROUTING</div><div style="font-size:11px; color:var(--text-faint); margin-top:2px;">12 ms</div>
+            </div>
+            <div style="flex:1.6; text-align:center; position:relative;">
+              <div style="width:100%; height:3px; background:var(--accent); position:absolute; top:9px; left:-50%; z-index:0;"></div>
+              <div style="width:24px; height:24px; border-radius:50%; background:var(--accent); margin:0 auto; position:relative; z-index:1; display:flex; align-items:center; justify-content:center; color:var(--accent-text); font-size:12px; box-shadow:0 0 0 4px var(--accent-dim);">✓</div>
+              <div style="font-size:11px; font-weight:700; margin-top:8px;">DELIVERY</div><div style="font-size:11px; color:var(--accent); font-weight:700; margin-top:2px;">1969 ms — узкое место</div>
+            </div>
+          </div>
+          <div style="margin-top:14px; font-size:12px; color:var(--text-faint);">Итого: 2145 мс. Провалившийся шаг рисуется красным с обрывом дальше; retry — тот же шаг с attempt 2; ещё не пройденные шаги — серые.</div>
+        </div>
+
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px; margin-bottom:16px;">
+          <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px;">
+            <span style="font-size:14px; font-weight:700;">Блок C — SMPP / операторские события</span>
+            <span style="padding:3px 8px; border-radius:20px; background:var(--orange-dim); color:var(--orange); font-size:10px; font-weight:700;">СТРОИТСЯ · 1-2 ДНЯ</span>
+          </div>
+          <div style="border:1px solid var(--border); border-radius:8px; overflow:hidden;">
+            <div style="display:grid; grid-template-columns:60px minmax(0,1fr) minmax(0,1fr) minmax(0,1fr); padding:10px 14px; background:var(--bg-panel-2); font-size:11px; color:var(--text-faint); font-weight:600;">
+              <div>Сегмент</div><div>Оператор / протокол</div><div>Submit</div><div>DLR</div>
+            </div>
+            <div style="display:grid; grid-template-columns:60px minmax(0,1fr) minmax(0,1fr) minmax(0,1fr); padding:12px 14px; border-top:1px solid var(--border); font-size:13px; align-items:center;">
+              <div>1</div>
+              <div>beeline_uz · SMPP</div>
+              <div class="mono" style="font-size:12px;">11:31:36.701</div>
+              <div><span style="padding:3px 8px; border-radius:6px; background:var(--green-dim); color:var(--green); font-size:11px; font-weight:600;">DELIVERED</span> <span style="color:var(--text-faint); font-size:11px;">за 1781 мс</span></div>
+            </div>
+          </div>
+          <div style="margin-top:10px; padding:10px 12px; background:var(--bg-panel-2); border-radius:6px; font-size:11px;" class="mono">id:dkr87lit9o7b sub:001 dlvrd:001 stat:DELIVRD err:0</div>
+          <div style="margin-top:12px; font-size:12px; color:var(--text-faint);">Пер-PDU таймстампы (submit_sm_to_smsc_at и т.п.) в платформе не собираются — нужна новая инструментация ~2-3 дня.</div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px;">
+            <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px;">
+              <span style="font-size:14px; font-weight:700;">Блок D — Лента статусов</span>
+              <span style="padding:3px 8px; border-radius:20px; background:var(--green-dim); color:var(--green); font-size:10px; font-weight:700;">ЕСТЬ</span>
+            </div>
+            <div style="position:relative; padding-left:20px;">
+              <div style="position:absolute; left:5px; top:4px; bottom:4px; width:2px; background:var(--border-strong);"></div>
+              <div style="position:relative; margin-bottom:16px;"><div style="position:absolute; left:-20px; top:2px; width:10px; height:10px; border-radius:50%; background:var(--blue);"></div><div style="font-size:13px; font-weight:600;">SUBMITTED</div><div style="font-size:11px; color:var(--text-faint);" class="mono">11:31:36.622</div></div>
+              <div style="position:relative;"><div style="position:absolute; left:-20px; top:2px; width:10px; height:10px; border-radius:50%; background:var(--text-faint); opacity:.4;"></div><div style="font-size:13px; color:var(--text-faint);">Ожидание следующего события…</div></div>
+            </div>
+            <div style="margin-top:14px; font-size:11px; color:var(--text-faint);">Легитимно бывает пустой или из одной записи — это не ошибка.</div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px;">
+            <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px;">
+              <span style="font-size:14px; font-weight:700;">Блок E — Биллинг по сообщению</span>
+              <span style="padding:3px 8px; border-radius:20px; background:var(--orange-dim); color:var(--orange); font-size:10px; font-weight:700;">СТРОИТСЯ · 0.5 ДНЯ</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border); font-size:13px;"><span style="color:var(--text-dim);">Сумма</span><span style="font-weight:700;">94.0000 UZS</span></div>
+            <div style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border); font-size:13px;"><span style="color:var(--text-dim);">Категория</span><span>SERVICE</span></div>
+            <div style="display:flex; justify-content:space-between; padding:8px 0; font-size:13px;"><span style="color:var(--text-dim);">Сегменты</span><span>1</span></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 04 SANDBOX ============ -->
+      <section id="s04" data-screen-label="04" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+          <h1 style="margin:0; font-size:24px; font-weight:800;">Тестовая отправка (Sandbox)</h1>
+          <span style="display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:20px; background:var(--orange-dim);"><span style="font-size:11px; font-weight:700; color:var(--orange);">нужен прокси · 0.5 дня</span></span>
+        </div>
+        <p style="margin:0 0 24px; color:var(--text-dim); font-size:14px; max-width:700px;">Сообщение проходит весь реальный пайплайн, но на стадии DELIVERY не уходит оператору при sandbox=true.</p>
+
+        <div style="display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:24px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px;">
+            <div style="display:flex; gap:8px; margin-bottom:16px; background:var(--bg-panel-2); padding:4px; border-radius:8px; width:fit-content;">
+              <div style="padding:7px 16px; background:var(--accent); color:var(--accent-text); border-radius:6px; font-size:12px; font-weight:700;">Sandbox</div>
+              <div style="padding:7px 16px; color:var(--text-dim); font-size:12px; font-weight:700;">Реальная отправка</div>
+            </div>
+            <div style="display:flex; flex-direction:column; gap:14px;">
+              <div><div style="font-size:11px; color:var(--text-faint); margin-bottom:6px;">partner_id</div><input value="click_uz" style="width:100%; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:9px 10px; color:var(--text); font-size:13px;"/></div>
+              <div><div style="font-size:11px; color:var(--text-faint); margin-bottom:6px;">application_id</div><input value="click_uz_main" style="width:100%; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:9px 10px; color:var(--text); font-size:13px;"/></div>
+              <div style="display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:12px;">
+                <div><div style="font-size:11px; color:var(--text-faint); margin-bottom:6px;">msisdn</div><input value="998901234567" style="width:100%; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:9px 10px; color:var(--text); font-size:13px;"/></div>
+                <div><div style="font-size:11px; color:var(--text-faint); margin-bottom:6px;">sender_id</div><input value="CLICK" style="width:100%; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:9px 10px; color:var(--text); font-size:13px;"/></div>
+              </div>
+              <div><div style="font-size:11px; color:var(--text-faint); margin-bottom:6px;">текст сообщения</div><textarea rows="3" style="width:100%; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:9px 10px; color:var(--text); font-size:13px; resize:vertical;">Тестовое сообщение</textarea></div>
+              <button style="background:var(--accent); color:var(--accent-text); border:none; border-radius:6px; padding:11px; font-weight:700; font-size:13px; cursor:pointer;">Отправить тест</button>
+            </div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:16px;">
+            <div style="background:var(--red-dim); border:1px solid transparent; border-radius:10px; padding:16px; font-size:13px; color:var(--text);"><strong style="color:var(--red);">При «Реальной отправке»</strong> сообщение уйдёт живому абоненту и спишутся деньги с баланса партнёра — форма должна требовать явное подтверждение.</div>
+            <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px;">
+              <div style="font-size:13px; font-weight:700; margin-bottom:10px;">Результат отправки</div>
+              <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;"><span style="padding:3px 8px; border-radius:6px; background:var(--accent-dim); color:var(--accent); font-size:11px; font-weight:700;">TEST</span><span style="font-size:13px;">Сообщение принято</span></div>
+              <div style="font-size:12px; color:var(--text-faint); margin-bottom:2px;">message_id</div><div class="mono" style="font-size:13px; margin-bottom:10px;">e40a...9c1</div>
+              <a href="#s03" style="font-size:13px; font-weight:600;">Открыть карточку сообщения →</a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 05 BILLING ============ -->
+      <section id="s05" data-screen-label="05" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+          <h1 style="margin:0; font-size:24px; font-weight:800;">Биллинг</h1>
+        </div>
+        <p style="margin:0 0 20px; color:var(--text-dim); font-size:14px;">Лента списаний, сводка по партнёрам, тарифы (версионируемые) и сверка.</p>
+
+        <div style="display:flex; gap:6px; margin-bottom:20px; border-bottom:1px solid var(--border);">
+          <div style="padding:10px 18px; font-size:13px; font-weight:700; border-bottom:2px solid var(--accent); color:var(--accent);">Лента списаний</div>
+          <div style="padding:10px 18px; font-size:13px; font-weight:600; color:var(--text-dim);">Сводка</div>
+          <div style="padding:10px 18px; font-size:13px; font-weight:600; color:var(--text-dim);">Тарифы</div>
+          <div style="padding:10px 18px; font-size:13px; font-weight:600; color:var(--text-dim);">Сверка</div>
+        </div>
+
+        <div style="font-size:13px; font-weight:700; margin-bottom:10px; display:flex; align-items:center; gap:8px;">5.1 Лента списаний <span style="padding:3px 8px; border-radius:20px; background:var(--orange-dim); color:var(--orange); font-size:10px; font-weight:700;">СТРОИТСЯ · 1 ДЕНЬ</span></div>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow:hidden; margin-bottom:28px;">
+          <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;">
+              <th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">дата</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">партнёр</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">charge_id</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">тип</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600; text-align:right;">сумма</th>
+            </tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;" class="mono">19.08 11:31</td><td style="padding:12px 16px;">click_uz</td><td style="padding:12px 16px;" class="mono">a91c…04</td><td style="padding:12px 16px;"><span style="padding:3px 8px; border-radius:6px; background:var(--gray-dim); color:var(--gray); font-size:11px; font-weight:600;">списание</span></td><td style="padding:12px 16px; text-align:right; font-weight:600;">94.0000 UZS</td></tr>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;" class="mono">19.08 09:40</td><td style="padding:12px 16px;">uzum_bank</td><td style="padding:12px 16px;" class="mono">b12e…9f</td><td style="padding:12px 16px;"><span style="padding:3px 8px; border-radius:6px; background:var(--gray-dim); color:var(--gray); font-size:11px; font-weight:600;">списание</span></td><td style="padding:12px 16px; text-align:right; font-weight:600;">350.0000 UZS</td></tr>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;" class="mono">18.08 22:15</td><td style="padding:12px 16px;">click_uz</td><td style="padding:12px 16px;" class="mono">c02a…11 <span style="color:var(--text-faint);">← a91c…04</span></td><td style="padding:12px 16px;"><span style="padding:3px 8px; border-radius:6px; background:var(--red-dim); color:var(--red); font-size:11px; font-weight:600;">компенсация</span></td><td style="padding:12px 16px; text-align:right; font-weight:600; color:var(--red);">−94.0000 UZS</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div style="font-size:13px; font-weight:700; margin-bottom:10px; display:flex; align-items:center; gap:8px;">5.2 Сводка по партнёрам <span style="padding:3px 8px; border-radius:20px; background:var(--orange-dim); color:var(--orange); font-size:10px; font-weight:700;">СТРОИТСЯ · 1 ДЕНЬ</span></div>
+        <div style="display:grid; grid-template-columns:minmax(0,1fr) 320px; gap:16px; margin-bottom:28px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow-x:auto;">
+            <table style="width:100%; min-width:560px; border-collapse:collapse; font-size:13px;">
+              <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">партнёр</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600; text-align:right;">списания</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600; text-align:right;">компенсации</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600; text-align:right;">нетто</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600; text-align:right;">сообщений</th></tr></thead>
+              <tbody>
+                <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;">click_uz</td><td style="padding:12px 16px; text-align:right;">460 000</td><td style="padding:12px 16px; text-align:right; color:var(--red);">−1 800</td><td style="padding:12px 16px; text-align:right; font-weight:700;">458 200</td><td style="padding:12px 16px; text-align:right;">4 870</td></tr>
+                <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;">uzum_bank</td><td style="padding:12px 16px; text-align:right;">128 400</td><td style="padding:12px 16px; text-align:right; color:var(--red);">0</td><td style="padding:12px 16px; text-align:right; font-weight:700;">128 400</td><td style="padding:12px 16px; text-align:right;">1 240</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px;">
+            <div style="font-size:11px; color:var(--text-faint); margin-bottom:10px;">Списания по дням</div>
+            <div style="display:flex; align-items:flex-end; gap:6px; height:100px;">
+              <div style="flex:1; background:var(--accent); opacity:.5; height:40%; border-radius:3px 3px 0 0;"></div>
+              <div style="flex:1; background:var(--accent); opacity:.6; height:65%; border-radius:3px 3px 0 0;"></div>
+              <div style="flex:1; background:var(--accent); opacity:.7; height:55%; border-radius:3px 3px 0 0;"></div>
+              <div style="flex:1; background:var(--accent); opacity:.8; height:80%; border-radius:3px 3px 0 0;"></div>
+              <div style="flex:1; background:var(--accent); height:100%; border-radius:3px 3px 0 0;"></div>
+            </div>
+          </div>
+        </div>
+
+        <div style="font-size:13px; font-weight:700; margin-bottom:10px; display:flex; align-items:center; gap:8px;">5.3 Тарифы <span style="padding:3px 8px; border-radius:20px; background:var(--green-dim); color:var(--green); font-size:10px; font-weight:700;">API ЕСТЬ</span></div>
+        <div style="display:grid; grid-template-columns:minmax(0,1fr) 260px; gap:16px; margin-bottom:28px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px;">
+            <div style="font-size:12px; color:var(--text-faint); margin-bottom:12px;">click_uz — цена за сегмент, UZS</div>
+            <div style="display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px;">
+              <div><div style="font-size:11px; color:var(--text-faint); margin-bottom:4px;">SERVICE</div><input value="94" style="width:100%; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px; color:var(--text); font-size:13px;"/></div>
+              <div><div style="font-size:11px; color:var(--text-faint); margin-bottom:4px;">TRANSACTION</div><input value="94" style="width:100%; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px; color:var(--text); font-size:13px;"/></div>
+              <div><div style="font-size:11px; color:var(--text-faint); margin-bottom:4px;">ADVERTISING</div><input value="350" style="width:100%; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px; color:var(--text); font-size:13px;"/></div>
+              <div><div style="font-size:11px; color:var(--text-faint); margin-bottom:4px;">UNTEMPLATED</div><input value="3500" style="width:100%; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px; color:var(--text); font-size:13px;"/></div>
+              <div><div style="font-size:11px; color:var(--text-faint); margin-bottom:4px;">BLOCKED</div><input value="94" style="width:100%; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px; color:var(--text); font-size:13px;"/></div>
+            </div>
+            <div style="margin-top:16px; font-size:12px; color:var(--text-faint);">Тариф сегодня per-partner. Per-operator потребует изменений схемы (~2-3 дня).</div>
+            <div style="margin-top:16px; display:flex; gap:10px;">
+              <button style="background:var(--accent); color:var(--accent-text); border:none; border-radius:6px; padding:9px 16px; font-weight:700; font-size:13px;">Сохранить новую версию</button>
+              <button style="background:transparent; border:1px solid var(--border-strong); border-radius:6px; padding:9px 16px; color:var(--text); font-size:13px;">Diff с активной</button>
+            </div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px;">
+            <div style="font-size:11px; color:var(--text-faint); margin-bottom:10px;">Версии</div>
+            <div style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border); font-size:13px;"><span>v4</span><span style="padding:2px 8px; border-radius:20px; background:var(--green-dim); color:var(--green); font-size:10px; font-weight:700;">активная</span></div>
+            <div style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border); font-size:13px; color:var(--text-faint);"><span>v3</span><span>архив</span></div>
+            <div style="display:flex; justify-content:space-between; padding:8px 0; font-size:13px; color:var(--text-faint);"><span>v2</span><span>архив</span></div>
+          </div>
+        </div>
+
+        <div style="font-size:13px; font-weight:700; margin-bottom:10px; display:flex; align-items:center; gap:8px;">5.4 Сверка (reconciliation) <span style="padding:3px 8px; border-radius:20px; background:var(--green-dim); color:var(--green); font-size:10px; font-weight:700;">ЕСТЬ</span></div>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow-x:auto;">
+          <table style="width:100%; min-width:520px; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">case_id</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">оператор</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">статус</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">дедлайн</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;" class="mono">rc-2381</td><td style="padding:12px 16px;">beeline_uz</td><td style="padding:12px 16px;"><span style="padding:3px 8px; border-radius:6px; background:var(--orange-dim); color:var(--orange); font-size:11px; font-weight:600;">open</span></td><td style="padding:12px 16px; color:var(--text-faint);" class="mono">20.08 15:31</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ============ 06 MT/MO ============ -->
+      <section id="s06" data-screen-label="06" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <h1 style="margin:0 0 6px; font-size:24px; font-weight:800;">MT / MO сообщения</h1>
+        <div style="display:flex; gap:16px; margin-top:20px;">
+          <div style="flex:1; background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px;">
+            <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;"><span style="font-size:14px; font-weight:700;">MT (исходящие)</span><span style="padding:3px 8px; border-radius:20px; background:var(--green-dim); color:var(--green); font-size:10px; font-weight:700;">ЕСТЬ</span></div>
+            <p style="font-size:13px; color:var(--text-dim); margin:0 0 10px;">Вся платформа сегодня — MT. Это экраны 02 и 03.</p>
+            <a href="#s02" style="font-size:13px; font-weight:600;">Перейти к списку сообщений →</a>
+          </div>
+          <div style="flex:1; background:var(--bg-panel); border:1px solid var(--border-strong); border-radius:10px; padding:20px; opacity:.6;">
+            <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;"><span style="font-size:14px; font-weight:700;">MO / P2A (входящие)</span><span style="padding:3px 8px; border-radius:20px; background:var(--red-dim); color:var(--red); font-size:10px; font-weight:700;">НЕ СУЩЕСТВУЕТ</span></div>
+            <p style="font-size:13px; color:var(--text-dim); margin:0 0 14px;">Ни топика, ни таблицы для входящего трафика нет в платформе. Требует ~1-2 недели: приём deliver_sm как MO, топик incoming.mo, маршрутизация партнёру, экраны.</p>
+            <div style="border:1px dashed var(--border-strong); border-radius:8px; padding:16px; font-size:12px; color:var(--text-faint);">Черновая структура на будущее: список (от кого · куда · текст · оператор · время) + карточка деталей — по аналогии с MT.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 07 TEMPLATES ============ -->
+      <section id="s07" data-screen-label="07" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+          <h1 style="margin:0; font-size:24px; font-weight:800;">Шаблоны и паттерны</h1>
+          <span style="padding:4px 10px; border-radius:20px; background:var(--orange-dim); color:var(--orange); font-size:11px; font-weight:700;">прокси · 0.5 дня</span>
+        </div>
+        <div style="display:grid; grid-template-columns:minmax(0,2fr) minmax(0,1fr); gap:16px;">
+          <div>
+            <div style="display:grid; grid-template-columns:repeat(4,minmax(0,1fr)) auto; gap:10px; margin-bottom:14px;">
+              <input placeholder="partner_id" style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px 10px; color:var(--text); font-size:13px;"/>
+              <input placeholder="sender_id" style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px 10px; color:var(--text); font-size:13px;"/>
+              <select style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px 10px; color:var(--text); font-size:13px;"><option>Категория</option></select>
+              <select style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px 10px; color:var(--text); font-size:13px;"><option>Статус</option></select>
+              <button style="background:var(--accent); color:var(--accent-text); border:none; border-radius:6px; padding:8px 16px; font-weight:700; font-size:13px;">Найти</button>
+            </div>
+            <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow-x:auto;">
+              <table style="width:100%; min-width:520px; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">sender_id</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">категория</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">паттерн</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">версия</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">статус</th></tr></thead>
+                <tbody>
+                  <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;">CLICK</td><td style="padding:12px 16px;">SERVICE</td><td style="padding:12px 16px;" class="mono">Ваш код: {code}…</td><td style="padding:12px 16px;">v2</td><td style="padding:12px 16px;"><span style="padding:3px 8px; border-radius:6px; background:var(--green-dim); color:var(--green); font-size:11px; font-weight:600;">active</span></td></tr>
+                  <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;">CLICK</td><td style="padding:12px 16px;">ADVERTISING</td><td style="padding:12px 16px;" class="mono">Скидка {n}%…</td><td style="padding:12px 16px;">v1</td><td style="padding:12px 16px;"><span style="padding:3px 8px; border-radius:6px; background:var(--gray-dim); color:var(--gray); font-size:11px; font-weight:600;">archived</span></td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div style="margin-top:14px; border:1px dashed var(--border-strong); border-radius:8px; padding:16px; display:flex; align-items:center; justify-content:space-between;">
+              <span style="font-size:13px; color:var(--text-dim);">Импорт CSV — перетащите файл сюда</span>
+              <div style="display:flex; gap:8px;"><button style="background:transparent; border:1px solid var(--border-strong); border-radius:6px; padding:7px 14px; color:var(--text); font-size:12px;">Экспорт CSV</button><button style="background:var(--accent); color:var(--accent-text); border:none; border-radius:6px; padding:7px 14px; font-size:12px; font-weight:700;">Загрузить</button></div>
+            </div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:18px;">
+            <div style="font-size:13px; font-weight:700; margin-bottom:10px;">Песочница preview</div>
+            <textarea rows="3" placeholder="Введите текст сообщения…" style="width:100%; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:9px 10px; color:var(--text); font-size:13px; margin-bottom:10px;"></textarea>
+            <div style="padding:10px 12px; background:var(--green-dim); border-radius:6px; font-size:12px; color:var(--green); margin-bottom:14px;">Совпало: CLICK · SERVICE · шаблон v2</div>
+            <div style="font-size:13px; font-weight:700; margin-bottom:8px;">Валидация паттерна</div>
+            <div style="padding:10px 12px; background:var(--yellow-dim); border-radius:6px; font-size:12px; color:var(--yellow);">⚠ Паттерн слишком широкий — совпадёт почти с любым текстом</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 08 MODERATION ============ -->
+      <section id="s08" data-screen-label="08" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+          <h1 style="margin:0; font-size:24px; font-weight:800;">Модерация шаблонов</h1>
+          <span style="padding:4px 10px; border-radius:20px; background:var(--red-dim); color:var(--red); font-size:11px; font-weight:700;">не существует · 3-4 дня</span>
+        </div>
+        <div style="display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.4fr); gap:16px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow:hidden;">
+            <div style="padding:12px 16px; font-size:12px; font-weight:700; color:var(--text-dim); border-bottom:1px solid var(--border);">Очередь модерации</div>
+            <div style="padding:14px 16px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; background:var(--accent-dim);">
+              <div><div style="font-size:13px; font-weight:600;">payme_uz · PAYME</div><div style="font-size:11px; color:var(--text-faint);">подано 19.08</div></div>
+              <span style="padding:3px 8px; border-radius:6px; background:var(--yellow-dim); color:var(--yellow); font-size:11px; font-weight:600;">pending_review</span>
+            </div>
+            <div style="padding:14px 16px; display:flex; justify-content:space-between; align-items:center;">
+              <div><div style="font-size:13px; font-weight:600;">uzum_bank · UZUM</div><div style="font-size:11px; color:var(--text-faint);">подано 18.08</div></div>
+              <span style="padding:3px 8px; border-radius:6px; background:var(--yellow-dim); color:var(--yellow); font-size:11px; font-weight:600;">pending_review</span>
+            </div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px;">
+            <div style="font-size:13px; font-weight:700; margin-bottom:12px;">payme_uz · PAYME — заявка на новый паттерн</div>
+            <div style="background:var(--bg-panel-2); border-radius:8px; padding:14px; font-size:13px; margin-bottom:14px;" class="mono">
+              <div style="text-decoration:line-through; color:var(--red); opacity:.7;">− Оплата {amount} прошла успешно</div>
+              <div style="color:var(--green);">+ Оплата {amount} сум прошла успешно, баланс {balance}</div>
+            </div>
+            <div style="padding:10px 12px; background:var(--green-dim); border-radius:6px; font-size:12px; color:var(--green); margin-bottom:16px;">Preview-проверка: паттерн валиден, предупреждений нет</div>
+            <div style="display:flex; gap:10px;">
+              <button style="background:var(--green); color:#04120c; border:none; border-radius:6px; padding:9px 18px; font-weight:700; font-size:13px;">Одобрить</button>
+              <button style="background:transparent; border:1px solid var(--red); color:var(--red); border-radius:6px; padding:9px 18px; font-weight:700; font-size:13px;">Отклонить</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 09 CONFIG ============ -->
+      <section id="s09" data-screen-label="09" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+          <h1 style="margin:0; font-size:24px; font-weight:800;">Конфигурация (версионируемые сущности)</h1>
+          <span style="padding:4px 10px; border-radius:20px; background:var(--green-dim); color:var(--green); font-size:11px; font-weight:700;">ЕСТЬ</span>
+        </div>
+        <p style="margin:0 0 20px; color:var(--text-dim); font-size:14px; max-width:760px;">Один переиспользуемый редактор для: billing_tariff, policy_ruleset, route_table, partner, policy_template, subscriber_consent.</p>
+        <div style="display:flex; gap:12px; margin-bottom:20px;">
+          <select style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:9px 12px; color:var(--text); font-size:13px;"><option>policy_ruleset</option></select>
+          <input placeholder="entity_id" value="click_uz" style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:9px 12px; color:var(--text); font-size:13px;"/>
+        </div>
+        <div style="display:grid; grid-template-columns:200px minmax(0,1fr); gap:16px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow:hidden;">
+            <div style="padding:10px 14px; font-size:11px; color:var(--text-faint); font-weight:700; border-bottom:1px solid var(--border);">Версии</div>
+            <div style="padding:12px 14px; border-bottom:1px solid var(--border); font-size:13px; display:flex; justify-content:space-between;"><span>v6</span><span style="color:var(--green); font-size:10px; font-weight:700;">активная</span></div>
+            <div style="padding:12px 14px; border-bottom:1px solid var(--border); font-size:13px; color:var(--text-faint);">v5</div>
+            <div style="padding:12px 14px; font-size:13px; color:var(--text-faint);">v4</div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px;">
+            <div style="font-size:13px; font-weight:700; margin-bottom:12px;">Diff v5 → v6</div>
+            <div style="display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px; font-size:12px;" class="mono">
+              <div style="background:var(--red-dim); border-radius:6px; padding:12px; color:var(--red);">"max_messages": 3,<br/>"window_seconds": 60</div>
+              <div style="background:var(--green-dim); border-radius:6px; padding:12px; color:var(--green);">"max_messages": 5,<br/>"window_seconds": 60</div>
+            </div>
+            <div style="margin-top:16px; display:flex; gap:10px;">
+              <button style="background:transparent; border:1px solid var(--border-strong); border-radius:6px; padding:9px 16px; color:var(--text); font-size:13px;">Проверить (validate)</button>
+              <button style="background:var(--accent); color:var(--accent-text); border:none; border-radius:6px; padding:9px 16px; font-weight:700; font-size:13px;">Опубликовать новую версию</button>
+              <button style="background:transparent; border:1px solid var(--border-strong); border-radius:6px; padding:9px 16px; color:var(--text-dim); font-size:13px;">Архивировать</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 10 ANTISPAM ============ -->
+      <section id="s10" data-screen-label="10" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+          <h1 style="margin:0; font-size:24px; font-weight:800;">Спам / Банворды / Антиспам</h1>
+          <span style="padding:4px 10px; border-radius:20px; background:var(--orange-dim); color:var(--orange); font-size:11px; font-weight:700;">только UI</span>
+        </div>
+        <div style="font-size:12px; color:var(--text-faint); margin-bottom:20px;">click_uz · policy_ruleset · активная версия 6</div>
+        <div style="display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px;">
+            <div style="font-size:13px; font-weight:700; margin-bottom:12px;">Банворды</div>
+            <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px;">
+              <span style="padding:5px 10px; background:var(--red-dim); color:var(--red); border-radius:6px; font-size:12px;">idiot ×</span>
+              <span style="padding:5px 10px; background:var(--red-dim); color:var(--red); border-radius:6px; font-size:12px;">мудак ×</span>
+              <span style="padding:5px 10px; background:var(--red-dim); color:var(--red); border-radius:6px; font-size:12px;">терроризм ×</span>
+              <span style="padding:5px 10px; border:1px dashed var(--border-strong); border-radius:6px; font-size:12px; color:var(--text-faint);">+ добавить</span>
+            </div>
+            <div style="display:flex; flex-direction:column; gap:8px; font-size:12px; color:var(--text-dim);">
+              <label style="display:flex; align-items:center; gap:8px;"><input type="checkbox" checked/> NFKC-нормализация</label>
+              <label style="display:flex; align-items:center; gap:8px;"><input type="checkbox" checked/> сворачивать омоглифы</label>
+              <label style="display:flex; align-items:center; gap:8px;"><input type="checkbox" checked/> убирать разделители</label>
+            </div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px;">
+            <div style="font-size:13px; font-weight:700; margin-bottom:12px;">Антиспам</div>
+            <div style="display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:12px;">
+              <div><div style="font-size:11px; color:var(--text-faint); margin-bottom:4px;">max_messages</div><input value="3" style="width:100%; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px; color:var(--text); font-size:13px;"/></div>
+              <div><div style="font-size:11px; color:var(--text-faint); margin-bottom:4px;">window_seconds</div><input value="60" style="width:100%; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px; color:var(--text); font-size:13px;"/></div>
+            </div>
+            <div style="margin-top:12px;"><div style="font-size:11px; color:var(--text-faint); margin-bottom:4px;">scope</div><select style="width:100%; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px; color:var(--text); font-size:13px;"><option>PER_MSISDN_PER_CATEGORY</option></select></div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px;">
+            <div style="font-size:13px; font-weight:700; margin-bottom:12px;">Время суток</div>
+            <div style="display:flex; justify-content:space-between; font-size:13px; padding:8px 0; border-bottom:1px solid var(--border);"><span>ADVERTISING</span><span class="mono" style="color:var(--text-dim);">09:00–20:00 Asia/Tashkent</span></div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px;">
+            <div style="font-size:13px; font-weight:700; margin-bottom:12px;">Разрешённые sender_id</div>
+            <div style="display:flex; flex-wrap:wrap; gap:8px;">
+              <span style="padding:5px 10px; background:var(--green-dim); color:var(--green); border-radius:6px; font-size:12px;">Click</span>
+              <span style="padding:5px 10px; background:var(--green-dim); color:var(--green); border-radius:6px; font-size:12px;">ClickUP</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 11 OPERATORS ============ -->
+      <section id="s11" data-screen-label="11" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <h1 style="margin:0 0 6px; font-size:24px; font-weight:800;">Операторы и маршруты</h1>
+        <div style="font-size:13px; font-weight:700; margin:20px 0 10px; display:flex; align-items:center; gap:8px;">11.1 Живое состояние сессий <span style="padding:3px 8px; border-radius:20px; background:var(--orange-dim); color:var(--orange); font-size:10px; font-weight:700;">СТРОИТСЯ · 1 ДЕНЬ</span></div>
+        <div style="display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; margin-bottom:28px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px;"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;"><span style="font-weight:700; font-size:13px;">beeline_uz</span><span style="width:8px;height:8px;border-radius:50%;background:var(--green);"></span></div><div style="font-size:12px; color:var(--text-faint);">route: beeline_smpp_primary</div><div style="font-size:11px; color:var(--text-faint); margin-top:4px;">heartbeat 2с назад</div></div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px;"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;"><span style="font-weight:700; font-size:13px;">ucell_uz</span><span style="width:8px;height:8px;border-radius:50%;background:var(--green);"></span></div><div style="font-size:12px; color:var(--text-faint);">route: ucell_smpp_primary</div><div style="font-size:11px; color:var(--text-faint); margin-top:4px;">heartbeat 1с назад</div></div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px;"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;"><span style="font-weight:700; font-size:13px;">uzmobile_uz</span><span style="width:8px;height:8px;border-radius:50%;background:var(--red);"></span></div><div style="font-size:12px; color:var(--text-faint);">route: uzmobile_smpp_reserve</div><div style="font-size:11px; color:var(--red); margin-top:4px;">heartbeat протух — 94с назад</div></div>
+        </div>
+        <div style="font-size:13px; font-weight:700; margin-bottom:10px; display:flex; align-items:center; gap:8px;">11.3 Метрики туннеля <span style="padding:3px 8px; border-radius:20px; background:var(--orange-dim); color:var(--orange); font-size:10px; font-weight:700;">ПРОКСИ · 0.5 ДНЯ</span></div>
+        <div style="display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; margin-bottom:28px;">
+          <div style="background:var(--bg-panel); border:1px dashed var(--border-strong); border-radius:10px; padding:16px; min-height:100px; display:flex; align-items:center; justify-content:center; font-size:12px; color:var(--text-faint);">TPS по приоритетам</div>
+          <div style="background:var(--bg-panel); border:1px dashed var(--border-strong); border-radius:10px; padding:16px; min-height:100px; display:flex; align-items:center; justify-content:center; font-size:12px; color:var(--text-faint);">Глубина очереди</div>
+          <div style="background:var(--bg-panel); border:1px dashed var(--border-strong); border-radius:10px; padding:16px; min-height:100px; display:flex; align-items:center; justify-content:center; font-size:12px; color:var(--text-faint);">Отказы по причинам</div>
+        </div>
+        <div style="background:var(--red-dim); border-radius:10px; padding:16px; font-size:13px;"><strong style="color:var(--red);">11.4 Подключение нового оператора — нет self-service.</strong> Сегодня ручной деплой + конфиг маршрута. Полноценный provisioning ~1 неделя+.</div>
+      </section>
+
+      <!-- ============ 12 PARTNERS ============ -->
+      <section id="s12" data-screen-label="12" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+          <h1 style="margin:0; font-size:24px; font-weight:800;">Партнёры</h1>
+          <span style="padding:4px 10px; border-radius:20px; background:var(--yellow-dim); color:var(--yellow); font-size:11px; font-weight:700;">смешанный статус</span>
+        </div>
+        <div style="display:grid; grid-template-columns:260px minmax(0,1fr); gap:16px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow:hidden;">
+            <div style="padding:14px 16px; background:var(--accent-dim); font-size:13px; font-weight:700; color:var(--accent);">click_uz</div>
+            <div style="padding:14px 16px; border-top:1px solid var(--border); font-size:13px; color:var(--text-dim);">uzum_bank</div>
+            <div style="padding:14px 16px; border-top:1px solid var(--border); font-size:13px; color:var(--text-dim);">payme_uz</div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px;">
+            <div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;"><span style="font-size:16px; font-weight:800;">click_uz</span><span style="padding:3px 8px; border-radius:6px; background:var(--green-dim); color:var(--green); font-size:11px; font-weight:600;">active</span></div>
+            <div style="font-size:12px; font-weight:700; color:var(--text-faint); margin-bottom:8px;">Sender'ы</div>
+            <div style="display:flex; gap:8px; margin-bottom:18px;">
+              <span style="padding:5px 10px; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; font-size:12px;">CLICK · ALPHANAME</span>
+              <span style="padding:5px 10px; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; font-size:12px;">5252 · SHORT_NUMBER</span>
+            </div>
+            <div style="font-size:12px; font-weight:700; color:var(--text-faint); margin-bottom:8px;">Приложения</div>
+            <div style="border:1px solid var(--border); border-radius:8px; padding:14px;">
+              <div style="font-size:13px; font-weight:600; margin-bottom:8px;">click_uz_main — Click main billing notifications</div>
+              <div style="display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; font-size:12px; color:var(--text-dim);">
+                <div><div style="color:var(--text-faint);">rate_limit_tps</div>2000</div>
+                <div><div style="color:var(--text-faint);">ip_allowlist</div>185.65.212.0/24</div>
+                <div><div style="color:var(--text-faint);">каналы</div>SMS</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 13 BLACKLIST ============ -->
+      <section id="s13" data-screen-label="13" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+          <h1 style="margin:0; font-size:24px; font-weight:800;">Blacklist / Согласия абонентов</h1>
+          <span style="padding:4px 10px; border-radius:20px; background:var(--orange-dim); color:var(--orange); font-size:11px; font-weight:700;">прокси · 0.5 дня</span>
+        </div>
+        <p style="margin:0 0 20px; color:var(--text-dim); font-size:14px; max-width:700px;">Обратный поиск невозможен — только проверка одного номера (данные лежат в Redis по ключу msisdn).</p>
+        <div style="display:flex; gap:10px; margin-bottom:20px;">
+          <input placeholder="998901234567" style="width:280px; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:9px 12px; color:var(--text); font-size:13px;"/>
+          <button style="background:var(--accent); color:var(--accent-text); border:none; border-radius:6px; padding:9px 18px; font-weight:700; font-size:13px;">Проверить номер</button>
+        </div>
+        <div style="display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:18px;">
+            <div style="font-size:12px; font-weight:700; color:var(--text-faint); margin-bottom:10px;">Заблокированные категории</div>
+            <span style="padding:5px 10px; background:var(--red-dim); color:var(--red); border-radius:6px; font-size:12px;">ADVERTISING</span>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:18px;">
+            <div style="font-size:12px; font-weight:700; color:var(--text-faint); margin-bottom:10px;">Заблокированные отправители</div>
+            <span style="padding:5px 10px; background:var(--red-dim); color:var(--red); border-radius:6px; font-size:12px;">SPAMMER</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 14 DLQ ============ -->
+      <section id="s14" data-screen-label="14" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+          <h1 style="margin:0; font-size:24px; font-weight:800;">DLQ и повторы</h1>
+          <span style="padding:4px 10px; border-radius:20px; background:var(--green-dim); color:var(--green); font-size:11px; font-weight:700;">ЕСТЬ</span>
+        </div>
+        <div style="display:flex; gap:12px; margin-bottom:16px;">
+          <select style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px 12px; color:var(--text); font-size:13px;"><option>stage_name: все</option></select>
+          <select style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px 12px; color:var(--text); font-size:13px;"><option>replay_status: pending</option></select>
+        </div>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow-x:auto;">
+          <table style="width:100%; min-width:680px; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">message_id</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">стадия</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">попытка</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">причина</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">статус</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;"></th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;" class="mono">bc415c…e0</td><td style="padding:12px 16px;">DELIVERY</td><td style="padding:12px 16px;">2</td><td style="padding:12px 16px; color:var(--text-dim);">smsc_timeout</td><td style="padding:12px 16px;"><span style="padding:3px 8px; border-radius:6px; background:var(--orange-dim); color:var(--orange); font-size:11px; font-weight:600;">pending</span></td><td style="padding:12px 16px;"><button style="background:var(--accent); color:var(--accent-text); border:none; border-radius:6px; padding:6px 12px; font-size:12px; font-weight:700;">Replay</button></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ============ 15 EXECUTION CONTROL ============ -->
+      <section id="s15" data-screen-label="15" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+          <h1 style="margin:0; font-size:24px; font-weight:800;">Управление трафиком</h1>
+          <span style="padding:4px 10px; border-radius:20px; background:var(--red-dim); color:var(--red); font-size:11px; font-weight:700;">рубильник</span>
+        </div>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow:hidden; margin-bottom:20px;">
+          <div style="padding:12px 16px; font-size:12px; font-weight:700; color:var(--text-dim); border-bottom:1px solid var(--border);">Активные override'ы</div>
+          <div style="padding:14px 16px; display:flex; justify-content:space-between; align-items:center;"><div><span style="font-weight:600; font-size:13px;">operator · uzmobile_uz</span> <span style="color:var(--text-faint); font-size:12px;">— admission_rate 0.2, до 20:00</span></div><button style="background:transparent; border:1px solid var(--border-strong); border-radius:6px; padding:6px 12px; color:var(--text); font-size:12px;">Снять</button></div>
+        </div>
+        <div style="background:var(--bg-panel); border:1px solid var(--red); border-radius:10px; padding:20px;">
+          <div style="font-size:13px; font-weight:700; margin-bottom:14px;">Новый override</div>
+          <div style="display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-bottom:12px;">
+            <select style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px; color:var(--text); font-size:13px;"><option>scope: operator</option></select>
+            <input placeholder="scope_id" style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px; color:var(--text); font-size:13px;"/>
+            <select style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px; color:var(--text); font-size:13px;"><option>state: throttled</option></select>
+            <input placeholder="admission_rate 0.0–1.0" style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px; color:var(--text); font-size:13px;"/>
+          </div>
+          <textarea placeholder="Причина (обязательно)" rows="2" style="width:100%; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:9px 10px; color:var(--text); font-size:13px; margin-bottom:14px;"></textarea>
+          <button style="background:var(--red); color:#fff; border:none; border-radius:6px; padding:10px 20px; font-weight:700; font-size:13px;">Применить override</button>
+        </div>
+      </section>
+
+      <!-- ============ 16 USERS & ROLES ============ -->
+      <section id="s16" data-screen-label="16" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <h1 style="margin:0 0 20px; font-size:24px; font-weight:800;">Пользователи и роли</h1>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow:hidden; margin-bottom:20px;">
+          <table style="width:100%; border-collapse:collapse; font-size:12px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:10px 14px; color:var(--text-dim);">роль</th><th style="padding:10px 14px; text-align:center;">config:write</th><th style="padding:10px 14px; text-align:center;">ops:read</th><th style="padding:10px 14px; text-align:center;">incident:manage</th><th style="padding:10px 14px; text-align:center;">iam:manage</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:10px 14px; font-weight:600;">backoffice-admin</td><td style="text-align:center; color:var(--green);">✓</td><td style="text-align:center; color:var(--green);">✓</td><td style="text-align:center; color:var(--green);">✓</td><td style="text-align:center; color:var(--green);">✓</td></tr>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:10px 14px; font-weight:600;">support-agent</td><td style="text-align:center; color:var(--text-faint);">—</td><td style="text-align:center; color:var(--text-faint);">—</td><td style="text-align:center; color:var(--text-faint);">—</td><td style="text-align:center; color:var(--text-faint);">—</td></tr>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:10px 14px; font-weight:600;">ops-viewer</td><td style="text-align:center; color:var(--text-faint);">—</td><td style="text-align:center; color:var(--green);">✓</td><td style="text-align:center; color:var(--text-faint);">—</td><td style="text-align:center; color:var(--text-faint);">—</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div style="display:flex; gap:10px;">
+          <input placeholder="external_id" style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:9px 12px; color:var(--text); font-size:13px;"/>
+          <select style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:9px 12px; color:var(--text); font-size:13px;"><option>ops-viewer</option></select>
+          <button style="background:var(--accent); color:var(--accent-text); border:none; border-radius:6px; padding:9px 18px; font-weight:700; font-size:13px;">Назначить роль</button>
+        </div>
+      </section>
+
+      <!-- ============ 17 CREDENTIALS ============ -->
+      <section id="s17" data-screen-label="17" style="padding:40px 48px;">
+        <h1 style="margin:0 0 20px; font-size:24px; font-weight:800;">Ключи и секреты партнёров</h1>
+        <div style="display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px;">
+            <div style="font-size:13px; font-weight:700; margin-bottom:12px;">click_uz / click_uz_main</div>
+            <div style="font-size:12px; color:var(--text-faint); margin-bottom:14px;">История ротаций</div>
+            <div style="display:flex; justify-content:space-between; font-size:13px; padding:8px 0; border-bottom:1px solid var(--border);"><span>v3</span><span class="mono" style="color:var(--text-faint);">12.07.2026</span></div>
+            <div style="display:flex; justify-content:space-between; font-size:13px; padding:8px 0;"><span>v2</span><span class="mono" style="color:var(--text-faint);">03.02.2026</span></div>
+            <button style="margin-top:14px; background:var(--red); color:#fff; border:none; border-radius:6px; padding:9px 16px; font-weight:700; font-size:13px;">Ротировать ключ</button>
+          </div>
+          <div style="background:var(--yellow-dim); border-radius:10px; padding:20px;">
+            <div style="font-size:13px; font-weight:700; margin-bottom:10px; color:var(--yellow);">Секрет показан один раз</div>
+            <div style="background:var(--bg-elevated); border-radius:6px; padding:12px; font-size:13px; margin-bottom:12px; display:flex; justify-content:space-between; align-items:center;"><span class="mono">sk_live_9f2a...c04</span><span style="cursor:pointer; color:var(--accent);">⧉ копировать</span></div>
+            <label style="display:flex; align-items:center; gap:8px; font-size:12px; color:var(--text-dim); margin-bottom:12px;"><input type="checkbox"/> Я скопировал секрет, больше он не будет показан</label>
+            <button style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:9px 16px; color:var(--text-faint); font-size:13px;" disabled>Закрыть</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 18 AUDIT ============ -->
+      <section id="s18" data-screen-label="18" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <h1 style="margin:0 0 20px; font-size:24px; font-weight:800;">Аудит</h1>
+        <div style="display:flex; gap:12px; margin-bottom:16px;">
+          <select style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px 12px; color:var(--text); font-size:13px;"><option>источник: все</option></select>
+          <input placeholder="actor" style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px 12px; color:var(--text); font-size:13px;"/>
+        </div>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow:hidden; margin-bottom:14px;">
+          <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">источник</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">actor</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">действие</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">цель</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">время</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;"><span style="padding:3px 8px; border-radius:6px; background:var(--gray-dim); color:var(--gray); font-size:11px;">replay</span></td><td style="padding:12px 16px;">a.karimov</td><td style="padding:12px 16px;">replay.request</td><td style="padding:12px 16px;" class="mono">stage_exec:9f1</td><td style="padding:12px 16px; color:var(--text-faint);" class="mono">19.08 14:02</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <button style="background:transparent; border:1px solid var(--border-strong); border-radius:6px; padding:8px 16px; color:var(--text); font-size:13px;">Загрузить ещё</button>
+      </section>
+
+      <!-- ============ 19 INCIDENTS ============ -->
+      <section id="s19" data-screen-label="19" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <h1 style="margin:0 0 20px; font-size:24px; font-weight:800;">Инциденты</h1>
+        <div style="display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.3fr); gap:16px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow:hidden;">
+            <div style="padding:14px 16px; border-bottom:1px solid var(--border); background:var(--accent-dim);"><div style="font-size:13px; font-weight:600;">Задержки DLR beeline_uz</div><span style="padding:2px 8px; border-radius:6px; background:var(--red-dim); color:var(--red); font-size:10px; font-weight:700;">CRITICAL</span></div>
+            <div style="padding:14px 16px;"><div style="font-size:13px; font-weight:600; color:var(--text-dim);">Просадка TPS ucell_uz</div><span style="padding:2px 8px; border-radius:6px; background:var(--orange-dim); color:var(--orange); font-size:10px; font-weight:700;">MEDIUM</span></div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px;">
+            <div style="font-size:14px; font-weight:700; margin-bottom:14px;">Задержки DLR beeline_uz</div>
+            <div style="position:relative; padding-left:20px; margin-bottom:16px;">
+              <div style="position:absolute; left:5px; top:4px; bottom:4px; width:2px; background:var(--border-strong);"></div>
+              <div style="position:relative; margin-bottom:10px;"><div style="position:absolute; left:-20px; top:2px; width:10px; height:10px; border-radius:50%; background:var(--red);"></div><div style="font-size:13px;">override: operator beeline_uz → throttled 0.3</div></div>
+            </div>
+            <textarea placeholder="Постмортем (обязателен для закрытия)" rows="3" style="width:100%; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:9px 10px; color:var(--text); font-size:13px; margin-bottom:12px;"></textarea>
+            <button style="background:var(--accent); color:var(--accent-text); border:none; border-radius:6px; padding:9px 18px; font-weight:700; font-size:13px;">Закрыть с постмортемом</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 20 OPS HEALTH ============ -->
+      <section id="s20" data-screen-label="20" style="padding:40px 48px;">
+        <h1 style="margin:0 0 20px; font-size:24px; font-weight:800;">Здоровье платформы (Ops)</h1>
+        <div style="display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-bottom:24px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:8px; padding:12px;"><div style="display:flex; justify-content:space-between;"><span style="font-size:12px; font-weight:600;">billing-service</span><span style="width:7px;height:7px;border-radius:50%;background:var(--green);"></span></div><div style="font-size:11px; color:var(--text-faint); margin-top:4px;">13 ms</div></div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:8px; padding:12px;"><div style="display:flex; justify-content:space-between;"><span style="font-size:12px; font-weight:600;">policy-service</span><span style="width:7px;height:7px;border-radius:50%;background:var(--green);"></span></div><div style="font-size:11px; color:var(--text-faint); margin-top:4px;">9 ms</div></div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:8px; padding:12px;"><div style="display:flex; justify-content:space-between;"><span style="font-size:12px; font-weight:600;">routing-service</span><span style="width:7px;height:7px;border-radius:50%;background:var(--yellow);"></span></div><div style="font-size:11px; color:var(--yellow); margin-top:4px;">снапшот устарел</div></div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:8px; padding:12px;"><div style="display:flex; justify-content:space-between;"><span style="font-size:12px; font-weight:600;">operator-smpp-session-manager</span><span style="width:7px;height:7px;border-radius:50%;background:var(--red);"></span></div><div style="font-size:11px; color:var(--red); margin-top:4px;">not ready</div></div>
+        </div>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow:hidden;">
+          <div style="padding:12px 16px; font-size:12px; font-weight:700; color:var(--text-dim); border-bottom:1px solid var(--border);">Kafka lag</div>
+          <div style="padding:14px 16px; border-bottom:1px solid var(--border);">
+            <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:8px;"><span style="font-weight:600;">billing-service</span><span style="color:var(--green);">Stable · lag 0</span></div>
+            <div style="padding-left:16px; font-size:12px; color:var(--text-faint);" class="mono">stage.billing / partition 0 · commit 94780 / end 94780 · lag 0</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 21 A2P ADMIN HOME ============ -->
+      <section id="s21" data-screen-label="21" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+          <h1 style="margin:0; font-size:24px; font-weight:800;">A2P Admin — Home</h1>
+          <span style="padding:4px 10px; border-radius:20px; background:var(--accent-dim); color:var(--accent); font-size:11px; font-weight:700;">по спецификации Admin Self-service</span>
+        </div>
+        <p style="margin:0 0 24px; color:var(--text-dim); font-size:14px; max-width:760px;">Персонализированная сводка A2P-платформы: KPI, здоровье компонентов, «Требует внимания» — ссылки ведут в Monitoring / Statistics.</p>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:14px; margin-bottom:24px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px;"><div style="font-size:12px; color:var(--text-faint); margin-bottom:8px;">A2P сегодня</div><div style="font-size:22px; font-weight:800;">1,284,930</div></div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px;"><div style="font-size:12px; color:var(--text-faint); margin-bottom:8px;">Доставлено, %</div><div style="font-size:22px; font-weight:800; color:var(--green);">97.4%</div></div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px;"><div style="font-size:12px; color:var(--text-faint); margin-bottom:8px;">Открытых заявок на модерацию</div><div style="font-size:22px; font-weight:800; color:var(--orange);">14</div></div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px;"><div style="font-size:12px; color:var(--text-faint); margin-bottom:8px;">Активных MT-сессий</div><div style="font-size:22px; font-weight:800;">36</div></div>
+        </div>
+        <a href="#s31" style="font-size:13px; font-weight:600;">Перейти в Statistics за подробной аналитикой →</a>
+      </section>
+
+      <!-- ============ 22 SENDERS (Side Drawer) ============ -->
+      <section id="s22" data-screen-label="22" style="padding:40px 48px; border-bottom:1px solid var(--border); position:relative;">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+          <h1 style="margin:0; font-size:24px; font-weight:800;">Moderation · Senders</h1>
+          <span style="padding:4px 10px; border-radius:20px; background:var(--accent-dim); color:var(--accent); font-size:11px; font-weight:700;">Side Drawer</span>
+        </div>
+        <p style="margin:0 0 16px; color:var(--text-dim); font-size:14px;">Alpha Names и Short Numbers партнёров — вкладки, поиск, фасетные фильтры.</p>
+        <div style="display:flex; gap:6px; margin-bottom:16px;">
+          <div style="padding:8px 16px; background:var(--accent); color:var(--accent-text); border-radius:6px 6px 0 0; font-size:13px; font-weight:700;">Alphanames</div>
+          <div style="padding:8px 16px; color:var(--text-dim); font-size:13px; font-weight:600;">Short Numbers</div>
+        </div>
+        <div style="position:absolute; inset:150px 0 0 0; background:rgba(0,0,0,.45); z-index:5; pointer-events:none;"></div>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow-x:auto; position:relative; z-index:1; margin-right:460px;">
+          <table style="width:100%; min-width:560px; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">alias</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">партнёр UID</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">категория</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">bind mode</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">статус</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border); background:var(--accent-dim);"><td style="padding:12px 16px; font-weight:700;">CLICK</td><td style="padding:12px 16px;" class="mono">click_uz</td><td style="padding:12px 16px;">SERVICE</td><td style="padding:12px 16px;">Transceiver</td><td style="padding:12px 16px;"><span style="padding:3px 8px; border-radius:6px; background:var(--green-dim); color:var(--green); font-size:11px; font-weight:600;">active</span></td></tr>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;">PAYME</td><td style="padding:12px 16px;" class="mono">payme_uz</td><td style="padding:12px 16px;">TRANSACTION</td><td style="padding:12px 16px;">Receiver</td><td style="padding:12px 16px;"><span style="padding:3px 8px; border-radius:6px; background:var(--gray-dim); color:var(--gray); font-size:11px; font-weight:600;">blocked</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div style="position:absolute; top:130px; right:48px; bottom:40px; width:440px; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:10px; box-shadow:var(--shadow); z-index:10; padding:20px; overflow-y:auto;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;"><span style="font-size:14px; font-weight:700;">Sender · CLICK</span><span style="cursor:pointer; color:var(--text-faint); font-size:16px;">✕</span></div>
+          <div style="display:flex; flex-direction:column; gap:12px; font-size:13px;">
+            <div><div style="color:var(--text-faint); font-size:11px; margin-bottom:4px;">Alias</div><input value="CLICK" style="width:100%; background:var(--bg-panel-2); border:1px solid var(--border-strong); border-radius:6px; padding:8px 10px; color:var(--text); font-size:13px;"/></div>
+            <div><div style="color:var(--text-faint); font-size:11px; margin-bottom:4px;">Партнёр (UID)</div><input value="click_uz" style="width:100%; background:var(--bg-panel-2); border:1px solid var(--border-strong); border-radius:6px; padding:8px 10px; color:var(--text); font-size:13px;"/></div>
+            <div style="display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:10px;">
+              <div><div style="color:var(--text-faint); font-size:11px; margin-bottom:4px;">Категория</div><select style="width:100%; background:var(--bg-panel-2); border:1px solid var(--border-strong); border-radius:6px; padding:8px; color:var(--text); font-size:13px;"><option>SERVICE</option></select></div>
+              <div><div style="color:var(--text-faint); font-size:11px; margin-bottom:4px;">Bind mode</div><select style="width:100%; background:var(--bg-panel-2); border:1px solid var(--border-strong); border-radius:6px; padding:8px; color:var(--text); font-size:13px;"><option>Transceiver</option></select></div>
+            </div>
+            <div><div style="color:var(--text-faint); font-size:11px; margin-bottom:4px;">IP allowlist</div><input value="185.65.212.0/24" style="width:100%; background:var(--bg-panel-2); border:1px solid var(--border-strong); border-radius:6px; padding:8px 10px; color:var(--text); font-size:13px;"/></div>
+            <label style="display:flex; align-items:center; gap:8px;"><input type="checkbox" checked/> Учитывать в CDR</label>
+            <label style="display:flex; align-items:center; gap:8px;"><input type="checkbox"/> Разрешён для P2A</label>
+            <label style="display:flex; align-items:center; gap:8px;"><input type="checkbox" checked/> Активен</label>
+            <div><div style="color:var(--text-faint); font-size:11px; margin-bottom:4px;">Комментарий</div><textarea rows="2" style="width:100%; background:var(--bg-panel-2); border:1px solid var(--border-strong); border-radius:6px; padding:8px 10px; color:var(--text); font-size:13px;"></textarea></div>
+          </div>
+          <div style="display:flex; gap:10px; margin-top:16px;">
+            <button style="background:var(--accent); color:var(--accent-text); border:none; border-radius:6px; padding:9px 16px; font-weight:700; font-size:13px;">Сохранить</button>
+            <button style="background:transparent; border:1px solid var(--border-strong); border-radius:6px; padding:9px 16px; color:var(--text); font-size:13px;">Заблокировать</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 23 CTNs ============ -->
+      <section id="s23" data-screen-label="23" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <h1 style="margin:0 0 16px; font-size:24px; font-weight:800;">Moderation · CTNs</h1>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow-x:auto;">
+          <table style="width:100%; min-width:560px; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">CTN</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">описание</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">billing-категория</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">IP-restriction</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">статус</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;" class="mono">998-CTN-01</td><td style="padding:12px 16px;">Termination Beeline</td><td style="padding:12px 16px;">SERVICE</td><td style="padding:12px 16px; color:var(--text-faint);" class="mono">10.0.0.0/8</td><td style="padding:12px 16px;"><span style="padding:3px 8px; border-radius:6px; background:var(--green-dim); color:var(--green); font-size:11px; font-weight:600;">active</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ============ 24 PATTERNS (moderation) ============ -->
+      <section id="s24" data-screen-label="24" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <h1 style="margin:0 0 6px; font-size:24px; font-weight:800;">Moderation · Patterns</h1>
+        <div style="display:flex; gap:6px; margin:16px 0;">
+          <div style="padding:8px 16px; background:var(--accent); color:var(--accent-text); border-radius:6px 6px 0 0; font-size:13px; font-weight:700;">AN Patterns</div>
+          <div style="padding:8px 16px; color:var(--text-dim); font-size:13px; font-weight:600;">SHN Patterns</div>
+        </div>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow-x:auto;">
+          <table style="width:100%; min-width:620px; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">паттерн</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">sender</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">категория</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">статус</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">обновлён</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;" class="mono">Ваш код подтверждения: \d{4,6}</td><td style="padding:12px 16px;">CLICK</td><td style="padding:12px 16px;">SERVICE</td><td style="padding:12px 16px;"><span style="padding:3px 8px; border-radius:6px; background:var(--green-dim); color:var(--green); font-size:11px; font-weight:600;">active</span></td><td style="padding:12px 16px; color:var(--text-faint);" class="mono">12.08</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div style="margin-top:14px;"><button style="background:transparent; border:1px solid var(--border-strong); border-radius:6px; padding:8px 16px; color:var(--text); font-size:13px;">Экспорт XLSX</button></div>
+      </section>
+
+      <!-- ============ 25 REQUESTS (Side Drawer) ============ -->
+      <section id="s25" data-screen-label="25" style="padding:40px 48px; border-bottom:1px solid var(--border); position:relative;">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+          <h1 style="margin:0; font-size:24px; font-weight:800;">Moderation · Requests</h1>
+          <span style="padding:4px 10px; border-radius:20px; background:var(--accent-dim); color:var(--accent); font-size:11px; font-weight:700;">Side Drawer</span>
+        </div>
+        <p style="margin:0 0 16px; color:var(--text-dim); font-size:14px;">Заявки на паттерны от партнёров, сгруппированные в батчи — approve / reject / request changes.</p>
+        <div style="position:absolute; inset:100px 0 0 0; background:rgba(0,0,0,.45); z-index:5; pointer-events:none;"></div>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow-x:auto; position:relative; z-index:1; margin-right:460px;">
+          <table style="width:100%; min-width:560px; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">batch_id</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">партнёр</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">источник</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">статус</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border); background:var(--accent-dim);"><td style="padding:12px 16px;" class="mono">b-2381</td><td style="padding:12px 16px;">payme_uz</td><td style="padding:12px 16px;">Partner Self-Service</td><td style="padding:12px 16px;"><span style="padding:3px 8px; border-radius:6px; background:var(--yellow-dim); color:var(--yellow); font-size:11px; font-weight:600;">pending</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div style="position:absolute; top:80px; right:48px; bottom:40px; width:440px; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:10px; box-shadow:var(--shadow); z-index:10; padding:20px; overflow-y:auto;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;"><span style="font-size:14px; font-weight:700;">Батч b-2381 · payme_uz</span><span style="cursor:pointer; color:var(--text-faint); font-size:16px;">✕</span></div>
+          <div style="background:var(--bg-panel-2); border-radius:8px; padding:12px; font-size:12px; margin-bottom:14px;" class="mono">
+            <div style="text-decoration:line-through; color:var(--red); opacity:.7;">− Оплата {amount} прошла успешно</div>
+            <div style="color:var(--green);">+ Оплата {amount} сум прошла успешно, баланс {balance}</div>
+          </div>
+          <div style="font-size:12px; font-weight:700; color:var(--text-faint); margin-bottom:8px;">Комментарии</div>
+          <div style="font-size:12px; color:var(--text-dim); margin-bottom:14px; padding:8px 10px; background:var(--bg-panel-2); border-radius:6px;">a.karimov: пожалуйста уточните переменную balance</div>
+          <div style="display:flex; gap:8px;">
+            <button style="background:var(--green); color:#04120c; border:none; border-radius:6px; padding:9px 14px; font-weight:700; font-size:12px;">Approve</button>
+            <button style="background:transparent; border:1px solid var(--red); color:var(--red); border-radius:6px; padding:9px 14px; font-weight:700; font-size:12px;">Reject</button>
+            <button style="background:transparent; border:1px solid var(--border-strong); border-radius:6px; padding:9px 14px; color:var(--text); font-size:12px;">Request changes</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 26 PARTNERS (admin) ============ -->
+      <section id="s26" data-screen-label="26" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <h1 style="margin:0 0 16px; font-size:24px; font-weight:800;">Moderation · Partners</h1>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow-x:auto;">
+          <table style="width:100%; min-width:680px; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">UID</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">название</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">bind type</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">SMS speed</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">статус</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;" class="mono">click_uz</td><td style="padding:12px 16px;">Click LLC</td><td style="padding:12px 16px;">SMPP</td><td style="padding:12px 16px;">2000 tps</td><td style="padding:12px 16px;"><span style="padding:3px 8px; border-radius:6px; background:var(--green-dim); color:var(--green); font-size:11px; font-weight:600;">active</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ============ 27 CHAT ============ -->
+      <section id="s27" data-screen-label="27" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <h1 style="margin:0 0 16px; font-size:24px; font-weight:800;">Moderation · Chat</h1>
+        <div style="display:grid; grid-template-columns:280px minmax(0,1fr); gap:16px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow:hidden;">
+            <div style="padding:14px 16px; background:var(--accent-dim); font-size:13px; font-weight:700; color:var(--accent);">payme_uz <span style="color:var(--text-faint); font-weight:400; font-size:11px;">2 новых</span></div>
+            <div style="padding:14px 16px; border-top:1px solid var(--border); font-size:13px; color:var(--text-dim);">click_uz</div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px; display:flex; flex-direction:column; height:340px;">
+            <div style="flex:1; display:flex; flex-direction:column; gap:10px; overflow-y:auto; margin-bottom:12px;">
+              <div style="align-self:flex-start; background:var(--bg-panel-2); border-radius:8px; padding:10px 12px; font-size:13px; max-width:70%;">Здравствуйте, когда одобрят паттерн b-2381?</div>
+              <div style="align-self:flex-end; background:var(--accent-dim); color:var(--text); border-radius:8px; padding:10px 12px; font-size:13px; max-width:70%;">Проверяем, ответим в течение дня</div>
+            </div>
+            <input placeholder="Сообщение…" style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:9px 12px; color:var(--text); font-size:13px;"/>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 28 BLACKLIST NUMBERS (admin) ============ -->
+      <section id="s28" data-screen-label="28" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <h1 style="margin:0 0 16px; font-size:24px; font-weight:800;">Moderation · Blacklist numbers</h1>
+        <div style="display:flex; gap:10px; margin-bottom:16px;">
+          <input placeholder="998901234567" style="width:240px; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:9px 12px; color:var(--text); font-size:13px;"/>
+          <select style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:9px 12px; color:var(--text); font-size:13px;"><option>Направление: все</option><option>A2P</option><option>P2A</option></select>
+          <button style="background:var(--accent); color:var(--accent-text); border:none; border-radius:6px; padding:9px 18px; font-weight:700; font-size:13px;">Добавить</button>
+        </div>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow-x:auto;">
+          <table style="width:100%; min-width:600px; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">MSISDN</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">направление</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">причина</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">добавил</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;" class="mono">998907654321</td><td style="padding:12px 16px;">A2P + P2A</td><td style="padding:12px 16px; color:var(--text-dim);">жалоба абонента</td><td style="padding:12px 16px; color:var(--text-faint);">a.karimov</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ============ 29 MONITORING TPS ============ -->
+      <section id="s29" data-screen-label="29" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <h1 style="margin:0 0 16px; font-size:24px; font-weight:800;">Monitoring · TPS</h1>
+        <div style="display:flex; gap:10px; margin-bottom:16px;">
+          <select style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px 12px; color:var(--text); font-size:13px;"><option>измерение: partner</option><option>category</option><option>sender</option><option>IP</option></select>
+          <select style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px 12px; color:var(--text); font-size:13px;"><option>окно: 5 мин</option></select>
+        </div>
+        <div style="background:var(--bg-panel); border:1px dashed var(--border-strong); border-radius:10px; padding:20px; height:200px; box-sizing:border-box; display:flex; align-items:flex-end; gap:6px;">
+          <div style="flex:1; align-self:stretch; display:flex; align-items:flex-end;"><div style="width:100%; background:var(--accent); height:40%; border-radius:3px 3px 0 0;"></div></div>
+          <div style="flex:1; align-self:stretch; display:flex; align-items:flex-end;"><div style="width:100%; background:var(--accent); height:65%; border-radius:3px 3px 0 0;"></div></div>
+          <div style="flex:1; align-self:stretch; display:flex; align-items:flex-end;"><div style="width:100%; background:var(--accent); height:55%; border-radius:3px 3px 0 0;"></div></div>
+          <div style="flex:1; align-self:stretch; display:flex; align-items:flex-end;"><div style="width:100%; background:var(--accent); height:80%; border-radius:3px 3px 0 0;"></div></div>
+          <div style="flex:1; align-self:stretch; display:flex; align-items:flex-end;"><div style="width:100%; background:var(--red); height:95%; border-radius:3px 3px 0 0;"></div></div>
+          <div style="flex:1; align-self:stretch; display:flex; align-items:flex-end;"><div style="width:100%; background:var(--accent); height:60%; border-radius:3px 3px 0 0;"></div></div>
+        </div>
+        <div style="margin-top:10px; font-size:12px; color:var(--text-faint);">Пик отмечен красным — клик по столбцу ведёт в MT Sessions за этот интервал.</div>
+      </section>
+
+      <!-- ============ 30 MT SESSIONS ============ -->
+      <section id="s30" data-screen-label="30" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <h1 style="margin:0 0 16px; font-size:24px; font-weight:800;">Monitoring · MT Sessions</h1>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow-x:auto;">
+          <table style="width:100%; min-width:720px; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">system_id</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">партнёр</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">peer IP</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">bind type</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">статус</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;"></th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;" class="mono">click_smpp_01</td><td style="padding:12px 16px;">click_uz</td><td style="padding:12px 16px;" class="mono">185.65.212.4</td><td style="padding:12px 16px;">Transceiver</td><td style="padding:12px 16px;"><span style="padding:3px 8px; border-radius:6px; background:var(--green-dim); color:var(--green); font-size:11px; font-weight:600;">active</span></td><td style="padding:12px 16px;"><button style="background:transparent; border:1px solid var(--red); color:var(--red); border-radius:6px; padding:5px 10px; font-size:11px;">Disconnect</button></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ============ 31 STATISTICS ============ -->
+      <section id="s31" data-screen-label="31" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <h1 style="margin:0 0 16px; font-size:24px; font-weight:800;">Monitoring · Statistics</h1>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:14px; margin-bottom:20px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px;"><div style="font-size:12px; color:var(--text-faint); margin-bottom:8px;">Всего</div><div style="font-size:20px; font-weight:800;">4.87M</div></div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px;"><div style="font-size:12px; color:var(--text-faint); margin-bottom:8px;">SMS-частей</div><div style="font-size:20px; font-weight:800;">6.12M</div></div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px;"><div style="font-size:12px; color:var(--text-faint); margin-bottom:8px;">Символов</div><div style="font-size:20px; font-weight:800;">210M</div></div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px;"><div style="font-size:12px; color:var(--text-faint); margin-bottom:8px;">Ошибок</div><div style="font-size:20px; font-weight:800; color:var(--red);">2.1%</div></div>
+        </div>
+        <div style="background:var(--bg-panel); border:1px dashed var(--border-strong); border-radius:10px; padding:20px; min-height:180px; display:flex; align-items:center; justify-content:center; font-size:12px; color:var(--text-faint);">Timeseries (bucket: час/день/месяц) + overlay сравнения периодов</div>
+      </section>
+
+      <!-- ============ 32 CATEGORIES ============ -->
+      <section id="s32" data-screen-label="32" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <h1 style="margin:0 0 16px; font-size:24px; font-weight:800;">System Settings · Categories</h1>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow-x:auto;">
+          <table style="width:100%; min-width:560px; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">название</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">regexp</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">учитывать в CDR</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;">SERVICE</td><td style="padding:12px 16px; color:var(--text-faint);" class="mono">^код|подтвержд</td><td style="padding:12px 16px; color:var(--green);">да</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ============ 33 ADMIN USERS ============ -->
+      <section id="s33" data-screen-label="33" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <h1 style="margin:0 0 16px; font-size:24px; font-weight:800;">System Settings · Admin users</h1>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow-x:auto;">
+          <table style="width:100%; min-width:680px; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">логин</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">роли</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">тип</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">staff / superuser</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">IP</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;">a.karimov</td><td style="padding:12px 16px;">backoffice-admin</td><td style="padding:12px 16px;">Active Directory</td><td style="padding:12px 16px;">staff</td><td style="padding:12px 16px; color:var(--text-faint);" class="mono">10.0.0.0/8</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ============ 34 ROLES ============ -->
+      <section id="s34" data-screen-label="34" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <h1 style="margin:0 0 16px; font-size:24px; font-weight:800;">System Settings · Roles</h1>
+        <div style="display:grid; grid-template-columns:220px minmax(0,1fr); gap:16px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow:hidden;">
+            <div style="padding:12px 16px; background:var(--accent-dim); color:var(--accent); font-size:13px; font-weight:700;">Moderator</div>
+            <div style="padding:12px 16px; border-top:1px solid var(--border); font-size:13px; color:var(--text-dim);">Ops Viewer</div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px;">
+            <div style="font-size:13px; font-weight:700; margin-bottom:12px;">Права роли Moderator (permission transfer list)</div>
+            <div style="display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px;">
+              <div style="border:1px solid var(--border); border-radius:8px; padding:12px;"><div style="font-size:11px; color:var(--text-faint); margin-bottom:8px;">Доступно</div><div style="font-size:13px; padding:6px 0;">partner_list</div><div style="font-size:13px; padding:6px 0;">mt_message_list</div></div>
+              <div style="border:1px solid var(--border); border-radius:8px; padding:12px;"><div style="font-size:11px; color:var(--text-faint); margin-bottom:8px;">Назначено</div><div style="font-size:13px; padding:6px 0;">patternrequest_list</div><div style="font-size:13px; padding:6px 0;">chat_list</div></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 35 PARTNER USERS ============ -->
+      <section id="s35" data-screen-label="35" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <h1 style="margin:0 0 16px; font-size:24px; font-weight:800;">System Settings · Partner Users</h1>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow-x:auto;">
+          <table style="width:100%; min-width:560px; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">партнёр</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">логин</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">роль</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">статус</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;">click_uz</td><td style="padding:12px 16px;">ops@click.uz</td><td style="padding:12px 16px;">partner-admin</td><td style="padding:12px 16px;"><span style="padding:3px 8px; border-radius:6px; background:var(--green-dim); color:var(--green); font-size:11px; font-weight:600;">active</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ============ 36 REGEX PATTERNS ============ -->
+      <section id="s36" data-screen-label="36" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <h1 style="margin:0 0 16px; font-size:24px; font-weight:800;">System Settings · Regex Patterns</h1>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow-x:auto;">
+          <table style="width:100%; min-width:560px; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">название</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">паттерн</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">используется в</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;">otp_6digit</td><td style="padding:12px 16px; color:var(--text-faint);" class="mono">\b\d{6}\b</td><td style="padding:12px 16px;">Categories, Spam Patterns</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ============ 37 SPAM PATTERNS ============ -->
+      <section id="s37" data-screen-label="37" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <h1 style="margin:0 0 16px; font-size:24px; font-weight:800;">System Settings · Spam Patterns</h1>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow-x:auto;">
+          <table style="width:100%; min-width:560px; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">паттерн</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">действие</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">статус</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px; color:var(--text-faint);" class="mono">viagra|casino</td><td style="padding:12px 16px;">reject</td><td style="padding:12px 16px;"><span style="padding:3px 8px; border-radius:6px; background:var(--green-dim); color:var(--green); font-size:11px; font-weight:600;">active</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ============ 38 MESSAGES A2P (Side Drawer) ============ -->
+      <section id="s38" data-screen-label="38" style="padding:40px 48px; border-bottom:1px solid var(--border); position:relative;">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+          <h1 style="margin:0; font-size:24px; font-weight:800;">Messages · A2P</h1>
+          <span style="padding:4px 10px; border-radius:20px; background:var(--accent-dim); color:var(--accent); font-size:11px; font-weight:700;">Side Drawer</span>
+        </div>
+        <p style="margin:0 0 16px; color:var(--text-dim); font-size:14px;">Полная жизнь сообщения: Client → Submit → SMSC → DLR, с сырыми SMPP-логами в drawer.</p>
+        <div style="position:absolute; inset:110px 0 0 0; background:rgba(0,0,0,.45); z-index:5; pointer-events:none;"></div>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow-x:auto; position:relative; z-index:1; margin-right:480px;">
+          <table style="width:100%; min-width:560px; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">system_id</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">от / кому</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">статус</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border); background:var(--accent-dim);"><td style="padding:12px 16px;" class="mono">bc415c…e0</td><td style="padding:12px 16px;">CLICK → 99890…67</td><td style="padding:12px 16px;"><span style="padding:3px 8px; border-radius:6px; background:var(--green-dim); color:var(--green); font-size:11px; font-weight:600;">delivered</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div style="position:absolute; top:90px; right:48px; bottom:40px; width:460px; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:10px; box-shadow:var(--shadow); z-index:10; padding:20px; overflow-y:auto;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;"><span style="font-size:14px; font-weight:700;">bc415c…e0</span><span style="cursor:pointer; color:var(--text-faint); font-size:16px;">✕</span></div>
+          <div style="display:flex; gap:14px; margin-bottom:14px; font-size:12px; font-weight:600; color:var(--text-dim); border-bottom:1px solid var(--border); padding-bottom:8px;">
+            <span style="color:var(--accent); border-bottom:2px solid var(--accent); padding-bottom:8px;">Общее</span><span>SMPP</span><span>Workflow</span><span>Raw</span>
+          </div>
+          <div style="display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:10px; font-size:12px; margin-bottom:14px;">
+            <div><div style="color:var(--text-faint);">CTN</div>998-CTN-01</div>
+            <div><div style="color:var(--text-faint);">SMSC-id</div><span class="mono">dkr87lit9o7b</span></div>
+          </div>
+          <div style="background:var(--bg-panel-2); border-radius:6px; padding:10px 12px; font-size:11px;" class="mono">submit_sm → smsc_id dkr87lit9o7b<br/>submit_sm_resp → OK 68ms<br/>deliver_sm(DLR) → DELIVRD 1781ms</div>
+        </div>
+      </section>
+
+      <!-- ============ 39 MESSAGES P2A ============ -->
+      <section id="s39" data-screen-label="39" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <h1 style="margin:0 0 16px; font-size:24px; font-weight:800;">Messages · P2A</h1>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow-x:auto;">
+          <table style="width:100%; min-width:640px; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">от (MSISDN)</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">кому (short number)</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">текст</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">оператор</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">доставка партнёру</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;" class="mono">998901234567</td><td style="padding:12px 16px;">5252</td><td style="padding:12px 16px; color:var(--text-dim);">СТОП</td><td style="padding:12px 16px;">beeline_uz</td><td style="padding:12px 16px;"><span style="padding:3px 8px; border-radius:6px; background:var(--green-dim); color:var(--green); font-size:11px; font-weight:600;">delivered</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ============ 40 DLRs ============ -->
+      <section id="s40" data-screen-label="40" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <h1 style="margin:0 0 16px; font-size:24px; font-weight:800;">Messages · DLRs</h1>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow-x:auto;">
+          <table style="width:100%; min-width:640px; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">receipted_message_id</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">SMSC-статус</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">получен</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">задержка</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;" class="mono">dkr87lit9o7b</td><td style="padding:12px 16px;">DELIVRD</td><td style="padding:12px 16px; color:var(--text-faint);" class="mono">11:31:38.482</td><td style="padding:12px 16px;">1781 ms</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ============ 41 GUIDE ============ -->
+      <section id="s41" data-screen-label="41" style="padding:40px 48px;">
+        <h1 style="margin:0 0 6px; font-size:24px; font-weight:800;">Guide</h1>
+        <div style="display:flex; gap:6px; margin:16px 0;">
+          <div style="padding:8px 16px; background:var(--accent); color:var(--accent-text); border-radius:6px 6px 0 0; font-size:13px; font-weight:700;">Guides</div>
+          <div style="padding:8px 16px; color:var(--text-dim); font-size:13px; font-weight:600;">Guide management</div>
+        </div>
+        <div style="display:grid; grid-template-columns:220px minmax(0,1fr); gap:16px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow:hidden;">
+            <div style="padding:12px 16px; background:var(--accent-dim); color:var(--accent); font-size:13px; font-weight:700;">Как модерировать паттерны</div>
+            <div style="padding:12px 16px; border-top:1px solid var(--border); font-size:13px; color:var(--text-dim);">Работа с Blacklist</div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:24px; font-size:13px; line-height:1.7;">
+            <h3 style="margin:0 0 10px; font-size:16px;">Как модерировать паттерны</h3>
+            <p style="color:var(--text-dim); margin:0 0 10px;">1. Откройте Moderation → Requests.<br/>2. Проверьте diff предложенного паттерна.<br/>3. Нажмите Approve или Reject с причиной.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 42 API EXPLORER ============ -->
+      <section id="s42" data-screen-label="42" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+          <h1 style="margin:0; font-size:24px; font-weight:800;">API Explorer</h1>
+          <span style="padding:4px 10px; border-radius:20px; background:var(--accent-dim); color:var(--accent); font-size:11px; font-weight:700;">вне скоупа спеки — для разработчиков</span>
+        </div>
+        <p style="margin:0 0 20px; color:var(--text-dim); font-size:14px; max-width:720px;">Собрать и выполнить запрос к любому эндпоинту прямо из админки, увидеть curl и реальный ответ — как в Twilio Console.</p>
+        <div style="display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px;">
+            <div style="display:flex; gap:8px; margin-bottom:14px;">
+              <select style="background:var(--green-dim); color:var(--green); border:1px solid transparent; border-radius:6px; padding:8px 10px; font-size:13px; font-weight:700;"><option>GET</option><option>POST</option></select>
+              <input value="/v1/messages/{message_id}/timeline" style="flex:1; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px 10px; color:var(--text); font-size:13px;" class="mono"/>
+              <button style="background:var(--accent); color:var(--accent-text); border:none; border-radius:6px; padding:8px 18px; font-weight:700; font-size:13px;">Отправить</button>
+            </div>
+            <div style="font-size:11px; font-weight:700; color:var(--text-faint); margin-bottom:8px;">Параметры</div>
+            <div style="display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:10px; margin-bottom:16px;">
+              <input value="message_id" disabled style="background:var(--bg-panel-2); border:1px solid var(--border-strong); border-radius:6px; padding:8px; color:var(--text-faint); font-size:12px;" class="mono"/>
+              <input value="bc415c5f-7017-40dc-ae14-0242e0" style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px; color:var(--text); font-size:12px;" class="mono"/>
+            </div>
+            <div style="font-size:11px; font-weight:700; color:var(--text-faint); margin-bottom:8px;">curl</div>
+            <div style="background:var(--bg-panel-2); border-radius:6px; padding:12px; font-size:11.5px; color:var(--text-dim);" class="mono">curl -X GET https://api.mpp.local/v1/messages/bc415c…/timeline \<br/>&nbsp;&nbsp;-H "Authorization: Bearer $TOKEN"</div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px;">
+            <div style="display:flex; align-items:center; gap:8px; margin-bottom:14px;"><span style="padding:3px 8px; border-radius:6px; background:var(--green-dim); color:var(--green); font-size:11px; font-weight:700;">200 OK</span><span style="font-size:11px; color:var(--text-faint);">142 ms</span></div>
+            <div style="background:var(--bg-panel-2); border-radius:6px; padding:14px; font-size:12px; color:var(--text-dim); white-space:pre-wrap;" class="mono">{
+  "message_id": "bc415c5f…",
+  "total_duration_ms": 2145,
+  "stages": [
+    { "stage_name": "DELIVERY", "duration_ms": 1969 }
+  ]
+}</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 43 DEBUGGER ============ -->
+      <section id="s43" data-screen-label="43" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+          <h1 style="margin:0; font-size:24px; font-weight:800;">Debugger</h1>
+          <span style="padding:4px 10px; border-radius:20px; background:var(--accent-dim); color:var(--accent); font-size:11px; font-weight:700;">вне скоупа спеки</span>
+        </div>
+        <p style="margin:0 0 20px; color:var(--text-dim); font-size:14px; max-width:720px;">Живой поток ошибок платформы с кодом, описанием и ссылкой на документацию — как Error Debugger в Twilio.</p>
+        <div style="display:flex; gap:10px; margin-bottom:16px;">
+          <select style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px 12px; color:var(--text); font-size:13px;"><option>уровень: все</option><option>error</option><option>warning</option></select>
+          <input placeholder="partner_id" style="background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px 12px; color:var(--text); font-size:13px;"/>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:1px; background:var(--border); border-radius:10px; overflow:hidden; border:1px solid var(--border);">
+          <div style="background:var(--bg-panel); padding:14px 16px; display:flex; gap:16px; align-items:center;">
+            <span style="width:8px; height:8px; border-radius:50%; background:var(--red); flex-shrink:0;"></span>
+            <div style="flex:1; min-width:0;"><div style="font-size:13px; font-weight:600;">Error 30006 — SMPP submit timed out</div><div style="font-size:12px; color:var(--text-faint);">click_uz · beeline_uz · 2 мин назад</div></div>
+            <a href="#" style="font-size:12px; font-weight:600; flex-shrink:0;">Документация →</a>
+          </div>
+          <div style="background:var(--bg-panel); padding:14px 16px; display:flex; gap:16px; align-items:center;">
+            <span style="width:8px; height:8px; border-radius:50%; background:var(--orange); flex-shrink:0;"></span>
+            <div style="flex:1; min-width:0;"><div style="font-size:13px; font-weight:600;">Warning 30402 — категория UNTEMPLATED, паттерн не совпал</div><div style="font-size:12px; color:var(--text-faint);">payme_uz · 6 мин назад</div></div>
+            <a href="#" style="font-size:12px; font-weight:600; flex-shrink:0;">Документация →</a>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 44 WEBHOOKS ============ -->
+      <section id="s44" data-screen-label="44" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+          <h1 style="margin:0; font-size:24px; font-weight:800;">Webhooks &amp; Event Streams</h1>
+          <span style="padding:4px 10px; border-radius:20px; background:var(--accent-dim); color:var(--accent); font-size:11px; font-weight:700;">вне скоупа спеки</span>
+        </div>
+        <p style="margin:0 0 20px; color:var(--text-dim); font-size:14px; max-width:720px;">Подписки партнёров на события платформы (delivery, incidents, moderation) с журналом попыток доставки — как Event Streams в Twilio.</p>
+        <div style="display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px;">
+            <div style="font-size:13px; font-weight:700; margin-bottom:14px;">Подписки click_uz</div>
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid var(--border);"><span style="font-size:13px;">message.delivered</span><span style="padding:3px 8px; border-radius:6px; background:var(--green-dim); color:var(--green); font-size:11px; font-weight:600;">active</span></div>
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid var(--border);"><span style="font-size:13px;">message.failed</span><span style="padding:3px 8px; border-radius:6px; background:var(--green-dim); color:var(--green); font-size:11px; font-weight:600;">active</span></div>
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 0;"><span style="font-size:13px;">incident.opened</span><span style="padding:3px 8px; border-radius:6px; background:var(--gray-dim); color:var(--gray); font-size:11px; font-weight:600;">paused</span></div>
+            <div style="margin-top:14px;"><input value="https://click.uz/hooks/mpp" style="width:100%; background:var(--bg-elevated); border:1px solid var(--border-strong); border-radius:6px; padding:8px 10px; color:var(--text); font-size:12px;" class="mono"/></div>
+          </div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:20px;">
+            <div style="font-size:13px; font-weight:700; margin-bottom:14px;">Журнал доставки</div>
+            <div style="display:flex; justify-content:space-between; padding:10px 0; border-bottom:1px solid var(--border); font-size:12px;"><span>message.delivered</span><span style="color:var(--green);">200 · 84ms</span></div>
+            <div style="display:flex; justify-content:space-between; padding:10px 0; font-size:12px;"><span>message.delivered</span><span style="color:var(--red);">timeout, retry 2/5</span></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 45 USAGE & COST ============ -->
+      <section id="s45" data-screen-label="45" style="padding:40px 48px; border-bottom:1px solid var(--border);">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+          <h1 style="margin:0; font-size:24px; font-weight:800;">Usage &amp; Cost Explorer</h1>
+          <span style="padding:4px 10px; border-radius:20px; background:var(--accent-dim); color:var(--accent); font-size:11px; font-weight:700;">вне скоупа спеки</span>
+        </div>
+        <p style="margin:0 0 20px; color:var(--text-dim); font-size:14px; max-width:720px;">Разбивка расходов по продукту/партнёру/категории с прогнозом на конец месяца — аналог Usage Explorer в Twilio.</p>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:14px; margin-bottom:20px;">
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px;"><div style="font-size:12px; color:var(--text-faint); margin-bottom:8px;">Расход MTD</div><div style="font-size:20px; font-weight:800;">18.4M UZS</div></div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px;"><div style="font-size:12px; color:var(--text-faint); margin-bottom:8px;">Прогноз на конец месяца</div><div style="font-size:20px; font-weight:800; color:var(--orange);">41.2M UZS</div></div>
+          <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; padding:16px;"><div style="font-size:12px; color:var(--text-faint); margin-bottom:8px;">Крупнейшая статья</div><div style="font-size:20px; font-weight:800;">SMS (A2P)</div></div>
+        </div>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow-x:auto;">
+          <table style="width:100%; min-width:560px; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">продукт</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600; text-align:right;">MTD</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600; text-align:right;">доля</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;">SMS (A2P)</td><td style="padding:12px 16px; text-align:right;">14.9M UZS</td><td style="padding:12px 16px; text-align:right;">81%</td></tr>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;">Alphaname monthly fee</td><td style="padding:12px 16px; text-align:right;">3.5M UZS</td><td style="padding:12px 16px; text-align:right;">19%</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ============ 46 API KEYS ============ -->
+      <section id="s46" data-screen-label="46" style="padding:40px 48px;">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+          <h1 style="margin:0; font-size:24px; font-weight:800;">API Keys</h1>
+          <span style="padding:4px 10px; border-radius:20px; background:var(--accent-dim); color:var(--accent); font-size:11px; font-weight:700;">вне скоупа спеки</span>
+        </div>
+        <p style="margin:0 0 20px; color:var(--text-dim); font-size:14px; max-width:720px;">Test / Live ключи для собственных интеграций админки, отдельно от партнёрских credentials (экран 17).</p>
+        <div style="display:flex; gap:6px; margin-bottom:16px;">
+          <div style="padding:7px 14px; background:var(--orange-dim); color:var(--orange); border-radius:20px; font-size:12px; font-weight:700;">● Test mode</div>
+          <div style="padding:7px 14px; color:var(--text-dim); border-radius:20px; font-size:12px; font-weight:700;">Live mode</div>
+        </div>
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:10px; overflow-x:auto; margin-bottom:16px;">
+          <table style="width:100%; min-width:560px; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="background:var(--bg-panel-2); text-align:left;"><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">название</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">ключ</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;">создан</th><th style="padding:12px 16px; color:var(--text-dim); font-weight:600;"></th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--border);"><td style="padding:12px 16px;">CI pipeline</td><td style="padding:12px 16px;" class="mono">SK_test_••••9c1</td><td style="padding:12px 16px; color:var(--text-faint);" class="mono">01.08.2026</td><td style="padding:12px 16px;"><button style="background:transparent; border:1px solid var(--red); color:var(--red); border-radius:6px; padding:5px 10px; font-size:11px;">Отозвать</button></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <button style="background:var(--accent); color:var(--accent-text); border:none; border-radius:6px; padding:9px 18px; font-weight:700; font-size:13px;">Создать ключ</button>
+      </section>
+
+    </main>
+  </div>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  state = { theme: 'dark' };
+  renderVals() {
+    const healthDots = [];
+    for (let i = 0; i < 23; i++) {
+      const color = i === 22 ? 'var(--red)' : (i === 10 || i === 15) ? 'var(--yellow)' : 'var(--green)';
+      healthDots.push({ color });
+    }
+    return {
+      theme: this.state.theme,
+      themeLabel: this.state.theme === 'dark' ? 'Тёмная' : 'Светлая',
+      toggleTheme: () => this.setState(s => ({ theme: s.theme === 'dark' ? 'light' : 'dark' })),
+      healthDots,
+    };
+  }
+}
+</script>
+</body>
+</html>

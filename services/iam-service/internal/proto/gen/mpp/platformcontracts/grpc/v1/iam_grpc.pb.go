@@ -27,6 +27,10 @@ const (
 	IamService_ListPartnerPortalAssignments_FullMethodName = "/mpp.grpc.v1.IamService/ListPartnerPortalAssignments"
 	IamService_AssignPartnerPortalRole_FullMethodName      = "/mpp.grpc.v1.IamService/AssignPartnerPortalRole"
 	IamService_RevokePartnerPortalRole_FullMethodName      = "/mpp.grpc.v1.IamService/RevokePartnerPortalRole"
+	IamService_CreateStaffAccount_FullMethodName           = "/mpp.grpc.v1.IamService/CreateStaffAccount"
+	IamService_ListStaffAccounts_FullMethodName            = "/mpp.grpc.v1.IamService/ListStaffAccounts"
+	IamService_DeactivateStaffAccount_FullMethodName       = "/mpp.grpc.v1.IamService/DeactivateStaffAccount"
+	IamService_VerifyStaffCredentials_FullMethodName       = "/mpp.grpc.v1.IamService/VerifyStaffCredentials"
 )
 
 // IamServiceClient is the client API for IamService service.
@@ -66,6 +70,20 @@ type IamServiceClient interface {
 	ListPartnerPortalAssignments(ctx context.Context, in *ListPartnerPortalAssignmentsRequest, opts ...grpc.CallOption) (*ListPartnerPortalAssignmentsResponse, error)
 	AssignPartnerPortalRole(ctx context.Context, in *AssignPartnerPortalRoleRequest, opts ...grpc.CallOption) (*AssignPartnerPortalRoleResponse, error)
 	RevokePartnerPortalRole(ctx context.Context, in *RevokePartnerPortalRoleRequest, opts ...grpc.CallOption) (*RevokePartnerPortalRoleResponse, error)
+	// luminous-hugging-charm.md, BACKOFFICE_DESIGN_SPEC.md Экран 33 "Admin
+	// users" — реальный Keycloak не развёрнут нигде (backoffice-ui's
+	// LoginView.vue сегодня буквально принимает вставленный JWT в textarea,
+	// HTTP-раунд-трипа при логине нет), LDAP пользователем явно отклонён,
+	// "сильно позже" будет настоящий Keycloak. До этого — полноценное
+	// локальное управление аккаунтами (iam.staff_accounts): создать
+	// сотрудника с логином/паролем прямо из бэкофиса. bcrypt-сравнение
+	// целиком внутри IamService (VerifyStaffCredentials) — хеш пароля
+	// никогда не пересекает границу процесса наружу, backoffice-api видит
+	// только external_id/ok.
+	CreateStaffAccount(ctx context.Context, in *CreateStaffAccountRequest, opts ...grpc.CallOption) (*CreateStaffAccountResponse, error)
+	ListStaffAccounts(ctx context.Context, in *ListStaffAccountsRequest, opts ...grpc.CallOption) (*ListStaffAccountsResponse, error)
+	DeactivateStaffAccount(ctx context.Context, in *DeactivateStaffAccountRequest, opts ...grpc.CallOption) (*DeactivateStaffAccountResponse, error)
+	VerifyStaffCredentials(ctx context.Context, in *VerifyStaffCredentialsRequest, opts ...grpc.CallOption) (*VerifyStaffCredentialsResponse, error)
 }
 
 type iamServiceClient struct {
@@ -156,6 +174,46 @@ func (c *iamServiceClient) RevokePartnerPortalRole(ctx context.Context, in *Revo
 	return out, nil
 }
 
+func (c *iamServiceClient) CreateStaffAccount(ctx context.Context, in *CreateStaffAccountRequest, opts ...grpc.CallOption) (*CreateStaffAccountResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateStaffAccountResponse)
+	err := c.cc.Invoke(ctx, IamService_CreateStaffAccount_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *iamServiceClient) ListStaffAccounts(ctx context.Context, in *ListStaffAccountsRequest, opts ...grpc.CallOption) (*ListStaffAccountsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListStaffAccountsResponse)
+	err := c.cc.Invoke(ctx, IamService_ListStaffAccounts_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *iamServiceClient) DeactivateStaffAccount(ctx context.Context, in *DeactivateStaffAccountRequest, opts ...grpc.CallOption) (*DeactivateStaffAccountResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeactivateStaffAccountResponse)
+	err := c.cc.Invoke(ctx, IamService_DeactivateStaffAccount_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *iamServiceClient) VerifyStaffCredentials(ctx context.Context, in *VerifyStaffCredentialsRequest, opts ...grpc.CallOption) (*VerifyStaffCredentialsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VerifyStaffCredentialsResponse)
+	err := c.cc.Invoke(ctx, IamService_VerifyStaffCredentials_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // IamServiceServer is the server API for IamService service.
 // All implementations must embed UnimplementedIamServiceServer
 // for forward compatibility.
@@ -193,6 +251,20 @@ type IamServiceServer interface {
 	ListPartnerPortalAssignments(context.Context, *ListPartnerPortalAssignmentsRequest) (*ListPartnerPortalAssignmentsResponse, error)
 	AssignPartnerPortalRole(context.Context, *AssignPartnerPortalRoleRequest) (*AssignPartnerPortalRoleResponse, error)
 	RevokePartnerPortalRole(context.Context, *RevokePartnerPortalRoleRequest) (*RevokePartnerPortalRoleResponse, error)
+	// luminous-hugging-charm.md, BACKOFFICE_DESIGN_SPEC.md Экран 33 "Admin
+	// users" — реальный Keycloak не развёрнут нигде (backoffice-ui's
+	// LoginView.vue сегодня буквально принимает вставленный JWT в textarea,
+	// HTTP-раунд-трипа при логине нет), LDAP пользователем явно отклонён,
+	// "сильно позже" будет настоящий Keycloak. До этого — полноценное
+	// локальное управление аккаунтами (iam.staff_accounts): создать
+	// сотрудника с логином/паролем прямо из бэкофиса. bcrypt-сравнение
+	// целиком внутри IamService (VerifyStaffCredentials) — хеш пароля
+	// никогда не пересекает границу процесса наружу, backoffice-api видит
+	// только external_id/ok.
+	CreateStaffAccount(context.Context, *CreateStaffAccountRequest) (*CreateStaffAccountResponse, error)
+	ListStaffAccounts(context.Context, *ListStaffAccountsRequest) (*ListStaffAccountsResponse, error)
+	DeactivateStaffAccount(context.Context, *DeactivateStaffAccountRequest) (*DeactivateStaffAccountResponse, error)
+	VerifyStaffCredentials(context.Context, *VerifyStaffCredentialsRequest) (*VerifyStaffCredentialsResponse, error)
 	mustEmbedUnimplementedIamServiceServer()
 }
 
@@ -226,6 +298,18 @@ func (UnimplementedIamServiceServer) AssignPartnerPortalRole(context.Context, *A
 }
 func (UnimplementedIamServiceServer) RevokePartnerPortalRole(context.Context, *RevokePartnerPortalRoleRequest) (*RevokePartnerPortalRoleResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RevokePartnerPortalRole not implemented")
+}
+func (UnimplementedIamServiceServer) CreateStaffAccount(context.Context, *CreateStaffAccountRequest) (*CreateStaffAccountResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateStaffAccount not implemented")
+}
+func (UnimplementedIamServiceServer) ListStaffAccounts(context.Context, *ListStaffAccountsRequest) (*ListStaffAccountsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListStaffAccounts not implemented")
+}
+func (UnimplementedIamServiceServer) DeactivateStaffAccount(context.Context, *DeactivateStaffAccountRequest) (*DeactivateStaffAccountResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeactivateStaffAccount not implemented")
+}
+func (UnimplementedIamServiceServer) VerifyStaffCredentials(context.Context, *VerifyStaffCredentialsRequest) (*VerifyStaffCredentialsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method VerifyStaffCredentials not implemented")
 }
 func (UnimplementedIamServiceServer) mustEmbedUnimplementedIamServiceServer() {}
 func (UnimplementedIamServiceServer) testEmbeddedByValue()                    {}
@@ -392,6 +476,78 @@ func _IamService_RevokePartnerPortalRole_Handler(srv interface{}, ctx context.Co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _IamService_CreateStaffAccount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateStaffAccountRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IamServiceServer).CreateStaffAccount(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IamService_CreateStaffAccount_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IamServiceServer).CreateStaffAccount(ctx, req.(*CreateStaffAccountRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IamService_ListStaffAccounts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListStaffAccountsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IamServiceServer).ListStaffAccounts(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IamService_ListStaffAccounts_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IamServiceServer).ListStaffAccounts(ctx, req.(*ListStaffAccountsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IamService_DeactivateStaffAccount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeactivateStaffAccountRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IamServiceServer).DeactivateStaffAccount(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IamService_DeactivateStaffAccount_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IamServiceServer).DeactivateStaffAccount(ctx, req.(*DeactivateStaffAccountRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IamService_VerifyStaffCredentials_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VerifyStaffCredentialsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IamServiceServer).VerifyStaffCredentials(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IamService_VerifyStaffCredentials_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IamServiceServer).VerifyStaffCredentials(ctx, req.(*VerifyStaffCredentialsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // IamService_ServiceDesc is the grpc.ServiceDesc for IamService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -430,6 +586,22 @@ var IamService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RevokePartnerPortalRole",
 			Handler:    _IamService_RevokePartnerPortalRole_Handler,
+		},
+		{
+			MethodName: "CreateStaffAccount",
+			Handler:    _IamService_CreateStaffAccount_Handler,
+		},
+		{
+			MethodName: "ListStaffAccounts",
+			Handler:    _IamService_ListStaffAccounts_Handler,
+		},
+		{
+			MethodName: "DeactivateStaffAccount",
+			Handler:    _IamService_DeactivateStaffAccount_Handler,
+		},
+		{
+			MethodName: "VerifyStaffCredentials",
+			Handler:    _IamService_VerifyStaffCredentials_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

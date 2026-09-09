@@ -436,6 +436,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/auth/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["login"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/iam/staff-accounts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listStaffAccounts"];
+        put?: never;
+        post: operations["createStaffAccount"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/iam/staff-accounts/{external_id}/deactivate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["deactivateStaffAccount"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/partners/{partner_id}/applications/{application_id}/credentials/rotate": {
         parameters: {
             query?: never;
@@ -833,6 +881,37 @@ export interface components {
         };
         RevokePartnerPortalAssignmentResponse: {
             revoked: boolean;
+        };
+        LoginRequest: {
+            username: string;
+            password: string;
+        };
+        LoginResponse: {
+            token: string;
+            /** Format: date-time */
+            expires_at: string;
+        };
+        StaffAccount: {
+            external_id: string;
+            username: string;
+            display_name: string;
+            active: boolean;
+            /** Format: date-time */
+            created_at: string;
+        };
+        StaffAccountsResponse: {
+            accounts: components["schemas"]["StaffAccount"][];
+        };
+        CreateStaffAccountRequest: {
+            username: string;
+            password: string;
+            display_name: string;
+        };
+        CreateStaffAccountResponse: {
+            account: components["schemas"]["StaffAccount"];
+        };
+        DeactivateStaffAccountResponse: {
+            deactivated: boolean;
         };
         RotateCredentialResponse: {
             credential_ref: string;
@@ -1709,6 +1788,98 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RevokePartnerPortalAssignmentResponse"];
+                };
+            };
+        };
+    };
+    login: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LoginRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoginResponse"];
+                };
+            };
+        };
+    };
+    listStaffAccounts: {
+        parameters: {
+            query?: {
+                active_only?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StaffAccountsResponse"];
+                };
+            };
+        };
+    };
+    createStaffAccount: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateStaffAccountRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreateStaffAccountResponse"];
+                };
+            };
+        };
+    };
+    deactivateStaffAccount: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                external_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeactivateStaffAccountResponse"];
                 };
             };
         };

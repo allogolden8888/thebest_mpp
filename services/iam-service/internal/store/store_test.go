@@ -44,6 +44,27 @@ func cleanupAssignments(t *testing.T, pool *pgxpool.Pool, externalID string) {
 	})
 }
 
+// createStaffAccount — V031__staff_accounts.sql: staff_role_assignments.
+// external_id FK-ит на iam.staff_accounts (перестало быть свободной
+// строкой) — тесты на назначение роли сотруднику сначала должны завести
+// сам аккаунт, тот же паттерн, что createPartnerPortalUser ниже для
+// партнёрской стороны.
+func createStaffAccount(t *testing.T, pool *pgxpool.Pool, externalID string) {
+	t.Helper()
+	ctx := context.Background()
+	_, err := pool.Exec(ctx, `
+		INSERT INTO iam.staff_accounts (external_id, username, password_hash, display_name, created_by)
+		VALUES ($1, $1, 'x', 'Test Staff', 'test')`, externalID)
+	if err != nil {
+		t.Fatalf("createStaffAccount: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM iam.staff_role_assignments WHERE external_id = $1`, externalID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM iam.identity_audit WHERE target LIKE $1`, externalID+":%")
+		_, _ = pool.Exec(context.Background(), `DELETE FROM iam.staff_accounts WHERE external_id = $1`, externalID)
+	})
+}
+
 // createPartnerPortalUser — iam.partner_portal_role_assignments.external_id
 // FK-ит на iam.partner_portal_users (в отличие от staff_role_assignments,
 // где external_id — свободная строка), так что тесты на назначение роли
@@ -92,7 +113,7 @@ func TestAssignCheckAndRevokeStaffRoleRoundTrip(t *testing.T) {
 	pg := NewPostgres(pool)
 	ctx := context.Background()
 	externalID := "test-" + uuid.NewString()
-	cleanupAssignments(t, pool, externalID)
+	createStaffAccount(t, pool, externalID)
 
 	// До назначения — allowed=false, никаких ролей.
 	allowed, roles, err := pg.CheckPermission(ctx, externalID, "ops:read")
@@ -179,7 +200,7 @@ func TestAssignStaffRoleWritesIdentityAudit(t *testing.T) {
 	pg := NewPostgres(pool)
 	ctx := context.Background()
 	externalID := "test-" + uuid.NewString()
-	cleanupAssignments(t, pool, externalID)
+	createStaffAccount(t, pool, externalID)
 
 	if _, err := pg.AssignStaffRole(ctx, externalID, "ops-viewer", "admin-1"); err != nil {
 		t.Fatalf("AssignStaffRole: %v", err)
@@ -204,8 +225,8 @@ func TestListStaffAssignmentsFiltersByExternalID(t *testing.T) {
 	ctx := context.Background()
 	externalID := "test-" + uuid.NewString()
 	otherID := "test-" + uuid.NewString()
-	cleanupAssignments(t, pool, externalID)
-	cleanupAssignments(t, pool, otherID)
+	createStaffAccount(t, pool, externalID)
+	createStaffAccount(t, pool, otherID)
 
 	if _, err := pg.AssignStaffRole(ctx, externalID, "ops-viewer", "admin-1"); err != nil {
 		t.Fatalf("AssignStaffRole: %v", err)
@@ -330,5 +351,153 @@ func TestAssignPartnerPortalRoleWritesIdentityAudit(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("ожидали ровно одну PARTNER_PORTAL_ROLE_GRANTED запись в iam.identity_audit, получили %d", count)
+	}
+}
+
+func cleanupStaffAccount(t *testing.T, pool *pgxpool.Pool, externalID string) {
+	t.Helper()
+	t.Cleanup(func() {
+		ctx := context.Background()
+		_, _ = pool.Exec(ctx, `DELETE FROM iam.identity_audit WHERE target = $1`, externalID)
+		_, _ = pool.Exec(ctx, `DELETE FROM iam.staff_accounts WHERE external_id = $1`, externalID)
+	})
+}
+
+func TestCreateAndVerifyStaffCredentialsRoundTrip(t *testing.T) {
+	pool := testPool(t)
+	pg := NewPostgres(pool)
+	ctx := context.Background()
+	username := "test-" + uuid.NewString()
+	cleanupStaffAccount(t, pool, username)
+
+	account, err := pg.CreateStaffAccount(ctx, username, "correct-horse-battery-staple", "Test Person", "admin-1")
+	if err != nil {
+		t.Fatalf("CreateStaffAccount: %v", err)
+	}
+	if account.ExternalID != username || account.Username != username || !account.Active {
+		t.Errorf("неожиданный account: %+v", account)
+	}
+
+	externalID, ok, err := pg.VerifyStaffCredentials(ctx, username, "correct-horse-battery-staple")
+	if err != nil {
+		t.Fatalf("VerifyStaffCredentials (correct password): %v", err)
+	}
+	if !ok || externalID != username {
+		t.Fatalf("ожидали ok=true external_id=%q, получили ok=%v external_id=%q", username, ok, externalID)
+	}
+
+	_, ok, err = pg.VerifyStaffCredentials(ctx, username, "wrong-password")
+	if err != nil {
+		t.Fatalf("VerifyStaffCredentials (wrong password): %v", err)
+	}
+	if ok {
+		t.Fatalf("ожидали ok=false для неверного пароля")
+	}
+
+	_, ok, err = pg.VerifyStaffCredentials(ctx, "does-not-exist-"+uuid.NewString(), "irrelevant")
+	if err != nil {
+		t.Fatalf("VerifyStaffCredentials (unknown username): %v", err)
+	}
+	if ok {
+		t.Fatalf("ожидали ok=false для неизвестного username")
+	}
+}
+
+func TestCreateStaffAccountDuplicateUsernameReturnsErrUsernameTaken(t *testing.T) {
+	pool := testPool(t)
+	pg := NewPostgres(pool)
+	ctx := context.Background()
+	username := "test-" + uuid.NewString()
+	cleanupStaffAccount(t, pool, username)
+
+	if _, err := pg.CreateStaffAccount(ctx, username, "pw", "Test Person", "admin-1"); err != nil {
+		t.Fatalf("CreateStaffAccount (first): %v", err)
+	}
+	if _, err := pg.CreateStaffAccount(ctx, username, "pw2", "Someone Else", "admin-1"); err != ErrUsernameTaken {
+		t.Errorf("ожидали ErrUsernameTaken, получили %v", err)
+	}
+}
+
+func TestDeactivateStaffAccountPreventsLogin(t *testing.T) {
+	pool := testPool(t)
+	pg := NewPostgres(pool)
+	ctx := context.Background()
+	username := "test-" + uuid.NewString()
+	cleanupStaffAccount(t, pool, username)
+
+	if _, err := pg.CreateStaffAccount(ctx, username, "pw", "Test Person", "admin-1"); err != nil {
+		t.Fatalf("CreateStaffAccount: %v", err)
+	}
+
+	deactivated, err := pg.DeactivateStaffAccount(ctx, username, "admin-2")
+	if err != nil {
+		t.Fatalf("DeactivateStaffAccount: %v", err)
+	}
+	if !deactivated {
+		t.Fatalf("ожидали deactivated=true")
+	}
+
+	_, ok, err := pg.VerifyStaffCredentials(ctx, username, "pw")
+	if err != nil {
+		t.Fatalf("VerifyStaffCredentials (deactivated): %v", err)
+	}
+	if ok {
+		t.Fatalf("деактивированный аккаунт не должен проходить VerifyStaffCredentials даже с верным паролем")
+	}
+
+	// Повторная деактивация — идемпотентно, deactivated=false, не ошибка.
+	deactivated, err = pg.DeactivateStaffAccount(ctx, username, "admin-2")
+	if err != nil {
+		t.Fatalf("DeactivateStaffAccount (повторный): %v", err)
+	}
+	if deactivated {
+		t.Errorf("повторная деактивация уже неактивного аккаунта должна вернуть deactivated=false")
+	}
+}
+
+func TestListStaffAccountsActiveOnlyFilter(t *testing.T) {
+	pool := testPool(t)
+	pg := NewPostgres(pool)
+	ctx := context.Background()
+	activeUsername := "test-active-" + uuid.NewString()
+	inactiveUsername := "test-inactive-" + uuid.NewString()
+	cleanupStaffAccount(t, pool, activeUsername)
+	cleanupStaffAccount(t, pool, inactiveUsername)
+
+	if _, err := pg.CreateStaffAccount(ctx, activeUsername, "pw", "Active Person", "admin-1"); err != nil {
+		t.Fatalf("CreateStaffAccount (active): %v", err)
+	}
+	if _, err := pg.CreateStaffAccount(ctx, inactiveUsername, "pw", "Inactive Person", "admin-1"); err != nil {
+		t.Fatalf("CreateStaffAccount (inactive): %v", err)
+	}
+	if _, err := pg.DeactivateStaffAccount(ctx, inactiveUsername, "admin-2"); err != nil {
+		t.Fatalf("DeactivateStaffAccount: %v", err)
+	}
+
+	all, err := pg.ListStaffAccounts(ctx, false)
+	if err != nil {
+		t.Fatalf("ListStaffAccounts (all): %v", err)
+	}
+	found := map[string]bool{}
+	for _, a := range all {
+		found[a.Username] = true
+	}
+	if !found[activeUsername] || !found[inactiveUsername] {
+		t.Fatalf("ожидали найти оба тестовых аккаунта без фильтра, нашли %v", found)
+	}
+
+	activeOnly, err := pg.ListStaffAccounts(ctx, true)
+	if err != nil {
+		t.Fatalf("ListStaffAccounts (active_only): %v", err)
+	}
+	found = map[string]bool{}
+	for _, a := range activeOnly {
+		found[a.Username] = true
+	}
+	if !found[activeUsername] {
+		t.Errorf("активный тестовый аккаунт должен присутствовать в active_only=true")
+	}
+	if found[inactiveUsername] {
+		t.Errorf("неактивный тестовый аккаунт НЕ должен присутствовать в active_only=true")
 	}
 }

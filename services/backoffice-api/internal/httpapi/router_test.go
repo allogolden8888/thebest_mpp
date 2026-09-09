@@ -40,6 +40,15 @@ import (
 	"mpp/backoffice-api/internal/store"
 )
 
+func newTestRSAKey(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("генерация RSA-ключа failed: %v", err)
+	}
+	return key
+}
+
 func testToken(t *testing.T, key *rsa.PrivateKey, subject string) string {
 	t.Helper()
 	claims := jwt.RegisteredClaims{Subject: subject, ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))}
@@ -125,6 +134,74 @@ type fakeIamServer struct {
 
 	assignments []*grpcv1.StaffAssignment
 	nextID      int64
+
+	// staffCredentials — luminous-hugging-charm.md Экран 33 "Admin users":
+	// username -> {password, external_id}. Реальное bcrypt-сравнение живёт
+	// в iam-service/internal/store (проверено там же отдельными Postgres-
+	// тестами) — здесь фейк только эмулирует итог VerifyStaffCredentials,
+	// не переизобретает хеширование.
+	staffCredentials map[string]struct {
+		password   string
+		externalID string
+	}
+	staffAccounts []*grpcv1.StaffAccount
+}
+
+func (f *fakeIamServer) setStaffCredentials(username, password, externalID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.staffCredentials == nil {
+		f.staffCredentials = map[string]struct {
+			password   string
+			externalID string
+		}{}
+	}
+	f.staffCredentials[username] = struct {
+		password   string
+		externalID string
+	}{password, externalID}
+}
+
+func (f *fakeIamServer) VerifyStaffCredentials(ctx context.Context, req *grpcv1.VerifyStaffCredentialsRequest) (*grpcv1.VerifyStaffCredentialsResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cred, ok := f.staffCredentials[req.GetUsername()]
+	if !ok || cred.password != req.GetPassword() {
+		return &grpcv1.VerifyStaffCredentialsResponse{Ok: false}, nil
+	}
+	return &grpcv1.VerifyStaffCredentialsResponse{Ok: true, ExternalId: cred.externalID}, nil
+}
+
+func (f *fakeIamServer) CreateStaffAccount(ctx context.Context, req *grpcv1.CreateStaffAccountRequest) (*grpcv1.CreateStaffAccountResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a := &grpcv1.StaffAccount{ExternalId: req.GetUsername(), Username: req.GetUsername(), DisplayName: req.GetDisplayName(), Active: true}
+	f.staffAccounts = append(f.staffAccounts, a)
+	return &grpcv1.CreateStaffAccountResponse{Account: a}, nil
+}
+
+func (f *fakeIamServer) ListStaffAccounts(ctx context.Context, req *grpcv1.ListStaffAccountsRequest) (*grpcv1.ListStaffAccountsResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*grpcv1.StaffAccount
+	for _, a := range f.staffAccounts {
+		if !req.GetActiveOnly() || a.GetActive() {
+			out = append(out, a)
+		}
+	}
+	return &grpcv1.ListStaffAccountsResponse{Accounts: out}, nil
+}
+
+func (f *fakeIamServer) DeactivateStaffAccount(ctx context.Context, req *grpcv1.DeactivateStaffAccountRequest) (*grpcv1.DeactivateStaffAccountResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, a := range f.staffAccounts {
+		if a.GetExternalId() == req.GetExternalId() && a.GetActive() {
+			a.Active = false
+			return &grpcv1.DeactivateStaffAccountResponse{Deactivated: true}, nil
+		}
+	}
+	return &grpcv1.DeactivateStaffAccountResponse{Deactivated: false}, nil
 }
 
 func newFakeIamServer() *fakeIamServer {
@@ -1489,5 +1566,149 @@ func TestHandleOpsSnapshotProxiesBodyAndRequiresPermission(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), `"kafka_lag_available":true`) {
 		t.Fatalf("тело не проброшено от upstream как есть: %s", body)
+	}
+}
+
+func TestHandleLoginHappyPathIssuesUsableToken(t *testing.T) {
+	deps, _, iamFake, _ := testDeps(t)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("генерация ключа failed: %v", err)
+	}
+	deps.Validator = auth.NewValidator(&key.PublicKey)
+	deps.TokenIssuer = auth.NewTokenIssuer(key)
+	iamFake.setStaffCredentials("alice", "correct-password", "alice")
+	iamFake.allow("alice", "iam:manage")
+
+	router := NewRouter(deps)
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	loginBody := `{"username":"alice","password":"correct-password"}`
+	resp, err := http.Post(srv.URL+"/v1/auth/login", "application/json", strings.NewReader(loginBody))
+	if err != nil {
+		t.Fatalf("login request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("ожидали 200, получили %d", resp.StatusCode)
+	}
+	var out loginResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if out.Token == "" || out.ExpiresAt == "" {
+		t.Fatalf("ожидали непустые token/expires_at, получили %+v", out)
+	}
+
+	// Токен, выпущенный логином, реально работает на защищённом маршруте —
+	// не только "структурно похож на JWT".
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/iam/roles", nil)
+	req.Header.Set("Authorization", "Bearer "+out.Token)
+	authedResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("authed request failed: %v", err)
+	}
+	authedResp.Body.Close()
+	if authedResp.StatusCode != http.StatusOK {
+		t.Fatalf("токен от /v1/auth/login должен проходить iam:manage-защищённый маршрут, получили %d", authedResp.StatusCode)
+	}
+}
+
+func TestHandleLoginRejectsWrongPassword(t *testing.T) {
+	deps, _, iamFake, _ := testDeps(t)
+	deps.TokenIssuer = auth.NewTokenIssuer(newTestRSAKey(t))
+	iamFake.setStaffCredentials("alice", "correct-password", "alice")
+
+	router := NewRouter(deps)
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/auth/login", "application/json", strings.NewReader(`{"username":"alice","password":"wrong"}`))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("ожидали 401 на неверный пароль, получили %d", resp.StatusCode)
+	}
+}
+
+func TestHandleLoginMissingFieldsReturns400(t *testing.T) {
+	deps, _, _, _ := testDeps(t)
+	deps.TokenIssuer = auth.NewTokenIssuer(newTestRSAKey(t))
+
+	router := NewRouter(deps)
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/auth/login", "application/json", strings.NewReader(`{"username":"alice"}`))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("ожидали 400 без password, получили %d", resp.StatusCode)
+	}
+}
+
+func TestHandleStaffAccountsCreateListDeactivateRoundTrip(t *testing.T) {
+	deps, _, iamFake, _ := testDeps(t)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("генерация ключа failed: %v", err)
+	}
+	deps.Validator = auth.NewValidator(&key.PublicKey)
+	iamFake.allow("admin@mpp", "iam:manage")
+
+	router := NewRouter(deps)
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+	token := testToken(t, key, "admin@mpp")
+
+	createReq, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/iam/staff-accounts", strings.NewReader(`{"username":"bob","password":"pw","display_name":"Bob"}`))
+	createReq.Header.Set("Authorization", "Bearer "+token)
+	createReq.Header.Set("Content-Type", "application/json")
+	createResp, err := http.DefaultClient.Do(createReq)
+	if err != nil {
+		t.Fatalf("create request failed: %v", err)
+	}
+	defer createResp.Body.Close()
+	if createResp.StatusCode != http.StatusCreated {
+		t.Fatalf("ожидали 201, получили %d", createResp.StatusCode)
+	}
+
+	listReq, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/iam/staff-accounts", nil)
+	listReq.Header.Set("Authorization", "Bearer "+token)
+	listResp, err := http.DefaultClient.Do(listReq)
+	if err != nil {
+		t.Fatalf("list request failed: %v", err)
+	}
+	defer listResp.Body.Close()
+	var listOut struct {
+		Accounts []iamStaffAccountResponse `json:"accounts"`
+	}
+	if err := json.NewDecoder(listResp.Body).Decode(&listOut); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if len(listOut.Accounts) != 1 || listOut.Accounts[0].Username != "bob" || !listOut.Accounts[0].Active {
+		t.Fatalf("неожиданный список: %+v", listOut.Accounts)
+	}
+
+	deactivateReq, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/iam/staff-accounts/bob/deactivate", nil)
+	deactivateReq.Header.Set("Authorization", "Bearer "+token)
+	deactivateResp, err := http.DefaultClient.Do(deactivateReq)
+	if err != nil {
+		t.Fatalf("deactivate request failed: %v", err)
+	}
+	defer deactivateResp.Body.Close()
+	var deactivateOut struct {
+		Deactivated bool `json:"deactivated"`
+	}
+	if err := json.NewDecoder(deactivateResp.Body).Decode(&deactivateOut); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if !deactivateOut.Deactivated {
+		t.Fatalf("ожидали deactivated=true")
 	}
 }

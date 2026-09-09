@@ -74,6 +74,26 @@ func loadJWTPublicKey() (*rsa.PublicKey, error) {
 	return rsaPub, nil
 }
 
+// loadJWTPrivateKey — luminous-hugging-charm.md, BACKOFFICE_DESIGN_SPEC.md
+// Экран 33 "Admin users". Новый, отдельный от JWT_PUBLIC_KEY_PEM keypair
+// (см. internal/auth/issuer.go package doc) — backoffice-api впервые сам
+// ПОДПИСЫВАЕТ токены (POST /v1/auth/login), не только валидирует чужие.
+func loadJWTPrivateKey() (*rsa.PrivateKey, error) {
+	pemData := os.Getenv("JWT_PRIVATE_KEY_PEM")
+	if pemData == "" {
+		return nil, fmt.Errorf("JWT_PRIVATE_KEY_PEM не задан")
+	}
+	block, _ := pem.Decode([]byte(pemData))
+	if block == nil {
+		return nil, fmt.Errorf("не удалось разобрать PEM из JWT_PRIVATE_KEY_PEM")
+	}
+	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("x509.ParsePKCS1PrivateKey: %w", err)
+	}
+	return key, nil
+}
+
 // dialGRPC — insecure.NewCredentials() здесь НАМЕРЕННО, не пропущенный mTLS
 // (CODE_REVIEW.md отметило это как HIGH — расследовано, тот же false
 // positive, что уже разобран в services/partner-notification-service/internal/notify/grpc_client.go:47-62,
@@ -150,6 +170,12 @@ func main() {
 		log.Fatalf("не удалось загрузить JWT public key: %v", err)
 	}
 	validator := auth.NewValidator(pubKey)
+
+	privKey, err := loadJWTPrivateKey()
+	if err != nil {
+		log.Fatalf("не удалось загрузить JWT private key: %v", err)
+	}
+	tokenIssuer := auth.NewTokenIssuer(privKey)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	pool, err := pgxpool.New(ctx, buildPostgresDSN())
@@ -266,6 +292,7 @@ func main() {
 		OpsVisibilityURL:       opsVisibilityURL,
 		ComplianceAPIURL:       complianceAPIURL,
 		RedisRuntime:           redisRuntime,
+		TokenIssuer:            tokenIssuer,
 		TracerProvider:         tp,
 	})
 

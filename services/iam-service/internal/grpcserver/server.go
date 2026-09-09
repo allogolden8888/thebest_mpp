@@ -29,6 +29,10 @@ type Store interface {
 	ListPartnerPortalAssignments(ctx context.Context, externalID string) ([]store.PartnerPortalAssignment, error)
 	AssignPartnerPortalRole(ctx context.Context, externalID, role, grantedBy string) (store.PartnerPortalAssignment, error)
 	RevokePartnerPortalRole(ctx context.Context, externalID, role, revokedBy string) (bool, error)
+	CreateStaffAccount(ctx context.Context, username, password, displayName, createdBy string) (store.StaffAccount, error)
+	ListStaffAccounts(ctx context.Context, activeOnly bool) ([]store.StaffAccount, error)
+	DeactivateStaffAccount(ctx context.Context, externalID, actor string) (bool, error)
+	VerifyStaffCredentials(ctx context.Context, username, password string) (string, bool, error)
 }
 
 type Server struct {
@@ -200,5 +204,82 @@ func toProtoPartnerPortalAssignment(a store.PartnerPortalAssignment) *grpcv1.Par
 		Role:       a.Role,
 		GrantedBy:  a.GrantedBy,
 		GrantedAt:  timestamppb.New(a.GrantedAt),
+	}
+}
+
+func (s *Server) CreateStaffAccount(ctx context.Context, req *grpcv1.CreateStaffAccountRequest) (*grpcv1.CreateStaffAccountResponse, error) {
+	if req.GetUsername() == "" {
+		return nil, status.Error(codes.InvalidArgument, "username обязателен")
+	}
+	if req.GetPassword() == "" {
+		return nil, status.Error(codes.InvalidArgument, "password обязателен")
+	}
+	if req.GetDisplayName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "display_name обязателен")
+	}
+	if req.GetCreatedBy() == "" {
+		return nil, status.Error(codes.InvalidArgument, "created_by обязателен для аудита")
+	}
+
+	a, err := s.store.CreateStaffAccount(ctx, req.GetUsername(), req.GetPassword(), req.GetDisplayName(), req.GetCreatedBy())
+	if err != nil {
+		if errors.Is(err, store.ErrUsernameTaken) {
+			return nil, status.Error(codes.AlreadyExists, err.Error())
+		}
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &grpcv1.CreateStaffAccountResponse{Account: toProtoStaffAccount(a)}, nil
+}
+
+func (s *Server) ListStaffAccounts(ctx context.Context, req *grpcv1.ListStaffAccountsRequest) (*grpcv1.ListStaffAccountsResponse, error) {
+	accounts, err := s.store.ListStaffAccounts(ctx, req.GetActiveOnly())
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	resp := &grpcv1.ListStaffAccountsResponse{Accounts: make([]*grpcv1.StaffAccount, 0, len(accounts))}
+	for _, a := range accounts {
+		resp.Accounts = append(resp.Accounts, toProtoStaffAccount(a))
+	}
+	return resp, nil
+}
+
+func (s *Server) DeactivateStaffAccount(ctx context.Context, req *grpcv1.DeactivateStaffAccountRequest) (*grpcv1.DeactivateStaffAccountResponse, error) {
+	if req.GetExternalId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "external_id обязателен")
+	}
+	if req.GetActor() == "" {
+		return nil, status.Error(codes.InvalidArgument, "actor обязателен для аудита")
+	}
+
+	deactivated, err := s.store.DeactivateStaffAccount(ctx, req.GetExternalId(), req.GetActor())
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &grpcv1.DeactivateStaffAccountResponse{Deactivated: deactivated}, nil
+}
+
+// VerifyStaffCredentials — не codes.NotFound/Unauthenticated на неверные
+// креды: ok=false в теле 200-подобного gRPC OK-ответа, тот же класс
+// решения, что ValidateVersion в configuration-service (невалидный вход —
+// ОЖИДАЕМЫЙ исход этого RPC, не ошибка вызова).
+func (s *Server) VerifyStaffCredentials(ctx context.Context, req *grpcv1.VerifyStaffCredentialsRequest) (*grpcv1.VerifyStaffCredentialsResponse, error) {
+	if req.GetUsername() == "" || req.GetPassword() == "" {
+		return &grpcv1.VerifyStaffCredentialsResponse{Ok: false}, nil
+	}
+
+	externalID, ok, err := s.store.VerifyStaffCredentials(ctx, req.GetUsername(), req.GetPassword())
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &grpcv1.VerifyStaffCredentialsResponse{Ok: ok, ExternalId: externalID}, nil
+}
+
+func toProtoStaffAccount(a store.StaffAccount) *grpcv1.StaffAccount {
+	return &grpcv1.StaffAccount{
+		ExternalId:  a.ExternalID,
+		Username:    a.Username,
+		DisplayName: a.DisplayName,
+		Active:      a.Active,
+		CreatedAt:   timestamppb.New(a.CreatedAt),
 	}
 }

@@ -42,7 +42,12 @@ type Deps struct {
 	// прямое Redis-чтение в backoffice-api — тот же класс решения, что
 	// прямое чтение чужих Postgres-схем (Postgres/ClickHouse выше, см.
 	// store/postgres.go package doc), не проксирование через gRPC.
-	RedisRuntime   *store.Redis
+	RedisRuntime *store.Redis
+	// TokenIssuer — luminous-hugging-charm.md, BACKOFFICE_DESIGN_SPEC.md
+	// Экран 33 "Admin users" (auth.go). Первый случай, когда backoffice-api
+	// сам ПОДПИСЫВАЕТ JWT, не только валидирует чужие — см.
+	// internal/auth/issuer.go package doc.
+	TokenIssuer    *auth.TokenIssuer
 	TracerProvider trace.TracerProvider
 }
 
@@ -71,6 +76,14 @@ func NewRouter(d Deps) *chi.Mux {
 		return req.URL.Path
 	}))
 	r.Use(maxBodyMiddleware)
+
+	// POST /v1/auth/login — luminous-hugging-charm.md, BACKOFFICE_DESIGN_
+	// SPEC.md Экран 33 "Admin users" (auth.go). Единственный маршрут этого
+	// сервиса БЕЗ d.Validator.Middleware — по определению, вызывающий ещё
+	// не имеет JWT на этом шаге, это и есть то, что этот маршрут выдаёт.
+	r.Route("/v1/auth", func(r chi.Router) {
+		r.Post("/login", handleLogin(d.IamClient, d.TokenIssuer))
+	})
 
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(d.Validator.Middleware)
@@ -142,6 +155,12 @@ func NewRouter(d Deps) *chi.Mux {
 			r.Get("/partner-portal-assignments", handleIamListPartnerPortalAssignments(d.IamClient))
 			r.Post("/partner-portal-assignments", handleIamAssignPartnerPortalRole(d.IamClient))
 			r.Delete("/partner-portal-assignments/{external_id}/{role}", handleIamRevokePartnerPortalRole(d.IamClient))
+			// BACKOFFICE_DESIGN_SPEC.md Экран 33 "Admin users" — управление
+			// локальными staff-аккаунтами (auth.go's handleLogin — сам
+			// логин, эти три — административный CRUD над учётками).
+			r.Get("/staff-accounts", handleIamListStaffAccounts(d.IamClient))
+			r.Post("/staff-accounts", handleIamCreateStaffAccount(d.IamClient))
+			r.Post("/staff-accounts/{external_id}/deactivate", handleIamDeactivateStaffAccount(d.IamClient))
 		})
 
 		// /v1/partners/{partner_id}/... — CredentialIssuerService proxy
