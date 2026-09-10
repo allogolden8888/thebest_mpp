@@ -37,7 +37,10 @@ V028__incident.sql
 V029__message_read_model_sandbox.sql
 V030__category_ctn_entity_types.sql
 V031__staff_accounts.sql
+V033__pattern_placeholder_guide_entity_types.sql
 ```
+
+(V032 — `reconciliation_early_evidence`, добавлена параллельной сессией, не частью этой ветки работы.)
 
 Применить локально:
 

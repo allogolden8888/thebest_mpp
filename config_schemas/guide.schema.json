@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mpp/config_schemas/guide.schema.json",
+  "title": "GUIDE config payload (ConfigEntityType.CONFIG_ENTITY_TYPE_GUIDE)",
+  "description": "BACKOFFICE_DESIGN_SPEC.md Экран 41 'Guides'. Статический справочный контент внутри админки (title/body/category) — draft/publish через уже существующий generic config-version механизм (CreateVersion = новая версия, ArchiveVersion = снять с публикации), не отдельная CMS-таблица. entity_id = slug.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "body_markdown", "category"],
+  "properties": {
+    "title": { "type": "string", "minLength": 1 },
+    "body_markdown": { "type": "string" },
+    "category": { "type": "string", "minLength": 1 }
+  }
+}

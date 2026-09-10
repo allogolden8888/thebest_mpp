@@ -1,0 +1,4 @@
+{
+  "name": "OTP-Code",
+  "regex": "\\d{4,6}"
+}

@@ -70,6 +70,10 @@ func entityTypeFromProto(e commonv1.ConfigEntityType) validate.EntityType {
 		return validate.EntityCategory
 	case commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_CTN:
 		return validate.EntityCTN
+	case commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PATTERN_PLACEHOLDER:
+		return validate.EntityPatternPlaceholder
+	case commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_GUIDE:
+		return validate.EntityGuide
 	default:
 		return ""
 	}
@@ -99,6 +103,10 @@ func entityTypeToProto(e validate.EntityType) commonv1.ConfigEntityType {
 		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_CATEGORY
 	case validate.EntityCTN:
 		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_CTN
+	case validate.EntityPatternPlaceholder:
+		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PATTERN_PLACEHOLDER
+	case validate.EntityGuide:
+		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_GUIDE
 	default:
 		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_UNSPECIFIED
 	}

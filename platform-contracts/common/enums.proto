@@ -170,4 +170,16 @@ enum ConfigEntityType {
   // телеком-биллинга (CDR-экспорт, см. BACKOFFICE_ROADMAP.md — сама
   // генерация CDR не реализована, только эта справочная сущность).
   CONFIG_ENTITY_TYPE_CTN = 11;
+  // BACKOFFICE_DESIGN_SPEC.md Экран 36 "Pattern Placeholders" — именованные
+  // переменные (name/regex) для использования внутри policy_template.
+  // Реестр сам по себе — версионируемая справочная сущность (этот
+  // entity_type); реальное использование внутри движка матчинга
+  // (policy-service/src/template_matching.rs) — отдельное изменение движка,
+  // не покрывается одним этим entity_type.
+  CONFIG_ENTITY_TYPE_PATTERN_PLACEHOLDER = 12;
+  // BACKOFFICE_DESIGN_SPEC.md Экран 41 "Guides" — статический справочный
+  // контент внутри админки (title/body_markdown/category), тот же
+  // версионируемый (draft/publish через ArchiveVersion) паттерн, что
+  // остальные entity_type здесь, не отдельная CMS-таблица.
+  CONFIG_ENTITY_TYPE_GUIDE = 13;
 }

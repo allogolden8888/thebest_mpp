@@ -35,20 +35,27 @@ const (
 	// BACKOFFICE_DESIGN_SPEC.md Экраны 32/23 (V030__category_ctn_entity_types.sql).
 	EntityCategory EntityType = "category"
 	EntityCTN      EntityType = "ctn"
+	// EntityPatternPlaceholder/EntityGuide — luminous-hugging-charm.md,
+	// BACKOFFICE_DESIGN_SPEC.md Экраны 36/41
+	// (V033__pattern_placeholder_guide_entity_types.sql).
+	EntityPatternPlaceholder EntityType = "pattern_placeholder"
+	EntityGuide              EntityType = "guide"
 )
 
 var schemaFile = map[EntityType]string{
-	EntityPipeline:          "pipeline.schema.json",
-	EntityPolicyRuleset:     "policy_ruleset.schema.json",
-	EntityPolicyTemplate:    "policy_template.schema.json",
-	EntityBillingTariff:     "billing_tariff.schema.json",
-	EntityRoutingTable:      "routing_table.schema.json",
-	EntityNumberRange:       "number_range.schema.json",
-	EntityPartner:           "partner.schema.json",
-	EntityOperator:          "operator.schema.json",
-	EntitySubscriberConsent: "subscriber_consent.schema.json",
-	EntityCategory:          "category.schema.json",
-	EntityCTN:               "ctn.schema.json",
+	EntityPipeline:           "pipeline.schema.json",
+	EntityPolicyRuleset:      "policy_ruleset.schema.json",
+	EntityPolicyTemplate:     "policy_template.schema.json",
+	EntityBillingTariff:      "billing_tariff.schema.json",
+	EntityRoutingTable:       "routing_table.schema.json",
+	EntityNumberRange:        "number_range.schema.json",
+	EntityPartner:            "partner.schema.json",
+	EntityOperator:           "operator.schema.json",
+	EntitySubscriberConsent:  "subscriber_consent.schema.json",
+	EntityCategory:           "category.schema.json",
+	EntityCTN:                "ctn.schema.json",
+	EntityPatternPlaceholder: "pattern_placeholder.schema.json",
+	EntityGuide:              "guide.schema.json",
 }
 
 // ValidEntityTypes — тот же список, что CHECK-ограничение
@@ -56,6 +63,7 @@ var schemaFile = map[EntityType]string{
 var ValidEntityTypes = []EntityType{
 	EntityPipeline, EntityPolicyRuleset, EntityPolicyTemplate, EntityBillingTariff,
 	EntityRoutingTable, EntityNumberRange, EntityPartner, EntityOperator, EntitySubscriberConsent,
+	EntityPatternPlaceholder, EntityGuide,
 	EntityCategory, EntityCTN,
 }
 

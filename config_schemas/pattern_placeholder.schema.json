@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mpp/config_schemas/pattern_placeholder.schema.json",
+  "title": "PATTERN_PLACEHOLDER config payload (ConfigEntityType.CONFIG_ENTITY_TYPE_PATTERN_PLACEHOLDER)",
+  "description": "BACKOFFICE_DESIGN_SPEC.md Экран 36 'Pattern Placeholders' (бывший 'Regex Patterns'). Именованная переменная с регекспом, предназначенная для использования внутри policy_template — реестр сам по себе является только справочником name->regex; фактическое использование внутри синтаксиса шаблона и извлечение значения при матчинге — отдельное изменение движка policy-service/src/template_matching.rs, не покрывается одной этой сущностью (см. luminous-hugging-charm.md). entity_id = name.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "regex"],
+  "properties": {
+    "name": { "type": "string", "minLength": 1, "pattern": "^[a-z][a-z0-9_]*$" },
+    "regex": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" }
+  }
+}

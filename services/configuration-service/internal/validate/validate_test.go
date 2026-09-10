@@ -107,11 +107,12 @@ func TestValidateRejectsMalformedJSON(t *testing.T) {
 
 func TestIsValidEntityTypeMatchesDbCheckConstraint(t *testing.T) {
 	// migrations/V002__config_versions.sql + V030__category_ctn_entity_types.sql
+	// + V033__pattern_placeholder_guide_entity_types.sql
 	// config_versions_entity_type_check
 	dbAllowed := []EntityType{
 		"pipeline", "policy_ruleset", "policy_template", "billing_tariff",
 		"routing_table", "number_range", "partner", "operator", "subscriber_consent",
-		"category", "ctn",
+		"category", "ctn", "pattern_placeholder", "guide",
 	}
 	if len(dbAllowed) != len(ValidEntityTypes) {
 		t.Fatalf("список entity_type в коде (%d) разошёлся с DB CHECK (%d)", len(ValidEntityTypes), len(dbAllowed))

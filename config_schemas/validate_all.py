@@ -38,6 +38,8 @@ SCHEMA_FOR_PREFIX = {
     "subscriber_consent": "subscriber_consent.schema.json",
     "category": "category.schema.json",
     "ctn": "ctn.schema.json",
+    "pattern_placeholder": "pattern_placeholder.schema.json",
+    "guide": "guide.schema.json",
 }
 
 

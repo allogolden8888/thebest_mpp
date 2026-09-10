@@ -800,6 +800,18 @@ const (
 	// телеком-биллинга (CDR-экспорт, см. BACKOFFICE_ROADMAP.md — сама
 	// генерация CDR не реализована, только эта справочная сущность).
 	ConfigEntityType_CONFIG_ENTITY_TYPE_CTN ConfigEntityType = 11
+	// BACKOFFICE_DESIGN_SPEC.md Экран 36 "Pattern Placeholders" — именованные
+	// переменные (name/regex) для использования внутри policy_template.
+	// Реестр сам по себе — версионируемая справочная сущность (этот
+	// entity_type); реальное использование внутри движка матчинга
+	// (policy-service/src/template_matching.rs) — отдельное изменение движка,
+	// не покрывается одним этим entity_type.
+	ConfigEntityType_CONFIG_ENTITY_TYPE_PATTERN_PLACEHOLDER ConfigEntityType = 12
+	// BACKOFFICE_DESIGN_SPEC.md Экран 41 "Guides" — статический справочный
+	// контент внутри админки (title/body_markdown/category), тот же
+	// версионируемый (draft/publish через ArchiveVersion) паттерн, что
+	// остальные entity_type здесь, не отдельная CMS-таблица.
+	ConfigEntityType_CONFIG_ENTITY_TYPE_GUIDE ConfigEntityType = 13
 )
 
 // Enum value maps for ConfigEntityType.
@@ -817,20 +829,24 @@ var (
 		9:  "CONFIG_ENTITY_TYPE_SUBSCRIBER_CONSENT",
 		10: "CONFIG_ENTITY_TYPE_CATEGORY",
 		11: "CONFIG_ENTITY_TYPE_CTN",
+		12: "CONFIG_ENTITY_TYPE_PATTERN_PLACEHOLDER",
+		13: "CONFIG_ENTITY_TYPE_GUIDE",
 	}
 	ConfigEntityType_value = map[string]int32{
-		"CONFIG_ENTITY_TYPE_UNSPECIFIED":        0,
-		"CONFIG_ENTITY_TYPE_PIPELINE":           1,
-		"CONFIG_ENTITY_TYPE_POLICY_RULESET":     2,
-		"CONFIG_ENTITY_TYPE_POLICY_TEMPLATE":    3,
-		"CONFIG_ENTITY_TYPE_BILLING_TARIFF":     4,
-		"CONFIG_ENTITY_TYPE_ROUTING_TABLE":      5,
-		"CONFIG_ENTITY_TYPE_NUMBER_RANGE":       6,
-		"CONFIG_ENTITY_TYPE_PARTNER":            7,
-		"CONFIG_ENTITY_TYPE_OPERATOR":           8,
-		"CONFIG_ENTITY_TYPE_SUBSCRIBER_CONSENT": 9,
-		"CONFIG_ENTITY_TYPE_CATEGORY":           10,
-		"CONFIG_ENTITY_TYPE_CTN":                11,
+		"CONFIG_ENTITY_TYPE_UNSPECIFIED":         0,
+		"CONFIG_ENTITY_TYPE_PIPELINE":            1,
+		"CONFIG_ENTITY_TYPE_POLICY_RULESET":      2,
+		"CONFIG_ENTITY_TYPE_POLICY_TEMPLATE":     3,
+		"CONFIG_ENTITY_TYPE_BILLING_TARIFF":      4,
+		"CONFIG_ENTITY_TYPE_ROUTING_TABLE":       5,
+		"CONFIG_ENTITY_TYPE_NUMBER_RANGE":        6,
+		"CONFIG_ENTITY_TYPE_PARTNER":             7,
+		"CONFIG_ENTITY_TYPE_OPERATOR":            8,
+		"CONFIG_ENTITY_TYPE_SUBSCRIBER_CONSENT":  9,
+		"CONFIG_ENTITY_TYPE_CATEGORY":            10,
+		"CONFIG_ENTITY_TYPE_CTN":                 11,
+		"CONFIG_ENTITY_TYPE_PATTERN_PLACEHOLDER": 12,
+		"CONFIG_ENTITY_TYPE_GUIDE":               13,
 	}
 )
 
@@ -945,7 +961,7 @@ const file_common_enums_proto_rawDesc = "" +
 	"\x10ConsentScopeType\x12\"\n" +
 	"\x1eCONSENT_SCOPE_TYPE_UNSPECIFIED\x10\x00\x12\x1f\n" +
 	"\x1bCONSENT_SCOPE_TYPE_CATEGORY\x10\x01\x12\x1d\n" +
-	"\x19CONSENT_SCOPE_TYPE_SENDER\x10\x02*\xc1\x03\n" +
+	"\x19CONSENT_SCOPE_TYPE_SENDER\x10\x02*\x8b\x04\n" +
 	"\x10ConfigEntityType\x12\"\n" +
 	"\x1eCONFIG_ENTITY_TYPE_UNSPECIFIED\x10\x00\x12\x1f\n" +
 	"\x1bCONFIG_ENTITY_TYPE_PIPELINE\x10\x01\x12%\n" +
@@ -959,7 +975,9 @@ const file_common_enums_proto_rawDesc = "" +
 	"%CONFIG_ENTITY_TYPE_SUBSCRIBER_CONSENT\x10\t\x12\x1f\n" +
 	"\x1bCONFIG_ENTITY_TYPE_CATEGORY\x10\n" +
 	"\x12\x1a\n" +
-	"\x16CONFIG_ENTITY_TYPE_CTN\x10\vBP\n" +
+	"\x16CONFIG_ENTITY_TYPE_CTN\x10\v\x12*\n" +
+	"&CONFIG_ENTITY_TYPE_PATTERN_PLACEHOLDER\x10\f\x12\x1c\n" +
+	"\x18CONFIG_ENTITY_TYPE_GUIDE\x10\rBP\n" +
 	"\"uz.mpp.platformcontracts.common.v1P\x01Z(mpp/platformcontracts/common/v1;commonv1b\x06proto3"
 
 var (
