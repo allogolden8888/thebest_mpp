@@ -34,7 +34,7 @@ describe("LoginView", () => {
   });
 
   it("логинится через POST /auth/login и переходит на /config", async () => {
-    const fakePost = vi.fn(async () => ({ data: { token: "issued-jwt", expires_at: "2026-01-01T00:00:00Z" }, error: undefined }));
+    const fakePost = vi.fn(async (..._args: unknown[]) => ({ data: { token: "issued-jwt", expires_at: "2026-01-01T00:00:00Z" }, error: undefined }));
     const { wrapper, router } = await mountWithRouter(fakePost);
 
     const inputs = wrapper.findAll("input");
@@ -68,7 +68,7 @@ describe("LoginView", () => {
   });
 
   it("показывает ошибку и не сохраняет токен при неверных кредах", async () => {
-    const fakePost = vi.fn(async () => ({ data: undefined, error: "неверный логин или пароль" }));
+    const fakePost = vi.fn(async (..._args: unknown[]) => ({ data: undefined, error: "неверный логин или пароль" }));
     const { wrapper } = await mountWithRouter(fakePost);
 
     const inputs = wrapper.findAll("input");
