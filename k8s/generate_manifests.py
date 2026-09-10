@@ -212,6 +212,18 @@ SERVICES = [
             "capacity_model.md:116 (v2)", kafka_consumer=True),
     Service("analytics-writer", "go", "stateless", 16,
             "capacity_model.md:117", kafka_consumer=True),
+    Service("pdu-log-writer", "go", "stateless", None,
+            "не в capacity_model.md — сервис появился уже после того, как этот документ писался "
+            "(BACKOFFICE_DESIGN_SPEC.md Экраны 38-40, A2P/DLR per-PDU логи), тот же пул 'Мелкие Go "
+            "control-plane' (capacity_model.md:12,113), что analytics-writer по форме (Kafka "
+            "consumer -> ClickHouse batch insert), но НАМЕРЕННО отдельный сервис, а не расширение "
+            "analytics-writer: схема operator.pdu.log (operator_id/direction/pdu_type/sequence_number/"
+            "smsc_message_id) не имеет ничего общего с analytics.stage_events "
+            "(stage_name/outcome/reason_code) — общий консьюмер означал бы либо мешать две разные "
+            "ClickHouse-схемы в одном FlushBatch, либо форкать batching-логику внутри одного сервиса "
+            "на две независимые ветки. Отдельный маленький сервис — тот же выбор, что уже сделан для "
+            "dlr-correlation-writer рядом со своим доменом.",
+            kafka_consumer=True, resource_tier="control-plane"),
     Service("partner-notification-service", "go", "stateless", 24,
             "capacity_model.md:118", kafka_consumer=True, internal_grpc_port=9000),
     Service("backoffice-ui", "go", "frontend", None,
@@ -297,6 +309,7 @@ SECRET_DEPENDENCIES: dict[str, list[str]] = {
     "replay-service": ["postgresql"],
     "lifecycle-writer": ["postgresql"],
     "analytics-writer": ["clickhouse"],
+    "pdu-log-writer": ["clickhouse"],
     "partner-notification-service": ["redis-runtime"],
 }
 

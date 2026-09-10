@@ -7,6 +7,7 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import uz.mpp.platformcontracts.events.v1.OperatorDlr;
+import uz.mpp.platformcontracts.events.v1.OperatorPduLog;
 import uz.mpp.platformcontracts.events.v1.OperatorSubmitAccepted;
 
 import java.time.Duration;
@@ -25,6 +26,12 @@ public final class OperatorEventPublisher {
 
     private static final String SUBMIT_ACCEPTED_TOPIC = "operator.submit.accepted";
     private static final String DLR_TOPIC = "operator.dlr";
+    // per-PDU диагностический след (BACKOFFICE_DESIGN_SPEC.md Экраны 38-40)
+    // — отдельный топик от operator.submit.accepted/operator.dlr: те несут
+    // бизнес-события корреляции (ровно одно на сообщение/сегмент), этот —
+    // КАЖДЫЙ PDU, реально пересечённый по проводу (submit_sm, submit_sm_resp,
+    // deliver_sm, deliver_sm_resp), на порядок выше объём.
+    private static final String PDU_LOG_TOPIC = "operator.pdu.log";
 
     // 10с — как и в billing-service/partner-smpp-gateway (тот же класс риска,
     // см. ниже).
@@ -64,6 +71,12 @@ public final class OperatorEventPublisher {
 
     public Future<?> publishDlr(OperatorDlr event) {
         return producer.send(new ProducerRecord<>(DLR_TOPIC, event.getOperatorId(), event.toByteArray()));
+    }
+
+    // Ключевание по operator_id — тот же принцип, что publishSubmitAccepted/
+    // publishDlr выше (service_io_contracts.md "Ключевание").
+    public Future<?> publishPduLog(OperatorPduLog event) {
+        return producer.send(new ProducerRecord<>(PDU_LOG_TOPIC, event.getOperatorId(), event.toByteArray()));
     }
 
     public void close() {

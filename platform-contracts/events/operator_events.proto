@@ -40,3 +40,53 @@ message OperatorDlr {
   string raw_status = 5;
   google.protobuf.Timestamp received_at = 6;
 }
+
+// Направление PDU относительно оператора — не бизнес-направление трафика
+// (P2A сегодня не существует нигде в пайплайне, см. BACKOFFICE_ROADMAP.md
+// "P2A" план), а то, какому бизнес-потоку принадлежит конкретный PDU:
+// A2P — исходящий MT (submit_sm/submit_sm_resp), DLR — доставочная квитанция
+// (deliver_sm/deliver_sm_resp).
+enum PduDirection {
+  PDU_DIRECTION_UNSPECIFIED = 0;
+  PDU_DIRECTION_A2P = 1;
+  PDU_DIRECTION_DLR = 2;
+}
+
+// Один реально пересечённый по проводу с оператором PDU — публикуется
+// Operator SMPP Session Manager'ом в operator.pdu.log для per-PDU
+// диагностики (BACKOFFICE_DESIGN_SPEC.md Экраны 38-40, "Raw" вкладка
+// карточки сообщения). НЕ заменяет OperatorSubmitAccepted/OperatorDlr —
+// это отдельный, чисто диагностический след (submit_sm, submit_sm_resp,
+// deliver_sm, deliver_sm_resp), а не источник бизнес-корреляции DLR
+// (та по-прежнему идёт через dlr.dlr_correlation/smsc_message_id, см.
+// DeliveryReceiptParser javadoc).
+message OperatorPduLog {
+  string operator_id = 1;
+  mpp.common.v1.Protocol protocol = 2;
+  PduDirection direction = 3;
+  // "SUBMIT_SM" | "SUBMIT_SM_RESP" | "DELIVER_SM" | "DELIVER_SM_RESP"
+  // (см. codec.CommandId.name()).
+  string pdu_type = 4;
+  // SMPP header sequence_number — единственный ключ, который в рамках
+  // ОДНОЙ живой SMPP-сессии связывает submit_sm с его submit_sm_resp
+  // (тот же принцип, что уже использует OperatorSmppClientHandler.
+  // pendingResponses); НЕ уникален глобально и переиспользуется по кругу.
+  int32 sequence_number = 5;
+  // message_id/stage_execution_id — известны сразу для A2P-направления
+  // (submit_sm/submit_sm_resp: SubmitRequest уже несёт их), но НЕ известны
+  // на уровне DLR-PDU (deliver_sm/_resp) — единственный ключ там
+  // smsc_message_id, dlr-manager делает join позже через
+  // dlr.dlr_correlation. Пустая строка для DLR-направления — не баг, тот
+  // же архитектурный барьер, что уже задокументирован у OperatorDlr.
+  string message_id = 6;
+  string stage_execution_id = 7;
+  string smsc_message_id = 8;
+  // Односегментное упрощение, уже принятое в остальном сервисе (см.
+  // OperatorSubmitServer.dispatchOne) — не вносится этой правкой заново.
+  int32 segment_id = 9;
+  // "OK" / "0x<hex command_status>" для submit_sm_resp; сырой SMPP DLR
+  // stat (DELIVRD/EXPIRED/...) для deliver_sm; пусто для submit_sm
+  // (запрос, статуса ещё нет) и deliver_sm_resp (всегда ESME_ROK ack).
+  string status = 10;
+  google.protobuf.Timestamp occurred_at = 11;
+}

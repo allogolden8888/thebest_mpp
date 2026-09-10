@@ -9,6 +9,7 @@ import uz.mpp.operatorsmpp.core.AdaptiveThreadPoolCalibrator;
 import uz.mpp.operatorsmpp.core.AdaptiveThreadPoolCalibrator.ResizableSemaphore;
 import uz.mpp.operatorsmpp.core.DeliveryReceiptParser;
 import uz.mpp.operatorsmpp.core.PacerCore;
+import uz.mpp.operatorsmpp.core.PduLogEvent;
 import uz.mpp.operatorsmpp.core.PacerMetrics;
 import uz.mpp.operatorsmpp.core.PriorityGate;
 import uz.mpp.operatorsmpp.core.PriorityTier;
@@ -21,6 +22,8 @@ import uz.mpp.operatorsmpp.kafkaio.OperatorEventPublisher;
 import uz.mpp.operatorsmpp.registry.OperatorRouteRegistry;
 import uz.mpp.platformcontracts.common.v1.Protocol;
 import uz.mpp.platformcontracts.events.v1.OperatorDlr;
+import uz.mpp.platformcontracts.events.v1.OperatorPduLog;
+import uz.mpp.platformcontracts.events.v1.PduDirection;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -33,6 +36,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 /**
  * Operator SMPP Session Manager (services_specifictaion.md §2.3) — SMPP
@@ -56,6 +60,29 @@ public final class Main {
 
         String redisUri = RedisUrl.buildRuntimeUrl();
         OperatorRouteRegistry routeRegistry = new OperatorRouteRegistry(redisUri, env("HOSTNAME", "operator-smpp-session-manager-0"), Duration.ofSeconds(30));
+
+        // per-PDU диагностический след (BACKOFFICE_DESIGN_SPEC.md Экраны
+        // 38-40) — построение OperatorPduLog остаётся здесь (Main.java), не
+        // в client/codec-слое, тем же принципом, что и dlrSink ниже: тот
+        // слой видит только сырые SMPP-структуры (PduLogEvent), протобуф и
+        // Kafka-топик — забота этого файла.
+        Consumer<PduLogEvent> pduLogSink = pduEvent -> {
+            OperatorPduLog log = OperatorPduLog.newBuilder()
+                .setOperatorId(operatorId)
+                .setProtocol(Protocol.PROTOCOL_SMPP)
+                .setDirection(PduLogEvent.DIRECTION_A2P.equals(pduEvent.direction())
+                    ? PduDirection.PDU_DIRECTION_A2P : PduDirection.PDU_DIRECTION_DLR)
+                .setPduType(pduEvent.pduType())
+                .setSequenceNumber(pduEvent.sequenceNumber())
+                .setMessageId(pduEvent.messageId())
+                .setStageExecutionId(pduEvent.stageExecutionId())
+                .setSmscMessageId(pduEvent.smscMessageId())
+                .setSegmentId(1)
+                .setStatus(pduEvent.status())
+                .setOccurredAt(toTimestamp(pduEvent.occurredAt()))
+                .build();
+            eventPublisher.publishPduLog(log);
+        };
 
         OperatorSmppClient client = new OperatorSmppClient(dlrPdu -> {
             String rawReceipt = new String(dlrPdu.shortMessage());
@@ -95,7 +122,7 @@ public final class Main {
                 .setReceivedAt(toTimestamp(Instant.now()))
                 .build();
             eventPublisher.publishDlr(dlr);
-        });
+        }, pduLogSink);
 
         // --- Priority-tier scheduler (пейсер) ---
         double tpsLimit = Double.parseDouble(env("TPS_LIMIT", "500"));

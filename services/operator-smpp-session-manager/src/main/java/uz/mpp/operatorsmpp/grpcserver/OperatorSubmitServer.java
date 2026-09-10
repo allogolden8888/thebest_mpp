@@ -140,7 +140,7 @@ public final class OperatorSubmitServer extends OperatorSubmitServiceGrpc.Operat
 
                 Pdu resp;
                 try {
-                    resp = client.submitSm(body, submitTimeoutMs);
+                    resp = client.submitSm(body, submitTimeoutMs, request.getMessageId(), request.getStageExecutionId());
                 } catch (TimeoutException e) {
                     reply(responseObserver, SubmitOutcomeStatus.SUBMIT_OUTCOME_STATUS_AMBIGUOUS, "", "SUBMIT_TIMEOUT");
                     return;

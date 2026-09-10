@@ -10,8 +10,10 @@ import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import uz.mpp.operatorsmpp.codec.*;
+import uz.mpp.operatorsmpp.core.PduLogEvent;
 import uz.mpp.operatorsmpp.session.SequenceNumberGenerator;
 
+import java.time.Instant;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
@@ -26,13 +28,22 @@ public final class OperatorSmppClient {
 
     private final SequenceNumberGenerator sequenceNumberGenerator = new SequenceNumberGenerator();
     private final Consumer<ShortMessagePdu> dlrSink;
+    // per-PDU диагностический след (BACKOFFICE_DESIGN_SPEC.md Экраны 38-40) —
+    // отдельный sink от dlrSink: тот несёт только бизнес-DLR (deliver_sm),
+    // этот — КАЖДЫЙ submit_sm/submit_sm_resp, реально ушедший на wire.
+    private final Consumer<PduLogEvent> pduLogSink;
 
     private EventLoopGroup group;
     private Channel channel;
     private OperatorSmppClientHandler handler;
 
     public OperatorSmppClient(Consumer<ShortMessagePdu> dlrSink) {
+        this(dlrSink, null);
+    }
+
+    public OperatorSmppClient(Consumer<ShortMessagePdu> dlrSink, Consumer<PduLogEvent> pduLogSink) {
         this.dlrSink = dlrSink;
+        this.pduLogSink = pduLogSink;
     }
 
     /**
@@ -51,7 +62,7 @@ public final class OperatorSmppClient {
 
         EventLoopGroup newGroup = new NioEventLoopGroup();
         group = newGroup;
-        handler = new OperatorSmppClientHandler(dlrSink);
+        handler = new OperatorSmppClientHandler(dlrSink, pduLogSink);
 
         Bootstrap bootstrap = new Bootstrap();
         bootstrap.group(group)
@@ -99,12 +110,46 @@ public final class OperatorSmppClient {
         return await(future);
     }
 
-    /** send_submit_sm — публикует segment оператору, ждёт submit_sm_resp. */
+    /** send_submit_sm — публикует segment оператору, ждёт submit_sm_resp. Без per-PDU корреляции с сообщением (тесты/внутренние вызовы) — messageId/stageExecutionId пустые в pduLogSink. */
     public Pdu submitSm(ShortMessagePdu body, long timeoutMs) throws Exception {
+        return submitSm(body, timeoutMs, "", "");
+    }
+
+    /**
+     * send_submit_sm с messageId/stageExecutionId для per-PDU лога
+     * (BACKOFFICE_DESIGN_SPEC.md Экраны 38-40) — вызывается из
+     * {@code OperatorSubmitServer.dispatchOne}, который единственный на
+     * этом уровне знает исходный {@code message_id}. sequence_number
+     * генерируется здесь же (не выше) — это единственное место, которое
+     * реально видит и момент отправки submit_sm, и момент получения
+     * submit_sm_resp на один и тот же seq.
+     */
+    public Pdu submitSm(ShortMessagePdu body, long timeoutMs, String messageId, String stageExecutionId) throws Exception {
         int seq = sequenceNumberGenerator.next();
+        if (pduLogSink != null) {
+            pduLogSink.accept(new PduLogEvent(PduLogEvent.DIRECTION_A2P, CommandId.name(CommandId.SUBMIT_SM),
+                seq, messageId, stageExecutionId, "", "", Instant.now()));
+        }
         CompletableFuture<Pdu> future = handler.expectResponse(seq, timeoutMs);
         write(Pdu.withBody(CommandId.SUBMIT_SM, CommandStatus.ESME_ROK, seq, body));
-        return await(future);
+        try {
+            Pdu resp = await(future);
+            if (pduLogSink != null) {
+                String smscMessageId = resp.header().commandStatus() == CommandStatus.ESME_ROK
+                    ? ((ShortMessagePduResp) resp.body()).messageId() : "";
+                String status = resp.header().commandStatus() == CommandStatus.ESME_ROK
+                    ? "OK" : "0x" + Integer.toHexString(resp.header().commandStatus());
+                pduLogSink.accept(new PduLogEvent(PduLogEvent.DIRECTION_A2P, CommandId.name(CommandId.SUBMIT_SM_RESP),
+                    seq, messageId, stageExecutionId, smscMessageId, status, Instant.now()));
+            }
+            return resp;
+        } catch (TimeoutException e) {
+            if (pduLogSink != null) {
+                pduLogSink.accept(new PduLogEvent(PduLogEvent.DIRECTION_A2P, CommandId.name(CommandId.SUBMIT_SM_RESP),
+                    seq, messageId, stageExecutionId, "", "TIMEOUT", Instant.now()));
+            }
+            throw e;
+        }
     }
 
     /** enquire_link_tick — таймер поддержания соединения. */

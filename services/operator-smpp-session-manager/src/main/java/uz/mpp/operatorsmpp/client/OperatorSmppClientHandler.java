@@ -5,7 +5,10 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import uz.mpp.operatorsmpp.codec.*;
+import uz.mpp.operatorsmpp.core.DeliveryReceiptParser;
+import uz.mpp.operatorsmpp.core.PduLogEvent;
 
+import java.time.Instant;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -21,9 +24,19 @@ public final class OperatorSmppClientHandler extends SimpleChannelInboundHandler
 
     private final Map<Integer, CompletableFuture<Pdu>> pendingResponses = new ConcurrentHashMap<>();
     private final Consumer<ShortMessagePdu> dlrSink;
+    // per-PDU диагностический след (BACKOFFICE_DESIGN_SPEC.md Экраны 38-40) —
+    // отдельный от dlrSink, который несёт только бизнес-DLR: этот получает
+    // КАЖДЫЙ deliver_sm/deliver_sm_resp, реально пришедший/ушедший на wire,
+    // включая сырой SMPP stat (DELIVRD/EXPIRED/...) до нормализации.
+    private final Consumer<PduLogEvent> pduLogSink;
 
     public OperatorSmppClientHandler(Consumer<ShortMessagePdu> dlrSink) {
+        this(dlrSink, null);
+    }
+
+    public OperatorSmppClientHandler(Consumer<ShortMessagePdu> dlrSink, Consumer<PduLogEvent> pduLogSink) {
         this.dlrSink = dlrSink;
+        this.pduLogSink = pduLogSink;
     }
 
     /**
@@ -60,10 +73,25 @@ public final class OperatorSmppClientHandler extends SimpleChannelInboundHandler
 
         if (commandId == CommandId.DELIVER_SM) {
             // DLR (или MO) от оператора — handle_raw_dlr.
+            ShortMessagePdu deliverBody = (ShortMessagePdu) pdu.body();
+            if (pduLogSink != null) {
+                // Тот же разбор, что и в Main.java dlrSink — только для
+                // диагностического следа (per-PDU лог не влияет на
+                // бизнес-корреляцию, та по-прежнему считается отдельно
+                // в Main.java лямбде dlrSink).
+                String rawReceipt = new String(deliverBody.shortMessage());
+                pduLogSink.accept(new PduLogEvent(PduLogEvent.DIRECTION_DLR, CommandId.name(CommandId.DELIVER_SM),
+                    seq, "", "", DeliveryReceiptParser.extractSmscMessageId(rawReceipt),
+                    DeliveryReceiptParser.extractStatus(rawReceipt), Instant.now()));
+            }
             if (dlrSink != null) {
-                dlrSink.accept((ShortMessagePdu) pdu.body());
+                dlrSink.accept(deliverBody);
             }
             respond(ctx, CommandId.DELIVER_SM_RESP, CommandStatus.ESME_ROK, seq, new ShortMessagePduResp(""));
+            if (pduLogSink != null) {
+                pduLogSink.accept(new PduLogEvent(PduLogEvent.DIRECTION_DLR, CommandId.name(CommandId.DELIVER_SM_RESP),
+                    seq, "", "", "", "OK", Instant.now()));
+            }
             return;
         }
 

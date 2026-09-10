@@ -7,7 +7,9 @@ import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.jupiter.api.Test;
 import uz.mpp.platformcontracts.common.v1.Protocol;
 import uz.mpp.platformcontracts.events.v1.OperatorDlr;
+import uz.mpp.platformcontracts.events.v1.OperatorPduLog;
 import uz.mpp.platformcontracts.events.v1.OperatorSubmitAccepted;
+import uz.mpp.platformcontracts.events.v1.PduDirection;
 
 import java.util.List;
 
@@ -50,5 +52,24 @@ class OperatorEventPublisherTest {
         assertEquals(1, history.size());
         assertEquals("operator.dlr", history.get(0).topic());
         assertEquals("ucell_uz", history.get(0).key());
+    }
+
+    @Test
+    void publishPduLogKeyedByOperatorId() throws Exception {
+        MockProducer<String, byte[]> mock = newMockProducer();
+        OperatorEventPublisher publisher = new OperatorEventPublisher(mock);
+
+        OperatorPduLog event = OperatorPduLog.newBuilder()
+            .setOperatorId("beeline_uz").setProtocol(Protocol.PROTOCOL_SMPP)
+            .setDirection(PduDirection.PDU_DIRECTION_A2P).setPduType("SUBMIT_SM")
+            .setSequenceNumber(42).setMessageId("msg-1")
+            .build();
+        publisher.publishPduLog(event).get();
+
+        List<ProducerRecord<String, byte[]>> history = mock.history();
+        assertEquals(1, history.size());
+        assertEquals("operator.pdu.log", history.get(0).topic());
+        assertEquals("beeline_uz", history.get(0).key());
+        assertEquals(event, OperatorPduLog.parseFrom(history.get(0).value()));
     }
 }

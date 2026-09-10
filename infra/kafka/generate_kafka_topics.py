@@ -104,6 +104,12 @@ TOPICS = [
     Topic("operator.submit.accepted", TopicCategory.WORKLOAD, ["dlr-correlation-writer"], 24 * HOUR),
     Topic("operator.dlr", TopicCategory.WORKLOAD, ["dlr-manager"], 24 * HOUR),
     Topic("operator.dlr.unresolved", TopicCategory.WORKLOAD, ["dlr-manager"], 24 * HOUR),
+    Topic("operator.pdu.log", TopicCategory.WORKLOAD, ["pdu-log-writer"], 24 * HOUR,
+          note="BACKOFFICE_DESIGN_SPEC.md Экраны 38-40 — per-PDU диагностический след "
+               "(submit_sm/submit_sm_resp/deliver_sm/deliver_sm_resp), публикует "
+               "operator-smpp-session-manager; на порядок выше объём, чем operator.submit.accepted/"
+               "operator.dlr (по PDU, не по сообщению/DLR), но та же 24ч retention — чисто "
+               "диагностические данные, не бизнес-корреляция"),
     Topic("notification.retry", TopicCategory.WORKLOAD, ["partner-notification-service"], 24 * HOUR),
     Topic("billing.ledger", TopicCategory.WORKLOAD, ["billing-ledger-writer"], 24 * HOUR),
     Topic("scheduler.standard.commands", TopicCategory.WORKLOAD, ["scheduler-standard-lane"], 24 * HOUR),
