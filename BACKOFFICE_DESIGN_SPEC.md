@@ -641,7 +641,7 @@ Base URL: `/v1` · Auth: `Authorization: Bearer <JWT>` · Все таймста�
 
 ## Экран 41. Guides / Guide management
 
-**Статус: ❌ ничего похожего нет, малый объём, но с нуля.** Статический контент-CMS для встроенной в админку справки — не пересекается ни с одной существующей сущностью платформы.
+**Статус: ✅ есть (только админская сторона).** Тот же generic config-version путь, что Categories/CTN (`entity_type=CONFIG_ENTITY_TYPE_GUIDE`, `entity_id`=slug, payload `{title, body_markdown, category}`), экран `GuidesView.vue` — форма (title/slug/category/body_markdown) + список + архивация, slug выводится из title автоматически с возможностью ручного переопределения. Markdown — обычный textarea без live-превью (в зависимостях `backoffice-ui` нет markdown-рендерера, новую библиотеку ради необязательного превью не тянули). **Открытый вопрос, специально не решён**: показ опубликованных гайдов партнёрам где-либо в `partner-portal-ui` — это ТОЛЬКО админский экран управления контентом, партнёрская сторона не построена и не считается закрытой.
 
 ---
 
@@ -668,7 +668,7 @@ Base URL: `/v1` · Auth: `Authorization: Bearer <JWT>` · Все таймста�
 | 17 | Модерация шаблонов, batch/comments-паттерн (экран 25) | тот же backend, что #11 | нет |
 | 18 | MT Sessions Disconnect (write-путь, экран 30) | не оценено, новый метод в operator-smpp-session-manager | нет |
 | 19 | Chat админ↔партнёр (экран 27) | не оценено, реальная новая фича | **да, если нужен** |
-| 20 | Guides/Guide management CMS (экран 41) | не оценено | нет |
+| 20 | ~~Guides/Guide management CMS (экран 41)~~ ✅ готово (только админская сторона) | 0 backend, generic config-version | нет |
 
 **Решено пользователем (luminous-hugging-charm.md):**
 - CTN (экран 23) — нужен, реальная сущность для офлайн-биллинга. ✅ реализовано.
