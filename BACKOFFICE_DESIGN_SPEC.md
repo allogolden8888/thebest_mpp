@@ -617,7 +617,7 @@ Base URL: `/v1` · Auth: `Authorization: Bearer <JWT>` · Все таймста�
 
 ## Экран 33. Admin users
 
-**Статус: ⚠️ обсудить, вероятно уже закрыто Экраном 16.** Сегодняшняя IAM целиком на Keycloak JWT (`external_id` = Keycloak `sub`), не LDAP/Active Directory. Строить LDAP-интеграцию — самостоятельное архитектурное решение (новый auth provider), не эндпоинт. Скорее всего нужен не буквально LDAP, а список сотрудников платформы с их ролями — это уже есть (Экран 16 Users & Roles) — уточнить, действительно ли нужен именно LDAP, прежде чем оценивать это как работу.
+**Статус: ✅ есть.** Пользователь подтвердил: LDAP не нужен, нужно полноценное локальное управление аккаунтами (логин/пароль прямо из бэкофиса), реальный Keycloak — сильно позже. Новая таблица `iam.staff_accounts` (username/password_hash/display_name/active), новые RPC в `IamService` (`CreateStaffAccount`/`ListStaffAccounts`/`DeactivateStaffAccount`/`VerifyStaffCredentials`, bcrypt внутри `iam-service`, хеш никогда не покидает процесс), новый `POST /v1/auth/login` в `backoffice-api` (единственный маршрут без JWT-проверки, подписывает токен отдельным от общих self-service API RSA-keypair'ом), `LoginView.vue` (форма вместо прежнего "вставь JWT в textarea") + `AdminUsersView.vue`. Роли новым сотрудникам назначаются отдельно, на уже существующем экране "Users & Roles" (Экран 16) — этот экран только про сам аккаунт. Живьём проверено: создать сотрудника → залогиниться → получить рабочий JWT → деактивировать → повторный логин отклонён.
 
 ## Экран 34. Roles
 
