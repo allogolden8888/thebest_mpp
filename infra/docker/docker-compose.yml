@@ -313,7 +313,7 @@ services:
       # который идёт весь полезный трафик.
       # Значение оставлено env-переключаемым СОЗНАТЕЛЬНО: эффект надо мерить
       # A/B на одном образе, а не сравнением двух сборок.
-      PIPELINE_COMMIT_INTERVAL_MS: "0"
+      PIPELINE_COMMIT_INTERVAL_MS: "${PIPELINE_COMMIT_INTERVAL_MS:-0}"
       PIPELINE_INCOMING_CONCURRENCY: "384"
       PIPELINE_COMPLETED_CONCURRENCY: "384"
       PIPELINE_RETRY_TRIGGER_CONCURRENCY: "128"
