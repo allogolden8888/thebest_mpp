@@ -25,7 +25,7 @@ use crate::policy_engine::{self, MessageContext, PolicyOutcome, PolicyRulesetCon
 use crate::proto::stage_completed_event::StageResult;
 use crate::proto::stage_execute_command::StageExtension;
 use crate::proto::{Outcome, PolicyResult, StageCompletedEvent, StageExecuteCommand};
-use crate::template_matching::CompiledRuleset;
+use crate::template_matching::{CompiledRuleset, PlaceholderRegistry};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use chrono::{FixedOffset, Utc};
@@ -229,11 +229,12 @@ pub fn handle_command(
     ctx: &MessageContext,
     ruleset: &PolicyRulesetConfig,
     templates: &CompiledRuleset,
+    placeholders: &PlaceholderRegistry,
     banwords: &BanwordChecker,
     runtime: &mut RuntimeState,
     now: chrono::NaiveDateTime,
 ) -> StageCompletedEvent {
-    let outcome = policy_engine::evaluate_policy(ctx, ruleset, templates, banwords, runtime, now);
+    let outcome = policy_engine::evaluate_policy(ctx, ruleset, templates, placeholders, banwords, runtime, now);
     build_event(command, outcome)
 }
 
@@ -338,7 +339,7 @@ async fn process_one_record(
 
     let event = {
         let mut runtime = runtime.lock_for(&ctx.msisdn);
-        handle_command(&command, &ctx, &policy.ruleset, &policy.templates, &policy.banwords, &mut runtime, now_tashkent())
+        handle_command(&command, &ctx, &policy.ruleset, &policy.templates, &policy.placeholders, &policy.banwords, &mut runtime, now_tashkent())
     };
 
     publish_event(producer, &event).await
@@ -468,7 +469,7 @@ mod tests {
         }
     }
 
-    fn env() -> (PolicyRulesetConfig, CompiledRuleset, BanwordChecker, RuntimeState) {
+    fn env() -> (PolicyRulesetConfig, CompiledRuleset, PlaceholderRegistry, BanwordChecker, RuntimeState) {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config_schemas/examples/policy_ruleset.valid.json");
         let json_str = std::fs::read_to_string(&path).unwrap();
         let ruleset = PolicyRulesetConfig::from_config_schema_json(&json_str);
@@ -479,19 +480,22 @@ mod tests {
             sender_id: None,
         };
         let templates = CompiledRuleset::new(vec![template]);
+        // Пустой реестр — эти тесты про StageCompletedEvent-обвязку
+        // (sandbox/stage_execution_id/outcome-коды), не про Экран 36.
+        let placeholders = PlaceholderRegistry::default();
         let banwords = BanwordChecker::new(&ruleset.banwords);
-        (ruleset, templates, banwords, RuntimeState::default())
+        (ruleset, templates, placeholders, banwords, RuntimeState::default())
     }
 
     #[test]
     fn resolved_match_produces_succeeded_with_category() {
-        let (ruleset, templates, banwords, mut runtime) = env();
+        let (ruleset, templates, placeholders, banwords, mut runtime) = env();
         let ctx = MessageContext {
             msisdn: "998901331835".into(),
             sender_id: "Click".into(),
             body: "Hello1238!@* shartnoma bo'yicha 123456 so'm to'lovni bugun amalga oshiring".into(),
         };
-        let event = handle_command(&command("m1"), &ctx, &ruleset, &templates, &banwords, &mut runtime, test_now());
+        let event = handle_command(&command("m1"), &ctx, &ruleset, &templates, &placeholders, &banwords, &mut runtime, test_now());
         assert_eq!(event.outcome, Outcome::Succeeded as i32);
         match event.stage_result {
             Some(StageResult::Policy(r)) => assert_eq!(r.category, "TRANSACTION"),
@@ -504,7 +508,7 @@ mod tests {
     /// эхо command.sandbox, не пересчитывается заново.
     #[test]
     fn sandbox_flag_is_echoed_from_command_into_event() {
-        let (ruleset, templates, banwords, mut runtime) = env();
+        let (ruleset, templates, placeholders, banwords, mut runtime) = env();
         let ctx = MessageContext {
             msisdn: "998901331835".into(),
             sender_id: "Click".into(),
@@ -512,15 +516,15 @@ mod tests {
         };
         let mut sandbox_command = command("m1");
         sandbox_command.sandbox = true;
-        let event = handle_command(&sandbox_command, &ctx, &ruleset, &templates, &banwords, &mut runtime, test_now());
+        let event = handle_command(&sandbox_command, &ctx, &ruleset, &templates, &placeholders, &banwords, &mut runtime, test_now());
         assert!(event.sandbox, "sandbox=true в команде обязан попасть в событие");
     }
 
     #[test]
     fn rejected_carries_blocked_category_and_reason() {
-        let (ruleset, templates, banwords, mut runtime) = env();
+        let (ruleset, templates, placeholders, banwords, mut runtime) = env();
         let ctx = MessageContext { msisdn: "998901331835".into(), sender_id: "NotClick".into(), body: "irrelevant".into() };
-        let event = handle_command(&command("m2"), &ctx, &ruleset, &templates, &banwords, &mut runtime, test_now());
+        let event = handle_command(&command("m2"), &ctx, &ruleset, &templates, &placeholders, &banwords, &mut runtime, test_now());
         assert_eq!(event.outcome, Outcome::Rejected as i32);
         assert_eq!(event.reason_code, "INVALID_SENDER");
         match event.stage_result {
@@ -531,9 +535,9 @@ mod tests {
 
     #[test]
     fn stage_execution_id_propagates_for_idempotency() {
-        let (ruleset, templates, banwords, mut runtime) = env();
+        let (ruleset, templates, placeholders, banwords, mut runtime) = env();
         let ctx = MessageContext { msisdn: "998901331835".into(), sender_id: "Click".into(), body: "irrelevant".into() };
-        let event = handle_command(&command("m3"), &ctx, &ruleset, &templates, &banwords, &mut runtime, test_now());
+        let event = handle_command(&command("m3"), &ctx, &ruleset, &templates, &placeholders, &banwords, &mut runtime, test_now());
         assert_eq!(event.stage_execution_id, "se1");
         assert_eq!(event.message_id, "m3");
     }

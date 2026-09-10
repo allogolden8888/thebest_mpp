@@ -3,7 +3,7 @@
 //! для полного обоснования паттерна). Отдельная consumer group от
 //! `stage.policy` — независимые офсеты/партиционирование.
 //!
-//! Два entity_type в одном топике:
+//! Три entity_type в одном топике:
 //! - POLICY_RULESET — единый глобальный слот (last-active-wins), не
 //!   entity_id-keyed overlay: этот сервис не резолвит ruleset по партнёру/
 //!   оператору (та же упрощённая семантика, что уже была у статического
@@ -11,12 +11,19 @@
 //! - POLICY_TEMPLATE — entity_id-keyed overlay (template_id), много записей
 //!   (V022: 6323 реальных шаблонов) — тот же паттерн, что NUMBER_RANGE в
 //!   destination-resolution-service.
+//! - PATTERN_PLACEHOLDER (Экран 36) — entity_id-keyed overlay (entity_id =
+//!   name), тот же паттерн, что POLICY_TEMPLATE выше, просто меньший объём
+//!   payload'а (name/regex/description). Живёт отдельным overlay-map'ом
+//!   (name -> regex-строка), компилируется в `template_matching::PlaceholderRegistry`
+//!   только на `build_live_state` — тот же принцип, что и `CompiledRuleset`
+//!   ниже (Aho-Corasick/regex-компиляция не бесплатны, пересобираются один
+//!   раз на снапшот, не на каждое сообщение).
 
 use crate::banwords::BanwordChecker;
 use crate::policy_engine::PolicyRulesetConfig;
 use crate::proto::ConfigEntityType;
 use crate::proto::events_v1::ConfigChangeEvent;
-use crate::template_matching::{CompiledRuleset, Template};
+use crate::template_matching::{CompiledRuleset, PlaceholderRegistry, Template};
 use arc_swap::ArcSwap;
 use prost::Message;
 use rdkafka::config::ClientConfig;
@@ -29,14 +36,18 @@ use std::sync::{Arc, Mutex};
 pub const TOPIC: &str = "config.changes";
 
 /// Всё, что нужно `handle_command` за один атомарный `ArcSwap::load` —
-/// ruleset/templates/banwords меняются вместе (banwords производный от
-/// ruleset.banwords, templates — от отдельного entity_type), поэтому один
-/// снапшот на троих, не три независимых ArcSwap (иначе одно сообщение могло
-/// бы увидеть новый ruleset, но ещё старые banwords в разных потоках).
+/// ruleset/templates/banwords/placeholders меняются вместе (banwords
+/// производный от ruleset.banwords, templates и placeholders — от отдельных
+/// entity_type), поэтому один снапшот на четверых, не четыре независимых
+/// ArcSwap (иначе одно сообщение могло бы увидеть новый ruleset, но ещё
+/// старые banwords/placeholders в разных потоках).
 pub struct PolicyLiveState {
     pub ruleset: PolicyRulesetConfig,
     pub templates: CompiledRuleset,
     pub banwords: BanwordChecker,
+    /// Экран 36 "Pattern Placeholders" — реестр `%{name}` для
+    /// `CompiledRuleset::find_match_with_placeholders`.
+    pub placeholders: PlaceholderRegistry,
 }
 
 /// Одна запись `config.changes` (entity_type=POLICY_TEMPLATE) —
@@ -59,6 +70,16 @@ struct TemplateConfigPayload {
     sender_id: Option<String>,
 }
 
+/// Одна запись `config.changes` (entity_type=PATTERN_PLACEHOLDER) —
+/// `config_schemas/pattern_placeholder.schema.json`, entity_id = `name`.
+/// `description` игнорируется — чисто для UI бэкофиса, движку матчинга не
+/// нужно.
+#[derive(Debug, Deserialize)]
+struct PlaceholderConfigPayload {
+    regex: String,
+    status: String, // "active" | "archived"
+}
+
 /// Живое состояние policy-конфига поверх статических bootstrap-файлов —
 /// arc-swap был объявлен в Cargo.toml, но никогда не подключался к
 /// реальному Kafka-консьюмеру.
@@ -67,6 +88,12 @@ pub struct ConfigOverlay {
     base_templates: Vec<Template>,
     ruleset_overlay: Mutex<Option<PolicyRulesetConfig>>,
     template_overlay: Mutex<HashMap<String, Template>>,
+    /// Экран 36 — name -> regex-строка (ЕЩЁ не скомпилированная; компиляция
+    /// в `PlaceholderRegistry` происходит один раз на снапшот в
+    /// `build_live_state`, не на каждую запись overlay). Нет "base"-версии
+    /// (в отличие от ruleset/templates) — этот реестр целиком новая сущность
+    /// этого захода, статического bootstrap-файла под неё никогда не было.
+    placeholder_overlay: Mutex<HashMap<String, String>>,
 }
 
 impl ConfigOverlay {
@@ -76,6 +103,7 @@ impl ConfigOverlay {
             base_templates,
             ruleset_overlay: Mutex::new(None),
             template_overlay: Mutex::new(HashMap::new()),
+            placeholder_overlay: Mutex::new(HashMap::new()),
         }
     }
 
@@ -106,6 +134,18 @@ impl ConfigOverlay {
         }
     }
 
+    /// `entity_id` = `name` (см. `config_schemas/pattern_placeholder.schema.json`)
+    /// — тот же принцип, что `apply_template` выше, просто хранит regex-строку,
+    /// не заранее скомпилированный `Regex` (компиляция — на `build_live_state`).
+    fn apply_placeholder(&self, entity_id: &str, payload: &PlaceholderConfigPayload) {
+        let mut overlay = self.placeholder_overlay.lock().expect("placeholder overlay mutex poisoned");
+        if payload.status == "archived" {
+            overlay.remove(entity_id);
+        } else {
+            overlay.insert(entity_id.to_string(), payload.regex.clone());
+        }
+    }
+
     pub fn build_live_state(&self) -> PolicyLiveState {
         let ruleset = self
             .ruleset_overlay
@@ -120,7 +160,10 @@ impl ConfigOverlay {
         templates.extend(self.base_templates.iter().cloned());
         let templates = CompiledRuleset::new(templates);
 
-        PolicyLiveState { ruleset, templates, banwords }
+        let placeholder_defs = self.placeholder_overlay.lock().expect("placeholder overlay mutex poisoned").clone();
+        let placeholders = PlaceholderRegistry::new(&placeholder_defs);
+
+        PolicyLiveState { ruleset, templates, banwords, placeholders }
     }
 }
 
@@ -159,8 +202,8 @@ pub fn build_config_consumer(bootstrap_servers: &str, group_id: &str) -> StreamC
 }
 
 /// Ядро обработки одного `ConfigChangeEvent` — тестируется без брокера.
-/// Возвращает `true`, если событие относилось к POLICY_RULESET/POLICY_TEMPLATE
-/// и применилось успешно (снапшот нужно пересобрать).
+/// Возвращает `true`, если событие относилось к POLICY_RULESET/POLICY_TEMPLATE/
+/// PATTERN_PLACEHOLDER и применилось успешно (снапшот нужно пересобрать).
 pub fn handle_config_change(overlay: &ConfigOverlay, event: &ConfigChangeEvent) -> bool {
     if event.entity_type == ConfigEntityType::PolicyRuleset as i32 {
         match overlay.apply_ruleset(&event.payload_json) {
@@ -182,6 +225,20 @@ pub fn handle_config_change(overlay: &ConfigOverlay, event: &ConfigChangeEvent) 
             Err(e) => {
                 tracing::error!(
                     "config.changes: entity_id={} payload_json не парсится как policy_template: {e}",
+                    event.entity_id
+                );
+                false
+            }
+        }
+    } else if event.entity_type == ConfigEntityType::PatternPlaceholder as i32 {
+        match serde_json::from_slice::<PlaceholderConfigPayload>(&event.payload_json) {
+            Ok(payload) => {
+                overlay.apply_placeholder(&event.entity_id, &payload);
+                true
+            }
+            Err(e) => {
+                tracing::error!(
+                    "config.changes: entity_id={} payload_json не парсится как pattern_placeholder: {e}",
                     event.entity_id
                 );
                 false
@@ -285,6 +342,25 @@ mod tests {
         ConfigChangeEvent {
             entity_type: ConfigEntityType::PolicyTemplate as i32,
             entity_id: entity_id.to_string(),
+            version: 1,
+            payload_json: serde_json::to_vec(&payload).unwrap(),
+            status: status.to_string(),
+            created_at: None,
+        }
+    }
+
+    /// Экран 36 — `config_schemas/pattern_placeholder.schema.json`,
+    /// entity_id = name (тот же принцип, что `template_event` выше для
+    /// POLICY_TEMPLATE).
+    fn placeholder_event(name: &str, regex: &str, status: &str) -> ConfigChangeEvent {
+        let payload = serde_json::json!({
+            "name": name,
+            "regex": regex,
+            "status": status,
+        });
+        ConfigChangeEvent {
+            entity_type: ConfigEntityType::PatternPlaceholder as i32,
+            entity_id: name.to_string(),
             version: 1,
             payload_json: serde_json::to_vec(&payload).unwrap(),
             status: status.to_string(),
@@ -396,5 +472,94 @@ mod tests {
         let mut event = template_event("tpl-new", "SERVICE", "%w x", "active");
         event.payload_json = b"{not valid json".to_vec();
         assert!(!handle_config_change(&overlay, &event));
+    }
+
+    // ------------------------------------------------------------------
+    // Экран 36 "Pattern Placeholders" — hot-reload реестра `%{name}`,
+    // тот же паттерн, что уже проверен выше для POLICY_TEMPLATE
+    // (template_event_adds_a_new_matchable_template и соседние).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn placeholder_event_makes_named_placeholder_matchable() {
+        let overlay = overlay();
+        let template_with_placeholder = template_event("tpl-otp", "SERVICE", "your code is %{otp_code} thanks", "active");
+        assert!(handle_config_change(&overlay, &template_with_placeholder));
+
+        // До регистрации самого плейсхолдера в реестре — шаблон с %{otp_code}
+        // не может смачиться (fail closed, имя ещё не известно).
+        let state = overlay.build_live_state();
+        assert!(
+            state.templates.find_match_with_placeholders("your code is 482913 thanks", "any-sender", &state.placeholders).is_none(),
+            "otp_code ещё не зарегистрирован в реестре — non-match, не паника"
+        );
+
+        assert!(handle_config_change(&overlay, &placeholder_event("otp_code", r"\d{6}", "active")));
+        let state = overlay.build_live_state();
+        let matched = state
+            .templates
+            .find_match_with_placeholders("your code is 482913 thanks", "any-sender", &state.placeholders)
+            .expect("otp_code теперь в реестре — должно смачиться");
+        assert_eq!(matched.category, "SERVICE");
+        assert_eq!(matched.extracted_values.get("otp_code"), Some(&"482913".to_string()));
+    }
+
+    #[test]
+    fn placeholder_event_archived_removes_it_from_the_registry() {
+        let overlay = overlay();
+        handle_config_change(&overlay, &template_event("tpl-otp", "SERVICE", "code %{otp_code} end", "active"));
+        handle_config_change(&overlay, &placeholder_event("otp_code", r"\d{6}", "active"));
+        let state = overlay.build_live_state();
+        assert!(state.templates.find_match_with_placeholders("code 482913 end", "any-sender", &state.placeholders).is_some());
+
+        handle_config_change(&overlay, &placeholder_event("otp_code", r"\d{6}", "archived"));
+        let state = overlay.build_live_state();
+        assert!(
+            state.templates.find_match_with_placeholders("code 482913 end", "any-sender", &state.placeholders).is_none(),
+            "archived должен убрать имя из реестра — тот же fail closed, что и для никогда не существовавшего имени"
+        );
+    }
+
+    #[test]
+    fn placeholder_event_updates_regex_for_existing_name_on_reregistration() {
+        // Тот же entity_id (name), новое значение regex — overlay
+        // перезаписывает, не накапливает (тот же принцип HashMap::insert,
+        // что apply_template для POLICY_TEMPLATE).
+        let overlay = overlay();
+        handle_config_change(&overlay, &template_event("tpl-otp", "SERVICE", "code %{otp_code} end", "active"));
+        handle_config_change(&overlay, &placeholder_event("otp_code", r"\d{6}", "active"));
+        let state = overlay.build_live_state();
+        assert!(state.templates.find_match_with_placeholders("code 482913 end", "any-sender", &state.placeholders).is_some());
+
+        // Сужаем до ровно 4 цифр — старое 6-значное значение больше не должно подходить.
+        handle_config_change(&overlay, &placeholder_event("otp_code", r"\d{4}", "active"));
+        let state = overlay.build_live_state();
+        assert!(state.templates.find_match_with_placeholders("code 482913 end", "any-sender", &state.placeholders).is_none());
+        assert!(state.templates.find_match_with_placeholders("code 4829 end", "any-sender", &state.placeholders).is_some());
+    }
+
+    #[test]
+    fn malformed_placeholder_payload_is_rejected_not_panicking() {
+        let overlay = overlay();
+        let mut event = placeholder_event("otp_code", r"\d{6}", "active");
+        event.payload_json = b"{not valid json".to_vec();
+        assert!(!handle_config_change(&overlay, &event));
+    }
+
+    #[test]
+    fn invalid_regex_in_placeholder_event_does_not_panic_the_reload_loop() {
+        // handle_config_change сам по себе успешен (JSON распарсился) —
+        // невалидность СОДЕРЖИМОГО regex обнаруживается позже, внутри
+        // PlaceholderRegistry::new на build_live_state (компиляция, не
+        // JSON-парсинг). Оба шага обязаны пережить это без паники, а
+        // результат неотличим от "имени вообще нет в реестре" (fail closed).
+        let overlay = overlay();
+        assert!(handle_config_change(&overlay, &placeholder_event("broken", "(", "active")));
+        handle_config_change(&overlay, &template_event("tpl-broken", "SERVICE", "code %{broken} end", "active"));
+        let state = overlay.build_live_state();
+        assert!(
+            state.templates.find_match_with_placeholders("code 12345 end", "any-sender", &state.placeholders).is_none(),
+            "PlaceholderRegistry::new пропускает невалидный regex — build_live_state не паникует, %{{broken}} просто никогда не матчится"
+        );
     }
 }

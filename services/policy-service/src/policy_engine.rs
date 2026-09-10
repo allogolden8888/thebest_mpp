@@ -12,7 +12,7 @@
 //! кросс-артефактная проверка согласованности, что в Python-оркестраторе.
 
 use crate::banwords::BanwordChecker;
-use crate::template_matching::CompiledRuleset;
+use crate::template_matching::{CompiledRuleset, PlaceholderRegistry};
 use chrono::{NaiveDateTime, NaiveTime};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -186,6 +186,7 @@ pub fn evaluate_policy(
     ctx: &MessageContext,
     ruleset: &PolicyRulesetConfig,
     templates: &CompiledRuleset,
+    placeholders: &PlaceholderRegistry,
     banword_checker: &BanwordChecker,
     runtime: &mut RuntimeState,
     now: NaiveDateTime,
@@ -200,9 +201,26 @@ pub fn evaluate_policy(
         return PolicyOutcome { outcome: "REJECTED", category: "BLOCKED".into(), reason_code: Some("SENDER_BLACKLISTED") };
     }
 
-    // Требование 1 — match_template / resolve_unmatched_behavior
-    let category = match templates.find_match(&ctx.body, &ctx.sender_id) {
-        Some(matched) => matched.category,
+    // Требование 1 — match_template / resolve_unmatched_behavior. Экран 36:
+    // `find_match_with_placeholders` резолвит `%{name}` через живой реестр и
+    // возвращает извлечённые значения на `matched.extracted_values` —
+    // логируем их здесь для отладочной видимости и НИКУДА дальше не
+    // прокидываем (см. подробное обоснование на `MatchedTemplate::extracted_values`
+    // и BACKOFFICE_DESIGN_SPEC.md, Экран 36: прокидывание в
+    // StageCompletedEvent — отдельное, не решённое здесь архитектурное
+    // решение).
+    let category = match templates.find_match_with_placeholders(&ctx.body, &ctx.sender_id, placeholders) {
+        Some(matched) => {
+            if !matched.extracted_values.is_empty() {
+                tracing::debug!(
+                    message_id_context = %ctx.msisdn,
+                    template_id = %matched.template_id,
+                    extracted_values = ?matched.extracted_values,
+                    "Экран 36: именованные плейсхолдеры извлечены, но не прокидываются дальше стадии policy (см. MatchedTemplate::extracted_values)"
+                );
+            }
+            matched.category
+        }
         None => match ruleset.unmatched_template_behavior {
             UnmatchedTemplateBehavior::Reject => {
                 return PolicyOutcome { outcome: "REJECTED", category: "BLOCKED".into(), reason_code: Some("NO_TEMPLATE_MATCH") };
@@ -272,12 +290,16 @@ mod tests {
         PolicyRulesetConfig::from_config_schema_json(&json_str)
     }
 
-    fn fresh_env() -> (PolicyRulesetConfig, CompiledRuleset, BanwordChecker, RuntimeState) {
+    fn fresh_env() -> (PolicyRulesetConfig, CompiledRuleset, PlaceholderRegistry, BanwordChecker, RuntimeState) {
         let ruleset = load_real_ruleset();
         let templates = CompiledRuleset::new(vec![real_template()]);
+        // Пустой реестр — ни один тест в этом модуле не использует %{name},
+        // они проверяют оркестрацию восьми проверок (§1.5), не именованные
+        // плейсхолдеры (у тех — отдельные тесты в template_matching.rs).
+        let placeholders = PlaceholderRegistry::default();
         let banwords = BanwordChecker::new(&ruleset.banwords);
         let runtime = RuntimeState::default();
-        (ruleset, templates, banwords, runtime)
+        (ruleset, templates, placeholders, banwords, runtime)
     }
 
     fn dt(h: u32, m: u32) -> NaiveDateTime {
@@ -292,87 +314,87 @@ mod tests {
 
     #[test]
     fn happy_path_matched_template() {
-        let (ruleset, templates, banwords, mut runtime) = fresh_env();
-        let result = evaluate_policy(&ctx("Click", TPL_BODY), &ruleset, &templates, &banwords, &mut runtime, dt(12, 0));
+        let (ruleset, templates, placeholders, banwords, mut runtime) = fresh_env();
+        let result = evaluate_policy(&ctx("Click", TPL_BODY), &ruleset, &templates, &placeholders, &banwords, &mut runtime, dt(12, 0));
         assert_eq!(result, PolicyOutcome { outcome: "SUCCEEDED", category: "TRANSACTION".into(), reason_code: None });
     }
 
     #[test]
     fn invalid_sender_rejected_before_anything_else() {
-        let (ruleset, templates, banwords, mut runtime) = fresh_env();
-        let result = evaluate_policy(&ctx("NotClick", TPL_BODY), &ruleset, &templates, &banwords, &mut runtime, dt(12, 0));
+        let (ruleset, templates, placeholders, banwords, mut runtime) = fresh_env();
+        let result = evaluate_policy(&ctx("NotClick", TPL_BODY), &ruleset, &templates, &placeholders, &banwords, &mut runtime, dt(12, 0));
         assert_eq!(result, PolicyOutcome { outcome: "REJECTED", category: "BLOCKED".into(), reason_code: Some("INVALID_SENDER") });
     }
 
     #[test]
     fn sender_blacklisted() {
-        let (ruleset, templates, banwords, mut runtime) = fresh_env();
+        let (ruleset, templates, placeholders, banwords, mut runtime) = fresh_env();
         runtime.sender_blacklist.insert(("998901331835".to_string(), "Click".to_string()));
-        let result = evaluate_policy(&ctx("Click", TPL_BODY), &ruleset, &templates, &banwords, &mut runtime, dt(12, 0));
+        let result = evaluate_policy(&ctx("Click", TPL_BODY), &ruleset, &templates, &placeholders, &banwords, &mut runtime, dt(12, 0));
         assert_eq!(result, PolicyOutcome { outcome: "REJECTED", category: "BLOCKED".into(), reason_code: Some("SENDER_BLACKLISTED") });
     }
 
     #[test]
     fn unmatched_template_categorized_as_untemplated() {
-        let (ruleset, templates, banwords, mut runtime) = fresh_env();
-        let result = evaluate_policy(&ctx("Click", "совершенно другой текст без шаблона"), &ruleset, &templates, &banwords, &mut runtime, dt(12, 0));
+        let (ruleset, templates, placeholders, banwords, mut runtime) = fresh_env();
+        let result = evaluate_policy(&ctx("Click", "совершенно другой текст без шаблона"), &ruleset, &templates, &placeholders, &banwords, &mut runtime, dt(12, 0));
         assert_eq!(result, PolicyOutcome { outcome: "SUCCEEDED", category: "UNTEMPLATED".into(), reason_code: None });
     }
 
     #[test]
     fn banword_blocks_even_though_template_matches() {
-        let (ruleset, templates, banwords, mut runtime) = fresh_env();
+        let (ruleset, templates, placeholders, banwords, mut runtime) = fresh_env();
         let body = "idiot shartnoma bo'yicha 123456 so'm to'lovni bugun amalga oshiring";
-        let result = evaluate_policy(&ctx("Click", body), &ruleset, &templates, &banwords, &mut runtime, dt(12, 0));
+        let result = evaluate_policy(&ctx("Click", body), &ruleset, &templates, &placeholders, &banwords, &mut runtime, dt(12, 0));
         assert_eq!(result, PolicyOutcome { outcome: "REJECTED", category: "BLOCKED".into(), reason_code: Some("BANWORD_DETECTED") });
     }
 
     #[test]
     fn category_blacklisted() {
-        let (ruleset, templates, banwords, mut runtime) = fresh_env();
+        let (ruleset, templates, placeholders, banwords, mut runtime) = fresh_env();
         runtime.category_blacklist.insert(("998901331835".to_string(), "TRANSACTION".to_string()));
-        let result = evaluate_policy(&ctx("Click", TPL_BODY), &ruleset, &templates, &banwords, &mut runtime, dt(12, 0));
+        let result = evaluate_policy(&ctx("Click", TPL_BODY), &ruleset, &templates, &placeholders, &banwords, &mut runtime, dt(12, 0));
         assert_eq!(result, PolicyOutcome { outcome: "REJECTED", category: "BLOCKED".into(), reason_code: Some("CATEGORY_BLACKLISTED") });
     }
 
     #[test]
     fn outside_time_window() {
-        let (ruleset, _, banwords, mut runtime) = fresh_env();
+        let (ruleset, _, placeholders, banwords, mut runtime) = fresh_env();
         let ad_template = Template { template_id: "tpl-ads".into(), pattern: "%w reklama".into(), category: "ADVERTISING".into(), sender_id: None };
         let templates_with_ads = CompiledRuleset::new(vec![real_template(), ad_template]);
         let advert_ctx = ctx("Click", "SuperSale reklama");
 
         // policy_ruleset.valid.json: ADVERTISING разрешена 09:00-20:00 Asia/Tashkent.
-        let result_night = evaluate_policy(&advert_ctx, &ruleset, &templates_with_ads, &banwords, &mut runtime, dt(23, 0));
+        let result_night = evaluate_policy(&advert_ctx, &ruleset, &templates_with_ads, &placeholders, &banwords, &mut runtime, dt(23, 0));
         assert_eq!(result_night, PolicyOutcome { outcome: "REJECTED", category: "BLOCKED".into(), reason_code: Some("OUTSIDE_TIME_WINDOW") });
 
-        let result_day = evaluate_policy(&advert_ctx, &ruleset, &templates_with_ads, &banwords, &mut runtime, dt(10, 0));
+        let result_day = evaluate_policy(&advert_ctx, &ruleset, &templates_with_ads, &placeholders, &banwords, &mut runtime, dt(10, 0));
         assert_eq!(result_day, PolicyOutcome { outcome: "SUCCEEDED", category: "ADVERTISING".into(), reason_code: None });
     }
 
     #[test]
     fn spam_throttled_after_limit_and_counter_not_incremented_on_rejects() {
-        let (ruleset, templates, banwords, mut runtime) = fresh_env();
+        let (ruleset, templates, placeholders, banwords, mut runtime) = fresh_env();
         let base = dt(12, 0);
 
         // policy_ruleset.valid.json: max_messages=3, window_seconds=60, PER_MSISDN_PER_CATEGORY.
         for i in 0..3 {
             let now = base + chrono::Duration::seconds(i);
-            let result = evaluate_policy(&ctx("Click", TPL_BODY), &ruleset, &templates, &banwords, &mut runtime, now);
+            let result = evaluate_policy(&ctx("Click", TPL_BODY), &ruleset, &templates, &placeholders, &banwords, &mut runtime, now);
             assert_eq!(result.outcome, "SUCCEEDED", "сообщение {i} должно пройти (в пределах лимита 3)");
         }
 
-        let fourth = evaluate_policy(&ctx("Click", TPL_BODY), &ruleset, &templates, &banwords, &mut runtime, base + chrono::Duration::seconds(3));
+        let fourth = evaluate_policy(&ctx("Click", TPL_BODY), &ruleset, &templates, &placeholders, &banwords, &mut runtime, base + chrono::Duration::seconds(3));
         assert_eq!(fourth, PolicyOutcome { outcome: "REJECTED", category: "BLOCKED".into(), reason_code: Some("SPAM_THROTTLED") });
 
         // Заблокированный отправитель не должен занимать место в spam-окне.
         runtime.sender_blacklist.insert(("998901331835".to_string(), "Click".to_string()));
-        let rejected_by_sender = evaluate_policy(&ctx("Click", TPL_BODY), &ruleset, &templates, &banwords, &mut runtime, base + chrono::Duration::seconds(4));
+        let rejected_by_sender = evaluate_policy(&ctx("Click", TPL_BODY), &ruleset, &templates, &placeholders, &banwords, &mut runtime, base + chrono::Duration::seconds(4));
         assert_eq!(rejected_by_sender, PolicyOutcome { outcome: "REJECTED", category: "BLOCKED".into(), reason_code: Some("SENDER_BLACKLISTED") });
         runtime.sender_blacklist.clear();
 
         // После истечения окна (60с) лимит должен сброситься.
-        let after_window = evaluate_policy(&ctx("Click", TPL_BODY), &ruleset, &templates, &banwords, &mut runtime, base + chrono::Duration::seconds(61));
+        let after_window = evaluate_policy(&ctx("Click", TPL_BODY), &ruleset, &templates, &placeholders, &banwords, &mut runtime, base + chrono::Duration::seconds(61));
         assert_eq!(after_window.outcome, "SUCCEEDED", "окно анти-спама истекло — счётчик должен сброситься");
     }
 }
