@@ -77,6 +77,15 @@ const allMenuOptions = [
     permission: undefined as string | undefined,
   },
   {
+    label: () => h(RouterLink, { to: "/guides" }, () => "Guides"),
+    key: "guides",
+    adminOnly: false,
+    // BACKOFFICE_DESIGN_SPEC.md Экран 41. Тот же generic config-version
+    // паттерн, что Categories/CTN выше — GET без gate, POST/архивация не
+    // гейтятся клиентски (см. их комментарии).
+    permission: undefined as string | undefined,
+  },
+  {
     label: () => h(RouterLink, { to: "/execution-control" }, () => "Execution Control"),
     key: "execution-control",
     adminOnly: true,
