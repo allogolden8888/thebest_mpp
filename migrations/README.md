@@ -38,6 +38,7 @@ V029__message_read_model_sandbox.sql
 V030__category_ctn_entity_types.sql
 V031__staff_accounts.sql
 V033__pattern_placeholder_guide_entity_types.sql
+V034__chat_messages.sql
 ```
 
 (V032 — `reconciliation_early_evidence`, добавлена параллельной сессией, не частью этой ветки работы.)
@@ -104,6 +105,10 @@ V028__incident.sql оставлен как есть — оба существо�
 ## V030 — luminous-hugging-charm.md, BACKOFFICE_DESIGN_SPEC.md Экраны 32/23
 
 `category`/`ctn` добавлены в `config_versions_entity_type_check`. Категории сообщений (SERVICE/TRANSACTION/ADVERTISING/UNTEMPLATED/BLOCKED) раньше жили только как соглашение в документации (`BACKOFFICE_DESIGN_SPEC.md` §1.4) — не proto-enum, не CHECK-enum, не отдельная таблица; `policy_template.category`/`billing_tariff.price_per_segment` уже были свободной строкой (проверено кодом до миграции, не предположение). `category` становится управляемой config-версионируемой сущностью (name/regex/count_in_cdr) — слой метаданных поверх уже свободного поля, **не** новая валидация в `policy-service`/`billing-service` (они продолжают принимать любую строку). Существующие 5 значений засеяны как первые активные версии, чтобы ничего не сломалось. `ctn` — новая сущность для офлайн телеком-биллинга, привязка `(partner_id, category) -> ctn/service_name`; сам CDR-экспорт (генерация файла для сверки с оператором) спланирован в `BACKOFFICE_ROADMAP.md`, не реализован здесь.
+
+## V034 — BACKOFFICE_DESIGN_SPEC.md Экран 27 "Chat"
+
+Новая схема `support` (`support.chat_messages`) — один тред на `partner_id`, polling-доставка (нет websocket-инфраструктуры нигде в платформе). До этой миграции — ничего похожего вообще: ни топика, ни таблицы для сообщений админ↔партнёр. `read_at` nullable — заполняется как побочный эффект чтения треда противоположной стороной (нет отдельного mark-as-read эндпоинта/UI, сознательная граница объёма), используется только для счётчика "N новых" в сайдбаре `backoffice-ui`. Новое право `chat:write` (гейтит весь экран — список тредов + чтение + отправка одним правом, тот же класс решения, что `incident:manage`), выдано `backoffice-admin` и `support-agent`. Полный разбор архитектурного решения (отдельный `chat-service` с gRPC API вместо прямого доступа `backoffice-api`/`partner-self-service-api` к одной таблице) — `services/chat-service/README.md`.
 
 ## V031 — luminous-hugging-charm.md, BACKOFFICE_DESIGN_SPEC.md Экран 33
 
