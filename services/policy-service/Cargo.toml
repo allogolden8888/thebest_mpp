@@ -18,6 +18,13 @@ tracing-subscriber = "0.3"
 # Требование 1 (template matching) — тот же алгоритм, что в policy_matching/template_matching.py,
 # порт на реальный target-язык сервиса вместо pyahocorasick.
 aho-corasick = "1.1"
+# Экран 36 "Pattern Placeholders" — именованный плейсхолдер `%{name}` в
+# template_matching.rs резолвится в regex из живого реестра
+# (CONFIG_ENTITY_TYPE_PATTERN_PLACEHOLDER) и матчится/извлекается через этот
+# крейт. `%w`/`%d{n,m}` регекспы не используют — их структурная проверка
+# (check_placeholder_region) дешевле ручного цикла по символам, здесь же
+# admin-заданный regex произвольной формы, ручным циклом не обойтись.
+regex = "1"
 # Требование 5 (банворды) — NFKC для многоязычной нормализации (policy_matching/banword_normalization.py).
 unicode-normalization = "0.1"
 chrono = "0.4"

@@ -11,14 +11,45 @@
 //! Синтаксис pattern (data_infrastructure_spec.md §1.9b):
 //!   %w      — один непробельный токен, без ограничения по длине/алфавиту
 //!   %d{n,m} — от n до m цифр, разделители между ними игнорируются при подсчёте
+//!   %{name} — Экран 36 "Pattern Placeholders" (luminous-hugging-charm.md):
+//!             именованный плейсхолдер, `name` резолвится в regex из живого
+//!             реестра `PlaceholderRegistry` (config.changes, entity_type=
+//!             CONFIG_ENTITY_TYPE_PATTERN_PLACEHOLDER, см. config_reload.rs).
+//!             В отличие от `%w`/`%d{n,m}` — именованный, конфигурируемый
+//!             через бэкофис (не hardcoded здесь) и ИЗВЛЕКАЮЩИЙ: подошедшая
+//!             подстрока попадает в `MatchedTemplate::extracted_values`.
+//!             `name` обязан совпадать с `^[a-z][a-z0-9_]*$`
+//!             (config_schemas/pattern_placeholder.schema.json) — то же
+//!             ограничение, что уже применяется к самому реестру.
 
 use aho_corasick::AhoCorasick;
+use regex::Regex;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Placeholder {
     Word,
     Digit { min: usize, max: usize },
+    /// `%{name}` — Экран 36. Само значение `name` без ведущего/замыкающего
+    /// синтаксиса, регекс резолвится позже, при матчинге, через
+    /// `PlaceholderRegistry` (не здесь — `Token`/`Placeholder` не имеют
+    /// доступа к живому реестру, только к синтаксису pattern).
+    Named(String),
+}
+
+/// Имя внутри `%{name}` обязано совпадать с
+/// `config_schemas/pattern_placeholder.schema.json` (`^[a-z][a-z0-9_]*$`) —
+/// тем же ограничением, что уже применяется к `name` самого реестра. Ручной
+/// ascii-цикл, а не `regex`-крейт: это парсер САМОГО СИНТАКСИСА pattern
+/// (`parse_pattern`), а не матчинг против содержимого сообщения — тянуть
+/// regex ради одной простой проверки формы не нужно.
+fn is_valid_placeholder_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +90,23 @@ pub fn parse_pattern(pattern: &str) -> Vec<Token> {
                         pos = i;
                         continue;
                     }
+                }
+            }
+            i += 1;
+        } else if pattern[i..].starts_with("%{") {
+            // Тот же принцип отказа, что у %d{...} выше: незакрытая скобка
+            // или невалидное имя — не ошибка парсинга всего pattern, просто
+            // "%{" остаётся частью литерала (i продвигается на 1 байт, '%' —
+            // ASCII, граница символа не нарушается) и цикл продолжает поиск
+            // синтаксиса дальше по строке.
+            if let Some(close) = pattern[i..].find('}') {
+                let name = &pattern[i + 2..i + close];
+                if is_valid_placeholder_name(name) {
+                    tokens.push(Token::Literal(pattern[pos..i].to_string()));
+                    tokens.push(Token::Placeholder(Placeholder::Named(name.to_string())));
+                    i += close + 1;
+                    pos = i;
+                    continue;
                 }
             }
             i += 1;
@@ -148,6 +196,66 @@ pub struct Template {
 pub struct MatchedTemplate {
     pub template_id: String,
     pub category: String,
+    /// Экран 36 "Pattern Placeholders" — значения именованных плейсхолдеров
+    /// `%{name}`, реально извлечённые из текста победившим шаблоном (name ->
+    /// подстрока региона, удовлетворившая regex этого имени).
+    ///
+    /// ВАЖНО (сознательная граница объёма этого захода, luminous-hugging-
+    /// charm.md): это поле СЧИТАЕТСЯ и доступно на результате матчинга, но
+    /// НИКУДА дальше по пайплайну не прокидывается — ни в
+    /// `StageCompletedEvent`/`stage_contract.proto`, ни в analytics-writer,
+    /// ни куда-либо ещё. Прокидывание извлечённого значения дальше — ОТДЕЛЬНОЕ
+    /// архитектурное решение (какой именно потребитель, зачем ему это поле,
+    /// как это меняет публичный контракт стадии policy) и должно быть
+    /// осознанно подтверждено пользователем, не решено молча в рамках этого
+    /// изменения движка матчинга. Сегодня используется только для
+    /// отладочной видимости — логируется в `kafka_io.rs`.
+    pub extracted_values: HashMap<String, String>,
+}
+
+/// Живой реестр именованных плейсхолдеров `%{name}` (Экран 36 "Pattern
+/// Placeholders", `config_schemas/pattern_placeholder.schema.json`) —
+/// `name -> скомпилированный regex`. Собирается `config_reload.rs` из
+/// `config.changes` (entity_type=CONFIG_ENTITY_TYPE_PATTERN_PLACEHOLDER) и
+/// живёт внутри `PolicyLiveState` рядом с `CompiledRuleset` — та же
+/// ArcSwap-схема hot-reload, что уже была подключена для ruleset/шаблонов.
+///
+/// Каждый пользовательский regex оборачивается в `^(?:...)$` ПРИ
+/// КОМПИЛЯЦИИ (см. `new`) — плейсхолдер обязан описывать форму ВСЕГО
+/// региона между соседними литералами, не "где-то внутри есть совпадение".
+/// Тот же принцип, что уже применяется к `%w`/`%d{n,m}` в
+/// `check_placeholder_region` (region целиком, не подстрока) — без анкоринга
+/// admin, вписавший `\d{4}` рассчитывая на "ровно 4 цифры", неожиданно
+/// получил бы совпадение и на "12345".
+///
+/// Невалидный regex в конфиге — не паника и не отказ всего реестра: запись
+/// пропускается с `tracing::error!`, при матчинге это неотличимо от
+/// отсутствующего `name` (см. `check_placeholder_region` — fail closed).
+#[derive(Debug, Clone, Default)]
+pub struct PlaceholderRegistry {
+    compiled: HashMap<String, Regex>,
+}
+
+impl PlaceholderRegistry {
+    pub fn new(defs: &HashMap<String, String>) -> Self {
+        let mut compiled = HashMap::with_capacity(defs.len());
+        for (name, pattern) in defs {
+            match Regex::new(&format!("^(?:{pattern})$")) {
+                Ok(re) => {
+                    compiled.insert(name.clone(), re);
+                }
+                Err(e) => tracing::error!(
+                    "pattern_placeholder '{name}': невалидный regex {pattern:?}, запись проигнорирована ({e}) — \
+                     любой %{{{name}}} в шаблонах не будет матчиться, пока конфиг не исправят (fail closed)"
+                ),
+            }
+        }
+        Self { compiled }
+    }
+
+    fn get(&self, name: &str) -> Option<&Regex> {
+        self.compiled.get(name)
+    }
 }
 
 /// Плотный внутренний индекс шаблона (0..N по порядку регистрации, N —
@@ -237,18 +345,42 @@ impl CompiledRuleset {
         Some(chosen)
     }
 
-    fn check_placeholder_region(region: &str, placeholder: &Placeholder) -> bool {
+    /// Возвращает `None`, если регион не подходит под плейсхолдер (структурная
+    /// проверка `%w`/`%d{n,m}` — как и раньше — или значение не совпало с
+    /// regex именованного `%{name}`, либо `name` вообще не найдено в
+    /// `registry` — намеренно fail closed: конфиг реестра может отставать
+    /// или быть неполным, лучше не смачить, чем смачить непроверенным
+    /// значением). `Some(None)` — регион подошёл, извлекать нечего (`%w`/
+    /// `%d{n,m}` структурны, не именованы). `Some(Some((name, value)))` —
+    /// регион подошёл под именованный плейсхолдер, `value` — реально
+    /// извлечённая подстрока.
+    fn check_placeholder_region(
+        region: &str,
+        placeholder: &Placeholder,
+        registry: &PlaceholderRegistry,
+    ) -> Option<Option<(String, String)>> {
         match placeholder {
-            Placeholder::Word => !region.is_empty() && !region.chars().any(char::is_whitespace),
+            Placeholder::Word => {
+                let ok = !region.is_empty() && !region.chars().any(char::is_whitespace);
+                ok.then_some(None)
+            }
             Placeholder::Digit { min, max } => {
                 let non_digit_non_separator = region
                     .chars()
                     .any(|c| !c.is_ascii_digit() && !c.is_whitespace() && !"-_.".contains(c));
                 if non_digit_non_separator {
-                    return false;
+                    return None;
                 }
                 let digit_count = region.chars().filter(|c| c.is_ascii_digit()).count();
-                *min <= digit_count && digit_count <= *max
+                (*min <= digit_count && digit_count <= *max).then_some(None)
+            }
+            Placeholder::Named(name) => {
+                // `registry.get` уже отсутствует и для несуществующего
+                // имени, и для имени с невалидным regex (`PlaceholderRegistry::new`
+                // пропускает такие записи при сборке) — оба случая здесь
+                // неотличимы и оба обязаны провалить матчинг, не паниковать.
+                let re = registry.get(name)?;
+                re.is_match(region).then(|| Some((name.clone(), region.to_string())))
             }
         }
     }
@@ -257,14 +389,26 @@ impl CompiledRuleset {
     /// отдельно от `find_match` (development_plan.md 4.3), чтобы можно было
     /// проверить ВСЕ шаблоны и выбрать лучший, не останавливаться на первом
     /// подошедшем по порядку регистрации.
-    fn check_template(&self, template_id: TemplateId, hits: &HashMap<TemplateId, HashMap<usize, Vec<(usize, usize)>>>, text: &str) -> bool {
+    ///
+    /// Возвращает `None` при провале (как раньше `false`) или
+    /// `Some(извлечённые_значения)` при успехе — Экран 36: значения именованных
+    /// плейсхолдеров `%{name}`, накопленные по ходу проверки регионов между
+    /// литералами (для `%w`/`%d{n,m}` карта остаётся пустой).
+    fn check_template(
+        &self,
+        template_id: TemplateId,
+        hits: &HashMap<TemplateId, HashMap<usize, Vec<(usize, usize)>>>,
+        text: &str,
+        registry: &PlaceholderRegistry,
+    ) -> Option<HashMap<String, String>> {
         let tokens = &self.tokens_by_template[template_id.index()];
         let frags = literal_fragments(tokens);
         if frags.is_empty() {
-            return false;
+            return None;
         }
-        let Some(positions) = self.candidate_positions(template_id, hits, frags.len()) else { return false };
+        let positions = self.candidate_positions(template_id, hits, frags.len())?;
 
+        let mut extracted = HashMap::new();
         let mut frag_cursor = 0usize;
         let mut prev_end = 0usize;
         for (tok_idx, tok) in tokens.iter().enumerate() {
@@ -276,8 +420,12 @@ impl CompiledRuleset {
             if tok_idx > 0 {
                 if let Token::Placeholder(p) = &tokens[tok_idx - 1] {
                     let region = &text[prev_end..start];
-                    if !Self::check_placeholder_region(region, p) {
-                        return false;
+                    match Self::check_placeholder_region(region, p, registry) {
+                        None => return None,
+                        Some(Some((name, value))) => {
+                            extracted.insert(name, value);
+                        }
+                        Some(None) => {}
                     }
                 }
             }
@@ -289,13 +437,17 @@ impl CompiledRuleset {
             if last.is_empty() && tokens.len() > 1 {
                 if let Token::Placeholder(p) = &tokens[tokens.len() - 2] {
                     let region = &text[prev_end..];
-                    if !Self::check_placeholder_region(region, p) {
-                        return false;
+                    match Self::check_placeholder_region(region, p, registry) {
+                        None => return None,
+                        Some(Some((name, value))) => {
+                            extracted.insert(name, value);
+                        }
+                        Some(None) => {}
                     }
                 }
             }
         }
-        true
+        Some(extracted)
     }
 
     /// `development_plan.md` 4.3 — реальная приоритизация при подлинной
@@ -310,16 +462,23 @@ impl CompiledRuleset {
     ///
     /// Правило: `%d{n,m}` строже `%w` (ограничивает и алфавит, и длину, не
     /// только "непустой непробельный") — специфичность = сумма весов
-    /// плейсхолдеров (Digit=2, Word=1) + суммарная длина литеральных
+    /// плейсхолдеров (Named=3, Digit=2, Word=1) + суммарная длина литеральных
     /// фрагментов как вторичный, более слабый критерий (специфичность
     /// плейсхолдеров решает первой, длина литералов — только для разрыва
     /// ничьей между шаблонами с одинаковым профилем плейсхолдеров). Порядок
     /// регистрации остаётся финальным, детерминированным tie-break'ом, если
     /// оба критерия совпали.
+    ///
+    /// `Named` (Экран 36, `%{name}`) весит СТРОЖЕ `Digit` — в отличие от
+    /// `%w`/`%d{n,m}` (фиксированная, hardcoded форма), regex `%{name}`
+    /// admin-задан явно под конкретный случай (например, ровно 6-значный
+    /// OTP, а не "любые 1-6 цифр") — по построению это как минимум не менее
+    /// специфичная форма, чем встроенные плейсхолдеры этого движка.
     fn specificity(tokens: &[Token]) -> (usize, usize) {
         let placeholder_score: usize = tokens
             .iter()
             .filter_map(|t| match t {
+                Token::Placeholder(Placeholder::Named(_)) => Some(3),
                 Token::Placeholder(Placeholder::Digit { .. }) => Some(2),
                 Token::Placeholder(Placeholder::Word) => Some(1),
                 _ => None,
@@ -360,34 +519,58 @@ impl CompiledRuleset {
     /// применяется ДО сравнения специфичности — шаблон с несовпадающим
     /// sender_id не участвует в тай-брейке вообще, независимо от того,
     /// насколько он специфичнее.
+    /// Совместимая обёртка над `find_match_with_placeholders` для вызывающих,
+    /// которым не нужны именованные плейсхолдеры Экрана 36 (весь
+    /// предсуществующий набор тестов в этом файле — `%w`/`%d{n,m}` подряд,
+    /// ни один не ссылается на `%{name}`). Пустой `PlaceholderRegistry`
+    /// эквивалентен полному отсутствию registry: любой `%{name}` в pattern
+    /// просто никогда не смачится (fail closed, см.
+    /// `check_placeholder_region`), поведение для `%w`/`%d{n,m}` не меняется
+    /// ни на бит — переписывать десятки уже задокументированных тестов ради
+    /// добавления параметра, который им не нужен, только шум в диффе.
     pub fn find_match(&self, text: &str, sender_id: &str) -> Option<MatchedTemplate> {
+        self.find_match_with_placeholders(text, sender_id, &PlaceholderRegistry::default())
+    }
+
+    /// Экран 36 "Pattern Placeholders" — тот же алгоритм `find_match`, плюс
+    /// резолвинг `%{name}` через живой `registry` и накопление извлечённых
+    /// значений в `MatchedTemplate::extracted_values` для шаблона-победителя.
+    /// `registry` резолвится независимо для КАЖДОГО кандидата в цикле ниже
+    /// (не только для финального победителя) — иначе тай-брейк по
+    /// специфичности мог бы выбрать шаблон, который на самом деле проваливает
+    /// проверку именованного плейсхолдера.
+    pub fn find_match_with_placeholders(
+        &self,
+        text: &str,
+        sender_id: &str,
+        registry: &PlaceholderRegistry,
+    ) -> Option<MatchedTemplate> {
         let hits = self.fragment_hits(text);
 
-        let mut best: Option<(TemplateId, (usize, usize))> = None; // (template_id, specificity) — TemplateId сам по себе insertion order
+        // (template_id, specificity, извлечённые значения) — TemplateId сам по себе insertion order.
+        let mut best: Option<(TemplateId, (usize, usize), HashMap<String, String>)> = None;
         for &template_id in hits.keys() {
             if let Some(required) = &self.sender_id_by_template[template_id.index()] {
                 if required != sender_id {
                     continue;
                 }
             }
-            if !self.check_template(template_id, &hits, text) {
-                continue;
-            }
+            let Some(extracted) = self.check_template(template_id, &hits, text, registry) else { continue };
             let score = Self::specificity(&self.tokens_by_template[template_id.index()]);
             let is_better = match &best {
                 None => true,
-                Some((best_id, best_score)) => {
+                Some((best_id, best_score, _)) => {
                     score > *best_score || (score == *best_score && template_id < *best_id)
                 }
             };
             if is_better {
-                best = Some((template_id, score));
+                best = Some((template_id, score, extracted));
             }
         }
 
-        best.map(|(template_id, _)| {
+        best.map(|(template_id, _, extracted_values)| {
             let t = &self.templates[template_id.index()];
-            MatchedTemplate { template_id: t.template_id.clone(), category: t.category.clone() }
+            MatchedTemplate { template_id: t.template_id.clone(), category: t.category.clone(), extracted_values }
         })
     }
 }
@@ -667,5 +850,153 @@ mod tests {
         assert!(warnings.is_empty(), "все литеральные фрагменты этого шаблона длиннее порога: {warnings:?}");
     }
 
+    // ------------------------------------------------------------------
+    // Экран 36 "Pattern Placeholders" — `%{name}`.
+    // ------------------------------------------------------------------
 
+    fn registry_with(defs: &[(&str, &str)]) -> PlaceholderRegistry {
+        PlaceholderRegistry::new(&defs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+    }
+
+    #[test]
+    fn parse_pattern_recognizes_named_placeholder() {
+        let tokens = parse_pattern("code: %{otp_code} spasibo");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Literal("code: ".to_string()),
+                Token::Placeholder(Placeholder::Named("otp_code".to_string())),
+                Token::Literal(" spasibo".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_pattern_rejects_invalid_placeholder_name_as_literal() {
+        // Имя не совпадает с `^[a-z][a-z0-9_]*$` (заглавная буква) — тот же
+        // принцип отказа, что у незакрытого `%d{...}`: конструкция остаётся
+        // частью литерала, парсинг pattern в целом не падает.
+        let tokens = parse_pattern("code: %{OtpCode} spasibo");
+        assert_eq!(tokens, vec![Token::Literal("code: %{OtpCode} spasibo".to_string())]);
+    }
+
+    #[test]
+    fn parse_pattern_rejects_unterminated_named_placeholder_as_literal() {
+        let tokens = parse_pattern("code: %{otp_code spasibo");
+        assert_eq!(tokens, vec![Token::Literal("code: %{otp_code spasibo".to_string())]);
+    }
+
+    #[test]
+    fn named_placeholder_matches_and_extracts_value() {
+        let tpl = Template {
+            template_id: "tpl-otp".into(),
+            pattern: "Your code is %{otp_code}, do not share it".into(),
+            category: "SERVICE".into(),
+            sender_id: None,
+        };
+        let ruleset = CompiledRuleset::new(vec![tpl]);
+        let registry = registry_with(&[("otp_code", r"\d{6}")]);
+
+        let matched = ruleset
+            .find_match_with_placeholders("Your code is 482913, do not share it", "any-sender", &registry)
+            .expect("должно смачиться — 6 цифр удовлетворяют \\d{6}");
+        assert_eq!(matched.category, "SERVICE");
+        assert_eq!(matched.extracted_values.get("otp_code"), Some(&"482913".to_string()));
+    }
+
+    #[test]
+    fn named_placeholder_region_must_match_regex_in_full_not_just_contain_it() {
+        // `\d{4}` без якорей нашёл бы совпадение ВНУТРИ "482913" (например
+        // "4829") — компиляция реестра оборачивает пользовательский regex в
+        // `^(?:...)$`, поэтому регион обязан удовлетворять regex ЦЕЛИКОМ, а
+        // не содержать где-то внутри подходящую подстроку.
+        let tpl = Template {
+            template_id: "tpl-otp4".into(),
+            pattern: "code %{otp_code} end".into(),
+            category: "SERVICE".into(),
+            sender_id: None,
+        };
+        let ruleset = CompiledRuleset::new(vec![tpl]);
+        let registry = registry_with(&[("otp_code", r"\d{4}")]);
+
+        assert!(
+            ruleset.find_match_with_placeholders("code 482913 end", "any-sender", &registry).is_none(),
+            "регион \"482913\" — 6 цифр, не ровно 4, weak-match без якорей был бы багом"
+        );
+        assert!(ruleset.find_match_with_placeholders("code 4829 end", "any-sender", &registry).is_some());
+    }
+
+    #[test]
+    fn unknown_placeholder_name_fails_closed_not_panics() {
+        let tpl = Template {
+            template_id: "tpl-unknown".into(),
+            pattern: "code %{does_not_exist_in_registry} end".into(),
+            category: "SERVICE".into(),
+            sender_id: None,
+        };
+        let ruleset = CompiledRuleset::new(vec![tpl]);
+        let empty_registry = PlaceholderRegistry::default();
+
+        assert!(
+            ruleset.find_match_with_placeholders("code 12345 end", "any-sender", &empty_registry).is_none(),
+            "имя не найдено в реестре — обязан быть non-match (fail closed), не паника"
+        );
+    }
+
+    #[test]
+    fn invalid_regex_in_registry_is_skipped_not_panicking_and_behaves_like_unknown_name() {
+        // `(` без закрывающей скобки — невалидный regex. `PlaceholderRegistry::new`
+        // обязан пропустить эту запись (с логом), не паниковать при сборке
+        // реестра — а матчинг обязан вести себя так, будто имени вообще нет.
+        let registry = registry_with(&[("broken", "(")]);
+        let tpl = Template { template_id: "tpl-broken".into(), pattern: "code %{broken} end".into(), category: "SERVICE".into(), sender_id: None };
+        let ruleset = CompiledRuleset::new(vec![tpl]);
+        assert!(ruleset.find_match_with_placeholders("code 12345 end", "any-sender", &registry).is_none());
+    }
+
+    #[test]
+    fn backward_compatible_find_match_treats_named_placeholder_as_always_failing() {
+        // `find_match` (без реестра) — тонкая обёртка над
+        // `find_match_with_placeholders` с пустым `PlaceholderRegistry`, для
+        // вызывающих, которым `%{name}` не нужен (весь остальной набор
+        // тестов в этом файле). Явная проверка: `%{name}` в pattern не
+        // приводит ни к панике, ни к ложному совпадению через этот путь.
+        let tpl = Template { template_id: "tpl-otp".into(), pattern: "code %{otp_code} end".into(), category: "SERVICE".into(), sender_id: None };
+        let ruleset = CompiledRuleset::new(vec![tpl]);
+        assert!(ruleset.find_match("code 123456 end", "any-sender").is_none());
+    }
+
+    #[test]
+    fn named_placeholder_specificity_beats_digit_and_word() {
+        // Все три шаблона матчат "code: 1234" — %{four_digits} (Named, regex
+        // именно "ровно 4 цифры") обязан победить и %d{1,6} (Digit, шире по
+        // допустимой длине), и %w (самый общий).
+        let tpl_word = Template { template_id: "w".into(), pattern: "code: %w".into(), category: "S".into(), sender_id: None };
+        let tpl_digit = Template { template_id: "d".into(), pattern: "code: %d{1,6}".into(), category: "S".into(), sender_id: None };
+        let tpl_named = Template { template_id: "n".into(), pattern: "code: %{four_digits}".into(), category: "S".into(), sender_id: None };
+        let ruleset = CompiledRuleset::new(vec![tpl_word, tpl_digit, tpl_named]);
+        let registry = registry_with(&[("four_digits", r"\d{4}")]);
+
+        let result = ruleset.find_match_with_placeholders("code: 1234", "any-sender", &registry).unwrap();
+        assert_eq!(result.template_id, "n", "именованный плейсхолдер (admin-заданный regex) обязан быть строже встроенных %w/%d{{n,m}}");
+        assert_eq!(result.extracted_values.get("four_digits"), Some(&"1234".to_string()));
+    }
+
+    #[test]
+    fn multiple_named_placeholders_in_one_template_are_all_extracted() {
+        let tpl = Template {
+            template_id: "tpl-two".into(),
+            pattern: "user %{username} code %{otp_code} confirm".into(),
+            category: "SERVICE".into(),
+            sender_id: None,
+        };
+        let ruleset = CompiledRuleset::new(vec![tpl]);
+        let registry = registry_with(&[("username", r"[a-zA-Z0-9_]+"), ("otp_code", r"\d{6}")]);
+
+        let matched = ruleset
+            .find_match_with_placeholders("user Alice42 code 100200 confirm", "any-sender", &registry)
+            .expect("оба именованных плейсхолдера должны пройти");
+        assert_eq!(matched.extracted_values.get("username"), Some(&"Alice42".to_string()));
+        assert_eq!(matched.extracted_values.get("otp_code"), Some(&"100200".to_string()));
+    }
 }
