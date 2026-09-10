@@ -1,0 +1,125 @@
+syntax = "proto3";
+
+package mpp.grpc.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "mpp/platformcontracts/grpc/v1;grpcv1";
+option java_package = "uz.mpp.platformcontracts.grpc.v1";
+option java_multiple_files = true;
+
+// BACKOFFICE_DESIGN_SPEC.md Экран 27 "Chat" — до этого ничего похожего не
+// было нигде в платформе (ни топика, ни таблицы для сообщений
+// админ<->партнёр). Один тред на partner_id (design-референс
+// MPP Backoffice.dc.html показывает ровно один список сообщений на
+// партнёра слева, один тред справа — не многотредовость/каналы).
+//
+// Polling, не push/websocket — этот кодбейз нигде не поднимает
+// websocket-инфраструктуру (проверено перед проектированием: ни одна из
+// 40+ существующих служб её не использует), backoffice-ui/partner-portal-ui
+// уже опрашивают через TanStack Query refetchInterval для остальных
+// живых-но-не-real-time экранов.
+//
+// Отдельный сервис (не пакет/store прямо внутри backoffice-api и
+// partner-self-service-api, читающий одну таблицу из двух кодовых баз
+// напрямую) — найдено при проектировании: partner-self-service-api сегодня
+// НЕ имеет ни одного прямого подключения к Postgres вообще (его package doc
+// в cmd/partner-self-service-api/main.go явно перечисляет только
+// gRPC/HTTP-зависимости — ConfigService/CredentialIssuerService/
+// TemplateManagementService), и даже единственный namesake-случай в этой
+// кодовой базе, где ДВА сервиса читают одну и ту же Postgres-таблицу
+// напрямую (compliance-api и consent-cache-projector, оба SELECT из
+// policy.subscriber_consent) — это read-only с ОДНИМ писателем через
+// событийную материализацию (config change event), не два независимых
+// писателя в реальном времени, как здесь нужно для чата (обе стороны шлют
+// сообщения). Ни одного прецедента "два app-сервиса пишут в одну таблицу
+// напрямую" в этой кодовой базе не нашлось — вместо изобретения нового
+// паттерна здесь применён уже устоявшийся: маленький выделенный
+// control-plane сервис с gRPC API (тот же класс, что iam-service/
+// incident-service/credential-issuer-service), оба потребителя
+// (backoffice-api, partner-self-service-api) — тонкие gRPC-клиенты.
+service ChatService {
+  // Отправляет сообщение в тред партнёра. sender_type/sender_id ВСЕГДА
+  // берутся вызывающим HTTP-слоем из claims (Subject + realm-специфичное
+  // поле), никогда из тела HTTP-запроса — тот же принцип, что opened_by в
+  // incident.proto.
+  rpc SendMessage(SendMessageRequest) returns (ChatMessage);
+
+  // Сообщения треда партнёра с id > since (или все, если since не задан),
+  // отсортированы по created_at ASC — polling-курсор: клиент передаёт
+  // created_at последнего полученного сообщения как since на следующий
+  // опрос. Побочный эффект (не отдельный RPC/эндпоинт — сознательная
+  // граница объёма, "no read-receipts UI polish, no typing indicators"):
+  // все сообщения этого partner_id с sender_type, ПРОТИВОПОЛОЖНЫМ
+  // viewer_type, и read_at IS NULL помечаются read_at=now() перед
+  // возвратом — это и есть единственный источник данных для счётчика
+  // "N новых" в ListThreads.
+  rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse);
+
+  // Список партнёров, у которых есть хотя бы одно сообщение — сайдбар
+  // backoffice-ui (design-референс: список партнёров слева, "payme_uz 2
+  // новых"). Не вызывается partner-self-service-api — партнёр всегда
+  // читает свой единственный тред напрямую через ListMessages, ему не
+  // нужен список "всех партнёров".
+  rpc ListThreads(ListThreadsRequest) returns (ListThreadsResponse);
+}
+
+message ChatMessage {
+  int64 id = 1;
+  string partner_id = 2;
+  // "partner" | "admin" — CHECK-ограничение support.chat_messages.sender_type
+  // (migrations/V034__chat_messages.sql).
+  string sender_type = 3;
+  // external_id отправителя (iam.staff_accounts для admin,
+  // iam.partner_portal_users для partner) — см. migrations/V034 за тем,
+  // почему здесь нет FK на обе таблицы разом.
+  string sender_id = 4;
+  string body = 5;
+  google.protobuf.Timestamp created_at = 6;
+  // Не установлен (nil) — сообщение ещё не прочитано противоположной
+  // стороной.
+  google.protobuf.Timestamp read_at = 7;
+}
+
+message SendMessageRequest {
+  string partner_id = 1;
+  string sender_type = 2;
+  string sender_id = 3;
+  string body = 4;
+}
+
+message ListMessagesRequest {
+  string partner_id = 1;
+  // Не установлен (нулевое время) — вернуть весь тред с начала. Иначе —
+  // строго больше этого created_at (следующая страница polling-опроса).
+  google.protobuf.Timestamp since = 2;
+  // "admin" | "partner" — чья сторона читает; определяет, чьи сообщения
+  // помечаются read_at=now() как побочный эффект (см. ChatService.
+  // ListMessages docstring).
+  string viewer_type = 3;
+}
+
+message ListMessagesResponse {
+  // Хронологически, created_at ASC — читается как история переписки, не
+  // "последнее сверху" (тот же принцип, что IncidentDetail.timeline,
+  // incident.proto).
+  repeated ChatMessage messages = 1;
+}
+
+message ChatThread {
+  string partner_id = 1;
+  string last_message_body = 2;
+  google.protobuf.Timestamp last_message_at = 3;
+  // Сообщения от партнёра (sender_type='partner') с read_at IS NULL —
+  // design-референс "2 новых" в сайдбаре считается именно так, с точки
+  // зрения админа, не партнёра.
+  int64 unread_count = 4;
+}
+
+message ListThreadsRequest {}
+
+message ListThreadsResponse {
+  // Отсортированы по last_message_at DESC — самый свежий тред сверху, тот
+  // же принцип, что ListIncidents ORDER BY opened_at DESC.
+  repeated ChatThread threads = 1;
+}
