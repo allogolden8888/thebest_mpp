@@ -13,6 +13,7 @@ const router = createRouter({
     { path: "/categories", name: "categories", component: () => import("../views/CategoriesView.vue") },
     { path: "/ctns", name: "ctns", component: () => import("../views/CTNsView.vue") },
     { path: "/guides", name: "guides", component: () => import("../views/GuidesView.vue") },
+    { path: "/pattern-placeholders", name: "pattern-placeholders", component: () => import("../views/PatternPlaceholdersView.vue") },
     { path: "/execution-control", name: "execution-control", component: () => import("../views/ExecutionControlView.vue") },
     { path: "/scheduler", name: "scheduler", component: () => import("../views/SchedulerForceCommandView.vue") },
     { path: "/messages", name: "messages", component: () => import("../views/MessagesView.vue") },

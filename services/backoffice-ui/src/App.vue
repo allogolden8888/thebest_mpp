@@ -86,6 +86,14 @@ const allMenuOptions = [
     permission: undefined as string | undefined,
   },
   {
+    label: () => h(RouterLink, { to: "/pattern-placeholders" }, () => "Pattern Placeholders"),
+    key: "pattern-placeholders",
+    adminOnly: false,
+    // Экран 36. Тот же generic config-version паттерн, что Categories/CTN/
+    // Guides выше — GET без gate, POST/архивация не гейтятся клиентски.
+    permission: undefined as string | undefined,
+  },
+  {
     label: () => h(RouterLink, { to: "/execution-control" }, () => "Execution Control"),
     key: "execution-control",
     adminOnly: true,
