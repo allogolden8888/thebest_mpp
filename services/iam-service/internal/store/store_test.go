@@ -183,6 +183,42 @@ func TestAssignCheckAndRevokeStaffRoleRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCheckPermissionDeniesDeactivatedStaffAccount(t *testing.T) {
+	pool := testPool(t)
+	pg := NewPostgres(pool)
+	ctx := context.Background()
+	externalID := "test-deactivate-" + uuid.NewString()
+	createStaffAccount(t, pool, externalID)
+
+	if _, err := pg.AssignStaffRole(ctx, externalID, "ops-viewer", "admin-1"); err != nil {
+		t.Fatalf("AssignStaffRole: %v", err)
+	}
+
+	allowed, roles, err := pg.CheckPermission(ctx, externalID, "ops:read")
+	if err != nil {
+		t.Fatalf("CheckPermission (до деактивации): %v", err)
+	}
+	if !allowed || len(roles) != 1 || roles[0] != "ops-viewer" {
+		t.Fatalf("до деактивации ожидали allowed=true roles=[ops-viewer], получили allowed=%v roles=%v", allowed, roles)
+	}
+
+	deactivated, err := pg.DeactivateStaffAccount(ctx, externalID, "admin-2")
+	if err != nil {
+		t.Fatalf("DeactivateStaffAccount: %v", err)
+	}
+	if !deactivated {
+		t.Fatalf("ожидали deactivated=true")
+	}
+
+	allowed, roles, err = pg.CheckPermission(ctx, externalID, "ops:read")
+	if err != nil {
+		t.Fatalf("CheckPermission (после деактивации): %v", err)
+	}
+	if allowed || len(roles) != 0 {
+		t.Fatalf("деактивированный аккаунт не должен сохранять права по ещё действующему JWT: allowed=%v roles=%v", allowed, roles)
+	}
+}
+
 func TestAssignStaffRoleUnknownRoleReturnsErrRoleNotFound(t *testing.T) {
 	pool := testPool(t)
 	pg := NewPostgres(pool)

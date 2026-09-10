@@ -29,6 +29,7 @@ const router = createRouter({
     { path: "/admin-users", name: "admin-users", component: () => import("../views/AdminUsersView.vue") },
     { path: "/audit", name: "audit", component: () => import("../views/AuditLogView.vue") },
     { path: "/incidents", name: "incidents", component: () => import("../views/IncidentsView.vue") },
+    { path: "/chat", name: "chat", component: () => import("../views/ChatView.vue") },
     { path: "/ops-health", name: "ops-health", component: () => import("../views/OpsHealthView.vue") },
   ],
 });

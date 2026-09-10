@@ -23,10 +23,13 @@ locals {
     "policy-service", "billing-service", "routing-service", "delivery-service",
     "delivery-reconciliation-service", "scheduler-critical-sweep", "scheduler-standard-lane",
     "scheduler-background-lane", "message-state-resolver", "execution-control-service",
-    "configuration-service", "config-event-publisher", "config-cache-projector",
+    "iam-service", "credential-issuer-service", "incident-service", "ops-visibility-service",
+    "chat-service", "configuration-service", "config-event-publisher", "config-cache-projector",
     "consent-cache-projector", "dlr-correlation-writer", "dlr-manager",
     "billing-outbox-publisher", "billing-ledger-writer", "billing-reconciliation",
-    "partner-api", "backoffice-api", "replay-service", "lifecycle-writer",
-    "analytics-writer", "partner-notification-service", "backoffice-ui",
+    "billing-self-service-api", "compliance-api", "partner-api", "backoffice-api",
+    "partner-self-service-api", "replay-service", "lifecycle-writer",
+    "analytics-writer", "pdu-log-writer", "partner-notification-service",
+    "template-management-service", "backoffice-ui", "partner-portal-ui",
   ]
 }

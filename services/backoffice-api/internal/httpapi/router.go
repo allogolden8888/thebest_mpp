@@ -28,6 +28,12 @@ type Deps struct {
 	IamClient              grpcv1.IamServiceClient
 	CredentialIssuerClient grpcv1.CredentialIssuerServiceClient
 	IncidentClient         grpcv1.IncidentServiceClient
+	// ChatClient — BACKOFFICE_DESIGN_SPEC.md Экран 27 "Chat" (chat.go),
+	// proxy в новый chat-service. Тот же класс зависимости, что
+	// IncidentClient выше — маленький выделенный control-plane сервис,
+	// не прямой доступ к support.chat_messages (см. chat.go package doc
+	// и services/chat-service/README.md за полным разбором решения).
+	ChatClient grpcv1.ChatServiceClient
 	// HTTPClient/OpsVisibilityURL — luminous-hugging-charm.md Ф8.
 	// ops-visibility-service не gRPC (см. ops.go package doc) — плоский
 	// HTTP-клиент, не сгенерированный gRPC stub, как у остальных полей выше.
@@ -223,6 +229,18 @@ func NewRouter(d Deps) *chi.Mux {
 			r.Get("/{incident_id}", handleGetIncident(d.IncidentClient))
 			r.Post("/{incident_id}/notes", handleAddIncidentNote(d.IncidentClient))
 			r.Post("/{incident_id}/resolve", handleResolveIncident(d.IncidentClient))
+		})
+
+		// /v1/chat/* — BACKOFFICE_DESIGN_SPEC.md Экран 27 "Chat", ChatService
+		// proxy (chat.go), backoffice-ui "Chat". Один gate chat:write на все
+		// операции (список тредов/чтение/отправка) — тот же класс решения,
+		// что incident:manage выше (один экран, одна административная
+		// способность, не read/write расщепление).
+		r.Route("/chat", func(r chi.Router) {
+			r.Use(auth.RequirePermission("chat:write", d.IamClient))
+			r.Get("/threads", handleListChatThreads(d.ChatClient))
+			r.Get("/{partner_id}/messages", handleListChatMessages(d.ChatClient))
+			r.Post("/{partner_id}/messages", handleSendChatMessage(d.ChatClient))
 		})
 
 		// GET /v1/ops/snapshot — luminous-hugging-charm.md Ф8, плоский HTTP

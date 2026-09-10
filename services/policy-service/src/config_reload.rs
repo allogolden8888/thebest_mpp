@@ -74,10 +74,26 @@ struct TemplateConfigPayload {
 /// `config_schemas/pattern_placeholder.schema.json`, entity_id = `name`.
 /// `description` игнорируется — чисто для UI бэкофиса, движку матчинга не
 /// нужно.
+///
+/// РЕАЛЬНАЯ НАХОДКА живой проверки (не гипотетическая): в отличие от
+/// `TemplateConfigPayload` выше (POLICY_TEMPLATE), здесь НЕТ поля `status`
+/// внутри payload_json — `pattern_placeholder.schema.json` объявляет
+/// `additionalProperties: false` и не включает `status` в свою схему вообще
+/// (это генерик-реестр поверх `ConfigService.CreateVersion/ArchiveVersion`,
+/// не legacy-сущность со встроенным в payload статусом, как policy_ruleset/
+/// policy_template). `status` для этого entity_type живёт ТОЛЬКО в
+/// `ConfigChangeEvent.status` (platform-contracts/events/config_and_control.proto
+/// поле 5, из `config.config_versions.status` через config-event-publisher) —
+/// именно поэтому эта структура его не содержит, а `handle_config_change`
+/// ниже читает `event.status`, не `payload.status`. Первая версия этого кода
+/// ошибочно требовала `status` внутри payload по аналогии с
+/// `TemplateConfigPayload` — живая проверка (POST через backoffice-api,
+/// реальный `config.changes`) сразу поймала `missing field status`, эта
+/// сборка структуры (без status) — исправление по факту находки, не
+/// умозрительное решение.
 #[derive(Debug, Deserialize)]
 struct PlaceholderConfigPayload {
     regex: String,
-    status: String, // "active" | "archived"
 }
 
 /// Живое состояние policy-конфига поверх статических bootstrap-файлов —
@@ -137,9 +153,13 @@ impl ConfigOverlay {
     /// `entity_id` = `name` (см. `config_schemas/pattern_placeholder.schema.json`)
     /// — тот же принцип, что `apply_template` выше, просто хранит regex-строку,
     /// не заранее скомпилированный `Regex` (компиляция — на `build_live_state`).
-    fn apply_placeholder(&self, entity_id: &str, payload: &PlaceholderConfigPayload) {
+    /// `status` приходит СНАРУЖИ (`ConfigChangeEvent.status`, см. комментарий
+    /// на `PlaceholderConfigPayload`), не из самого payload — единственное
+    /// отличие от `apply_template`, где `payload.status` пришёл бы из
+    /// payload_json (у POLICY_TEMPLATE оно там реально есть).
+    fn apply_placeholder(&self, entity_id: &str, payload: &PlaceholderConfigPayload, status: &str) {
         let mut overlay = self.placeholder_overlay.lock().expect("placeholder overlay mutex poisoned");
-        if payload.status == "archived" {
+        if status == "archived" {
             overlay.remove(entity_id);
         } else {
             overlay.insert(entity_id.to_string(), payload.regex.clone());
@@ -233,7 +253,7 @@ pub fn handle_config_change(overlay: &ConfigOverlay, event: &ConfigChangeEvent) 
     } else if event.entity_type == ConfigEntityType::PatternPlaceholder as i32 {
         match serde_json::from_slice::<PlaceholderConfigPayload>(&event.payload_json) {
             Ok(payload) => {
-                overlay.apply_placeholder(&event.entity_id, &payload);
+                overlay.apply_placeholder(&event.entity_id, &payload, &event.status);
                 true
             }
             Err(e) => {
@@ -353,10 +373,20 @@ mod tests {
     /// entity_id = name (тот же принцип, что `template_event` выше для
     /// POLICY_TEMPLATE).
     fn placeholder_event(name: &str, regex: &str, status: &str) -> ConfigChangeEvent {
+        // РЕАЛЬНАЯ НАХОДКА живой проверки: payload_json здесь НЕ содержит
+        // "status" (в отличие от template_event ниже) — этот тест-хелпер
+        // изначально (ошибочно) добавлял "status" и внутрь payload_json тоже,
+        // что маскировало реальный баг в PlaceholderConfigPayload (структура
+        // требовала status из payload, которого там на самом деле никогда
+        // нет — pattern_placeholder.schema.json не включает status,
+        // additionalProperties: false). Живая проверка через настоящий
+        // config.changes (не через этот тест) поймала это немедленно
+        // (`missing field status`) — payload здесь исправлен, чтобы точно
+        // отражать реальный wire-формат и не давать тесту снова замаскировать
+        // ту же ошибку.
         let payload = serde_json::json!({
             "name": name,
             "regex": regex,
-            "status": status,
         });
         ConfigChangeEvent {
             entity_type: ConfigEntityType::PatternPlaceholder as i32,

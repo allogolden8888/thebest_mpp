@@ -42,6 +42,31 @@ func entityTypeToProto(s string) commonv1.ConfigEntityType {
 		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_OPERATOR
 	case "subscriber_consent":
 		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_SUBSCRIBER_CONSENT
+	// Реальная находка живой проверки Экрана 36 "Pattern Placeholders" (не
+	// гипотетическая): этот switch не обновлялся, когда platform-contracts/
+	// common/enums.proto обзавёлся CATEGORY(10)/CTN(11)/PATTERN_PLACEHOLDER(12)/
+	// GUIDE(13) — вендоренный internal/proto/gen/.../enums.pb.go в ЭТОМ
+	// сервисе тоже отстал (не содержал этих значений вообще, скопирован
+	// свежий из configuration-service тем же коммитом). Итог: ЛЮБАЯ запись
+	// этих четырёх entity_type в config_outbox проваливала
+	// entityTypeToProto -> UNSPECIFIED -> "неизвестный entity_type" ->
+	// 10 попыток -> запись НАВСЕГДА выпадает из PollOutbox (DefaultMaxAttempts)
+	// — то есть ни один из этих entity_type НИКОГДА не долетал до
+	// config.changes ни в одном окружении, где развёрнут ИМЕННО этот
+	// собранный образ, независимо от того, что configuration-service/
+	// backoffice-api полностью корректно валидировали и сохраняли записи в
+	// config.config_versions. Обнаружено только потому, что hot-reload
+	// Pattern Placeholder в policy-service (см. template_matching.rs/
+	// config_reload.rs) специально проверялся живьём через реальный
+	// config.changes, а не только через config_versions/Postgres.
+	case "category":
+		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_CATEGORY
+	case "ctn":
+		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_CTN
+	case "pattern_placeholder":
+		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PATTERN_PLACEHOLDER
+	case "guide":
+		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_GUIDE
 	default:
 		return commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_UNSPECIFIED
 	}

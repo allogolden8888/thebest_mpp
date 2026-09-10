@@ -26,7 +26,7 @@ go build ./... && go test ./... -race
 
 `platform-contracts/grpc/iam.proto` — `IamService`, тот же стиль синхронного request/response RPC, что `ExecutionControlService` (`internal_control.proto`), намеренно не переизобретён:
 
-* **`CheckPermission(external_id, permission) -> (allowed, roles[])`** — вызывается middleware'ом `backoffice-api` (и позже `partner-self-service-api`, Фаза 3) на КАЖДЫЙ мутирующий запрос. **Fail-closed по контракту**: недоступность IAM Service должна трактоваться вызывающим как запрет, не как молчаливое разрешение — сервис, способный поставить на паузу весь трафик платформы, не может по умолчанию проваливаться в "открыто" (тот же CRITICAL класс находки, который вся эта фаза закрывает).
+* **`CheckPermission(external_id, permission) -> (allowed, roles[])`** — вызывается middleware'ом `backoffice-api` (и позже `partner-self-service-api`, Фаза 3) на КАЖДЫЙ мутирующий запрос. Проверяет не только активное назначение роли, но и `iam.staff_accounts.active`, поэтому деактивация сотрудника немедленно закрывает доступ даже для ещё не истёкшего JWT. **Fail-closed по контракту**: недоступность IAM Service должна трактоваться вызывающим как запрет, не как молчаливое разрешение — сервис, способный поставить на паузу весь трафик платформы, не может по умолчанию проваливаться в "открыто" (тот же CRITICAL класс находки, который вся эта фаза закрывает).
 * `ListRoles` / `ListStaffAssignments` / `AssignStaffRole` / `RevokeStaffRole` — административные RPC для экрана `backoffice-ui` "Access Control" ("у кого какой доступ" — видимость, которой сейчас нет вообще).
 
 Регенерация protobuf (тот же паттерн, что `execution-control-service/README.md`):

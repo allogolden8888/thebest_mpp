@@ -636,6 +636,44 @@ components:
           allOf: [{ $ref: "#/components/schemas/ReadyzSnapshot" }]
           nullable: true
         readyz_available: { type: boolean }
+    ChatMessage:
+      type: object
+      required: [id, partner_id, sender_type, sender_id, body]
+      properties:
+        id: { type: integer, format: int64 }
+        partner_id: { type: string }
+        sender_type: { type: string, enum: [partner, admin] }
+        sender_id: { type: string }
+        body: { type: string }
+        created_at: { type: string, format: date-time }
+        read_at: { type: string, format: date-time }
+    ListChatMessagesResponse:
+      type: object
+      required: [messages]
+      properties:
+        messages:
+          type: array
+          items: { $ref: "#/components/schemas/ChatMessage" }
+    SendChatMessageRequest:
+      type: object
+      required: [body]
+      properties:
+        body: { type: string }
+    ChatThread:
+      type: object
+      required: [partner_id, last_message_body, unread_count]
+      properties:
+        partner_id: { type: string }
+        last_message_body: { type: string }
+        last_message_at: { type: string, format: date-time }
+        unread_count: { type: integer, format: int64 }
+    ListChatThreadsResponse:
+      type: object
+      required: [threads]
+      properties:
+        threads:
+          type: array
+          items: { $ref: "#/components/schemas/ChatThread" }
 paths:
   /config/versions:
     post:
@@ -1324,3 +1362,47 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/OpsSnapshotResponse" }
+  /chat/threads:
+    get:
+      operationId: listChatThreads
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ListChatThreadsResponse" }
+  /chat/{partner_id}/messages:
+    get:
+      operationId: listChatMessages
+      parameters:
+        - name: partner_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: since
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ListChatMessagesResponse" }
+    post:
+      operationId: sendChatMessage
+      parameters:
+        - name: partner_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SendChatMessageRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChatMessage" }

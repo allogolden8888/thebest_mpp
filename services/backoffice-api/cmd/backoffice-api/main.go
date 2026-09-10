@@ -249,6 +249,17 @@ func main() {
 	}
 	defer incidentConn.Close()
 
+	// chatConn — BACKOFFICE_DESIGN_SPEC.md Экран 27 "Chat", проксируется в
+	// новый chat-service (internal/httpapi/chat.go package doc — почему
+	// отдельный сервис, не прямой доступ к support.chat_messages из
+	// нескольких кодовых баз). Тот же dialGRPC/grpcConnCheck паттерн, что и
+	// у остальных соединений выше.
+	chatConn, err := dialGRPC(env("CHAT_SERVICE_ADDR", "chat-service.mpp.svc:9000"))
+	if err != nil {
+		log.Fatalf("не удалось подключиться к Chat Service: %v", err)
+	}
+	defer chatConn.Close()
+
 	// opsVisibilityURL/opsHTTPClient — luminous-hugging-charm.md Ф8.
 	// ops-visibility-service не поднимает gRPC вообще (см.
 	// internal/httpapi/ops.go package doc) — плоский http.Client, не
@@ -288,6 +299,7 @@ func main() {
 		IamClient:              grpcv1.NewIamServiceClient(iamConn),
 		CredentialIssuerClient: grpcv1.NewCredentialIssuerServiceClient(credentialIssuerConn),
 		IncidentClient:         grpcv1.NewIncidentServiceClient(incidentConn),
+		ChatClient:             grpcv1.NewChatServiceClient(chatConn),
 		HTTPClient:             opsHTTPClient,
 		OpsVisibilityURL:       opsVisibilityURL,
 		ComplianceAPIURL:       complianceAPIURL,
@@ -322,6 +334,7 @@ func main() {
 		"iam-service":               grpcConnCheck(iamConn),
 		"credential-issuer-service": grpcConnCheck(credentialIssuerConn),
 		"incident-service":          grpcConnCheck(incidentConn),
+		"chat-service":              grpcConnCheck(chatConn),
 		"ops-visibility-service":    httpPingCheck(opsHTTPClient, opsVisibilityURL+"/healthz"),
 		"compliance-api":            httpPingCheck(opsHTTPClient, complianceHealthURL+"/healthz"),
 		"redis-runtime":             redisRuntime.Ping,

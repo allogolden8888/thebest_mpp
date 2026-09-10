@@ -43,9 +43,18 @@ func TestBuildConfigChangeEventErrorsOnUnknownEntityType(t *testing.T) {
 }
 
 func TestBuildConfigChangeEventAllKnownEntityTypesMap(t *testing.T) {
+	// Реальная находка живой проверки Экрана 36 (не гипотетическая): этот
+	// список — единственное место в этом пакете, которое перечисляет ВСЕ
+	// entity_type, и он отставал от platform-contracts/common/enums.proto
+	// на четыре значения (category/ctn/pattern_placeholder/guide) — ровно
+	// поэтому этот тест не поймал entityTypeToProto, забывший про них
+	// (см. комментарий на месте фикса в publisher.go): "неизвестных"
+	// entity_type в switch не было ни одного failing-теста, потому что
+	// список known здесь был настолько же неполон, насколько сам switch.
 	known := []string{
 		"pipeline", "policy_ruleset", "policy_template", "billing_tariff",
 		"routing_table", "number_range", "partner", "operator", "subscriber_consent",
+		"category", "ctn", "pattern_placeholder", "guide",
 	}
 	for _, et := range known {
 		payload := []byte(`{}`)

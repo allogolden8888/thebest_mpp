@@ -83,17 +83,24 @@ func (p *Postgres) Ping(ctx context.Context) error {
 	return p.pool.Ping(ctx)
 }
 
-// CheckPermission — allowed=true, если у external_id есть хотя бы одна
-// НЕ отозванная роль, несущая указанное право. roles — имена всех таких
-// ролей (для аудита/отладки на стороне вызывающего, см. iam.proto).
+// CheckPermission — allowed=true, если активный staff account с external_id
+// имеет хотя бы одну НЕ отозванную роль, несущую указанное право. Проверка
+// staff_accounts.active выполняется на каждом запросе намеренно: деактивация
+// должна отзывать доступ немедленно, даже если JWT пользователя ещё не истёк.
+// roles — имена всех таких ролей (для аудита/отладки на стороне вызывающего,
+// см. iam.proto).
 func (p *Postgres) CheckPermission(ctx context.Context, externalID, permission string) (bool, []string, error) {
 	rows, err := p.pool.Query(ctx, `
 		SELECT DISTINCT r.name
 		FROM iam.staff_role_assignments sra
+		JOIN iam.staff_accounts sa ON sa.external_id = sra.external_id
 		JOIN iam.roles r ON r.id = sra.role_id
 		JOIN iam.role_permissions rp ON rp.role_id = r.id
 		JOIN iam.permissions perm ON perm.id = rp.permission_id
-		WHERE sra.external_id = $1 AND sra.revoked_at IS NULL AND perm.name = $2
+		WHERE sra.external_id = $1
+		  AND sa.active = true
+		  AND sra.revoked_at IS NULL
+		  AND perm.name = $2
 		ORDER BY r.name`, externalID, permission)
 	if err != nil {
 		return false, nil, fmt.Errorf("CheckPermission: %w", err)

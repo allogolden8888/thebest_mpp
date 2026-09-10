@@ -596,6 +596,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/chat/threads": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listChatThreads"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/chat/{partner_id}/messages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listChatMessages"];
+        put?: never;
+        post: operations["sendChatMessage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1053,6 +1085,36 @@ export interface components {
             kafka_lag_available: boolean;
             readyz?: components["schemas"]["ReadyzSnapshot"] | null;
             readyz_available: boolean;
+        };
+        ChatMessage: {
+            /** Format: int64 */
+            id: number;
+            partner_id: string;
+            /** @enum {string} */
+            sender_type: "partner" | "admin";
+            sender_id: string;
+            body: string;
+            /** Format: date-time */
+            created_at?: string;
+            /** Format: date-time */
+            read_at?: string;
+        };
+        ListChatMessagesResponse: {
+            messages: components["schemas"]["ChatMessage"][];
+        };
+        SendChatMessageRequest: {
+            body: string;
+        };
+        ChatThread: {
+            partner_id: string;
+            last_message_body: string;
+            /** Format: date-time */
+            last_message_at?: string;
+            /** Format: int64 */
+            unread_count: number;
+        };
+        ListChatThreadsResponse: {
+            threads: components["schemas"]["ChatThread"][];
         };
     };
     responses: never;
@@ -2065,6 +2127,76 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["OpsSnapshotResponse"];
+                };
+            };
+        };
+    };
+    listChatThreads: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListChatThreadsResponse"];
+                };
+            };
+        };
+    };
+    listChatMessages: {
+        parameters: {
+            query?: {
+                since?: string;
+            };
+            header?: never;
+            path: {
+                partner_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListChatMessagesResponse"];
+                };
+            };
+        };
+    };
+    sendChatMessage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                partner_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SendChatMessageRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChatMessage"];
                 };
             };
         };

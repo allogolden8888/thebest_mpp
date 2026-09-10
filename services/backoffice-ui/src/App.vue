@@ -176,6 +176,12 @@ const allMenuOptions = [
     permission: "incident:manage" as string | undefined,
   },
   {
+    label: () => h(RouterLink, { to: "/chat" }, () => "Chat"),
+    key: "chat",
+    adminOnly: false,
+    permission: "chat:write" as string | undefined,
+  },
+  {
     label: () => h(RouterLink, { to: "/ops-health" }, () => "Ops Health"),
     key: "ops-health",
     adminOnly: false,

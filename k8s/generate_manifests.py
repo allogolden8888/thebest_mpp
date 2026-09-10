@@ -29,6 +29,11 @@ NAMESPACE = "mpp"
 IMAGE_REGISTRY = "registry.mpp.internal"
 HEALTH_PORT = 9090  # /metrics (Prometheus), /healthz, /readyz — новая платформенная конвенция,
                      # ни в одном из HLD/LLD документов порт/путь не был зафиксирован явно.
+# Strimzi строит bootstrap Service как <Kafka.metadata.name>-kafka-bootstrap.
+# infra/kafka/generate_kafka_topics.py создаёт Kafka/mpp-kafka, поэтому
+# короткое kafka-bootstrap.mpp.svc никогда не существует.
+KAFKA_BOOTSTRAP_SERVERS = "mpp-kafka-kafka-bootstrap.mpp.svc:9092"
+PROMETHEUS_URL = "http://prometheus-operated.monitoring.svc:9090"
 
 # HIGH находка кодревью (PART 2, partner-rest-receiver #4) — см. полный
 # комментарий у SECRET_DEPENDENCIES ниже. Оба сервиса, читающие статический
@@ -39,6 +44,22 @@ PARTNER_CONFIG_SERVICES = ["partner-rest-receiver", "partner-notification-servic
 PARTNER_CONFIG_MOUNT_DIR = "/etc/mpp/partner-config"
 PARTNER_CONFIG_FIXTURE = "partner.valid.json"
 PARTNER_CONFIG_CONFIGMAP_NAME = "partner-config-fixture"
+
+# Продюсеры/Kafka Admin clients, которые не являются workload
+# consumer'ами и поэтому не отмечены kafka_consumer=True. Список
+# подтверждён по KAFKA_BOOTSTRAP_SERVERS в реальных entrypoint'ах.
+KAFKA_NON_CONSUMER_CLIENTS = {
+    "partner-rest-receiver",
+    "partner-smpp-gateway",
+    "operator-smpp-session-manager",
+    "operator-http-gateway",
+    "scheduler-critical-sweep",
+    "execution-control-service",
+    "ops-visibility-service",
+    "config-event-publisher",
+    "backoffice-api",
+    "replay-service",
+}
 
 
 def credential_ref_to_env_var(credential_ref: str) -> str:
@@ -96,7 +117,8 @@ class Service:
     sizing_source: str  # цитата, откуда взято число
     kafka_consumer: bool = False  # потребляет топик стадии/события => KEDA ScaledObject по lag
     external_port: dict | None = None  # {"name":..., "port":..., "protocol":"TCP"|"HTTP"} — внешний inbound
-    internal_grpc_port: int | None = None  # gRPC-порт для instance-addressed вызовов (sticky-сервисы)
+    internal_http_port: int | None = None  # HTTP ClusterIP только внутри mesh, без отдельного Ingress
+    internal_grpc_port: int | None = None  # gRPC server внутри mesh; sticky получают headless Service
     rocksdb_pvc_gi: int | None = None  # для kafka-streams-statefulset — размер PVC под RocksDB
     notes: str = ""
     secrets: list[str] = field(default_factory=list)  # ключи из SECRET_K8S_NAME — envFrom на соответствующий Secret,
@@ -169,10 +191,14 @@ SERVICES = [
             "не в отдельной таблице capacity_model.md — сервис появился уже после того, как этот документ "
             "писался (luminous-hugging-charm.md Фаза 8), тот же пул 'Мелкие Go control-plane' "
             "(capacity_model.md:12,113). Без internal_grpc_port и без external_port — у этого сервиса "
-            "нет отдельного бизнес-порта вообще: GET /snapshot отдаётся с того же HEALTH_PORT=9090, что "
+            "нет отдельного бизнес-порта: GET /snapshot отдаётся с того же HEALTH_PORT=9090, что "
             "и /healthz/readyz/metrics (ops-visibility-service/README.md — решение того шага, не редизайн "
             "здесь), не через отдельный gRPC/HTTP-сервер, как у остальных сервисов этого пула.",
-            kafka_consumer=False, resource_tier="control-plane"),
+            kafka_consumer=False, internal_http_port=HEALTH_PORT, resource_tier="control-plane"),
+    Service("chat-service", "go", "stateless", None,
+            "не в capacity_model.md — small Go control-plane сервис "
+            "(services/chat-service/README.md)", internal_grpc_port=9000,
+            resource_tier="control-plane"),
     Service("configuration-service", "go", "stateless", None,
             "пул 'Мелкие Go control-plane' (capacity_model.md:12,113)", internal_grpc_port=9000,
             resource_tier="control-plane"),
@@ -197,14 +223,26 @@ SERVICES = [
             "тот же языковой конфликт документов, что у billing-outbox-publisher, см. README.md",
             kafka_consumer=True),
     Service("billing-reconciliation", "java", "stateless", 16,
-            "capacity_model.md:115", internal_grpc_port=9000),
+            "capacity_model.md:115"),
+    Service("billing-self-service-api", "go", "stateless", None,
+            "не в capacity_model.md — read-mostly Go control-plane API "
+            "(services/billing-self-service-api/cmd/billing-self-service-api/main.go)",
+            internal_http_port=8080, resource_tier="control-plane"),
+    Service("compliance-api", "go", "stateless", None,
+            "не в capacity_model.md — Go control-plane API "
+            "(services/compliance-api/cmd/compliance-api/main.go)",
+            internal_http_port=8080, resource_tier="control-plane"),
     Service("partner-api", "go", "stateless", None,
             "пул 'Мелкие Go control-plane' (capacity_model.md:113)",
             external_port={"name": "http", "port": 8080, "protocol": "TCP"}, resource_tier="control-plane"),
     Service("backoffice-api", "go", "stateless", None,
             "пул 'Мелкие Go control-plane' (capacity_model.md:113)",
-            external_port={"name": "http", "port": 8080, "protocol": "TCP"}, internal_grpc_port=9000,
+            external_port={"name": "http", "port": 8080, "protocol": "TCP"},
             resource_tier="control-plane"),
+    Service("partner-self-service-api", "go", "stateless", None,
+            "не в capacity_model.md — Go control-plane API "
+            "(services/partner-self-service-api/cmd/partner-self-service-api/main.go)",
+            internal_http_port=8080, resource_tier="control-plane"),
     Service("replay-service", "go", "stateless", None,
             "пул 'Мелкие Go control-plane' (capacity_model.md:113)", internal_grpc_port=9000,
             resource_tier="control-plane"),
@@ -225,8 +263,15 @@ SERVICES = [
             "dlr-correlation-writer рядом со своим доменом.",
             kafka_consumer=True, resource_tier="control-plane"),
     Service("partner-notification-service", "go", "stateless", 24,
-            "capacity_model.md:118", kafka_consumer=True, internal_grpc_port=9000),
+            "capacity_model.md:118", kafka_consumer=True),
+    Service("template-management-service", "rust", "stateless", None,
+            "не в capacity_model.md — control-plane API + config.changes projector "
+            "(services/template-management-service/src/main.rs)",
+            kafka_consumer=True, internal_http_port=8080, resource_tier="control-plane"),
     Service("backoffice-ui", "go", "frontend", None,
+            "не в capacity model — статический SPA, floor MIN_REPLICAS",
+            external_port={"name": "http", "port": 8080, "protocol": "TCP"}, resource_tier="control-plane"),
+    Service("partner-portal-ui", "go", "frontend", None,
             "не в capacity model — статический SPA, floor MIN_REPLICAS",
             external_port={"name": "http", "port": 8080, "protocol": "TCP"}, resource_tier="control-plane"),
 ]
@@ -297,6 +342,7 @@ SECRET_DEPENDENCIES: dict[str, list[str]] = {
     # этой таблице). Никакого Postgres — эта фаза явно не заводит таблицу
     # трендов (ops.health_snapshots отложена планом).
     "ops-visibility-service": ["redis-runtime"],
+    "chat-service": ["postgresql"],
     "configuration-service": ["postgresql"],
     "config-cache-projector": ["redis-configuration"],
     "consent-cache-projector": ["redis-runtime"],
@@ -304,6 +350,8 @@ SECRET_DEPENDENCIES: dict[str, list[str]] = {
     "billing-outbox-publisher": ["redis-billing"],
     "billing-ledger-writer": ["postgresql"],
     "billing-reconciliation": ["redis-billing", "postgresql"],
+    "billing-self-service-api": ["postgresql"],
+    "compliance-api": ["redis-runtime"],
     "partner-api": ["postgresql", "clickhouse"],
     "backoffice-api": ["postgresql", "clickhouse"],
     "replay-service": ["postgresql"],
@@ -311,6 +359,7 @@ SECRET_DEPENDENCIES: dict[str, list[str]] = {
     "analytics-writer": ["clickhouse"],
     "pdu-log-writer": ["clickhouse"],
     "partner-notification-service": ["redis-runtime"],
+    "template-management-service": ["postgresql"],
 }
 
 # HIGH находка кодревью (PART 2, partner-rest-receiver #4): EnvAuthVerifier
@@ -395,6 +444,8 @@ def _container(svc: Service) -> dict:
     ports = [{"containerPort": HEALTH_PORT, "name": "health"}]
     if svc.external_port:
         ports.append({"containerPort": svc.external_port["port"], "name": svc.external_port["name"]})
+    if svc.internal_http_port and svc.internal_http_port != HEALTH_PORT:
+        ports.append({"containerPort": svc.internal_http_port, "name": "http"})
     if svc.internal_grpc_port:
         ports.append({"containerPort": svc.internal_grpc_port, "name": "grpc"})
     container = {
@@ -413,12 +464,21 @@ def _container(svc: Service) -> dict:
         container["volumeMounts"] = volume_mounts
     if svc.secrets:
         container["envFrom"] = [{"secretRef": {"name": SECRET_K8S_NAME[key]}} for key in svc.secrets]
+    env_vars = []
+    if svc.kafka_consumer or svc.name in KAFKA_NON_CONSUMER_CLIENTS:
+        env_vars.append({"name": "KAFKA_BOOTSTRAP_SERVERS", "value": KAFKA_BOOTSTRAP_SERVERS})
+    if svc.name == "execution-control-service":
+        # Prometheus устанавливается Terraform-ом в namespace
+        # monitoring (infra/terraform/observability.tf), а не mpp.
+        env_vars.append({"name": "PROMETHEUS_URL", "value": PROMETHEUS_URL})
     if svc.name in PARTNER_CONFIG_SERVICES:
         # Оба Go/Rust consumer'а (main.rs/main.go) читают именно
         # PARTNER_CONFIG_PATH, откатываясь на relative dev-путь, если её
         # нет — тот путь в реальном образе не существует (см. комментарий у
         # PARTNER_CONFIG_SERVICES выше).
-        container["env"] = [{"name": "PARTNER_CONFIG_PATH", "value": f"{PARTNER_CONFIG_MOUNT_DIR}/{PARTNER_CONFIG_FIXTURE}"}]
+        env_vars.append({"name": "PARTNER_CONFIG_PATH", "value": f"{PARTNER_CONFIG_MOUNT_DIR}/{PARTNER_CONFIG_FIXTURE}"})
+    if env_vars:
+        container["env"] = env_vars
     return container
 
 
@@ -444,11 +504,37 @@ def build_service_account(svc: Service) -> dict:
     }
 
 
+def node_pool_for(svc: Service) -> str:
+    """Return the Terraform node-pool key that can host ``svc``.
+
+    Sticky workloads share the isolated sticky pool regardless of language;
+    Kafka Streams workloads are Java in the current catalog and use the Java
+    pool. Ordinary stateless/frontend pods use their language pool. These
+    values intentionally mirror ``var.node_pool_sizes`` keys and the
+    ``mpp.io/workload-class`` taints in infra/terraform/k8s-cluster.tf.
+    """
+    if svc.workload_class == "sticky-statefulset":
+        return "sticky-pool"
+    return f"{svc.lang}-pool"
+
+
 def _pod_template(svc: Service) -> dict:
+    node_pool = node_pool_for(svc)
     spec = {
         "serviceAccountName": svc.name,
         "containers": [_container(svc)],
         "terminationGracePeriodSeconds": 60 if svc.workload_class != "kafka-streams-statefulset" else 120,
+        # infra/terraform/k8s-cluster.tf taint'ит ВСЕ node pool через
+        # mpp.io/workload-class=<pool>:NoSchedule. Без этой пары
+        # nodeSelector+toleration ни один application pod нельзя
+        # было запланировать на создаваемые Terraform-ом узлы.
+        "nodeSelector": {"mpp.io/workload-class": node_pool},
+        "tolerations": [{
+            "key": "mpp.io/workload-class",
+            "operator": "Equal",
+            "value": node_pool,
+            "effect": "NoSchedule",
+        }],
     }
     if svc.workload_class == "sticky-statefulset":
         # Разъезд по нодам важен для доступности живых bind-соединений при отказе ноды.
@@ -531,6 +617,45 @@ def build_external_service(svc: Service) -> dict:
     }
 
 
+def build_internal_http_service(svc: Service) -> dict:
+    """ClusterIP for HTTP dependencies that are reachable only inside mesh.
+
+    Self-service APIs are reverse-proxied by partner-portal-ui; compliance-api
+    is proxied by backoffice-api; template-management-service is called by
+    partner-self-service-api. Giving those services an Ingress of their own
+    would bypass the intended frontend/API boundary.
+    """
+    port = svc.internal_http_port
+    return {
+        "apiVersion": "v1", "kind": "Service",
+        "metadata": _metadata(svc),
+        "spec": {
+            "type": "ClusterIP",
+            "selector": {"app": svc.name},
+            "ports": [{"name": "http", "port": port, "targetPort": port, "protocol": "TCP"}],
+        },
+    }
+
+
+def build_internal_grpc_service(svc: Service) -> dict:
+    """ClusterIP for ordinary stateless gRPC servers.
+
+    Stateful gRPC servers already receive a headless Service so callers can
+    address a particular pod. Stateless control-plane servers need a normal
+    load-balanced Service for their documented ``<name>.mpp.svc:9000`` DNS.
+    """
+    port = svc.internal_grpc_port
+    return {
+        "apiVersion": "v1", "kind": "Service",
+        "metadata": _metadata(svc),
+        "spec": {
+            "type": "ClusterIP",
+            "selector": {"app": svc.name},
+            "ports": [{"name": "grpc", "port": port, "targetPort": port, "protocol": "TCP"}],
+        },
+    }
+
+
 def build_ingress(svc: Service) -> dict:
     """Только для внешних HTTP ClusterIP-сервисов (build_external_service даёт
     им ClusterIP именно потому, что workload_class != sticky-statefulset — тот
@@ -585,7 +710,7 @@ def build_keda_scaledobject(svc: Service, replicas: int) -> dict:
             "triggers": [{
                 "type": "kafka",
                 "metadata": {
-                    "bootstrapServers": "kafka-bootstrap.mpp.svc:9092",
+                    "bootstrapServers": KAFKA_BOOTSTRAP_SERVERS,
                     "consumerGroup": svc.name,
                     "topic": f"stage.{svc.name}",
                     "lagThreshold": "1000",
@@ -617,10 +742,14 @@ def render_service(svc: Service) -> list[dict]:
     docs = [build_service_account(svc), build_workload(svc, replicas), build_pdb(svc, replicas)]
     if svc.workload_class in ("sticky-statefulset", "kafka-streams-statefulset"):
         docs.append(build_headless_service(svc))
+    elif svc.internal_grpc_port:
+        docs.append(build_internal_grpc_service(svc))
     if svc.external_port:
         docs.append(build_external_service(svc))
         if svc.workload_class != "sticky-statefulset":  # ClusterIP HTTP-сервисы — см. build_ingress
             docs.append(build_ingress(svc))
+    if svc.internal_http_port:
+        docs.append(build_internal_http_service(svc))
     if svc.kafka_consumer and svc.workload_class == "stateless":
         docs.append(build_keda_scaledobject(svc, replicas))
     return docs
