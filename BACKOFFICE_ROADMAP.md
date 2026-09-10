@@ -2,6 +2,47 @@
 
 Дополняет `BACKOFFICE_API_CATALOG.md` (там — контракты для дизайна). Здесь — что строим, в каком порядке, и почему именно так, с реальным статусом данных под каждой темой (не предположения).
 
+## Production Readiness Review (2026-09-10) — платформа целиком, не только backoffice-экраны
+
+Внешний аудит production-готовности всей платформы (не backoffice UI конкретно — K8s/Terraform/секьюрити/self-service data-plane). Вердикт: **no-go для продакшена, ~2-3/10**. Архитектурный фундамент оценён как продуманный глубже обычного MVP, но есть системные разрывы между кодом, self-service, data plane и инфраструктурой. Зафиксировано здесь как отдельный backlog — требует отдельного планового захода (инфра/K8s/Terraform — не CRUD-экраны), не смешивается со скоупом остального этого файла.
+
+### P0 — блокирует запуск
+
+1. **Production-деплой не собирается в цельную систему.** 41 сервис в репозитории, 36 в K8s-каталоге, 32 в registry — списки поддерживаются вручную и разъехались (`k8s/generate_manifests.py:107`, `infra/terraform/registry.tf:15`); в K8s нет `partner-self-service-api`/`billing-self-service-api`/`compliance-api`/`partner-portal-ui`/`template-management-service`, в registry дополнительно нет IAM/credentials/incidents/ops-сервисов. Ещё серьёзнее: у всех node pool `NoSchedule` taint, но pod-темплейты не задают `tolerations`/`nodeSelector` — на таком кластере прикладные поды вообще не заскедулятся (`infra/terraform/k8s-cluster.tf:88`, `k8s/generate_manifests.py:434`).
+2. **Секреты и обязательная конфигурация не подключены.** `backoffice-api`/`partner-api` требуют JWT-ключи при старте, `operator-http-gateway` — обязательный webhook token, но генератор секретов создаёт только DB/Redis/ClickHouse/статические partner credentials (`k8s/generate_manifests.py:361`, `backoffice-api/cmd/backoffice-api/main.go:57`, `operator-http-gateway/cmd/operator-http-gateway/main.go:107`). `partner-smpp-gateway` читает `PARTNER_CONFIG_PATH`, но K8s монтирует конфиг только двум другим сервисам — под фактически неработоспособен (`k8s/generate_manifests.py:33`, `partner-smpp-gateway/.../Main.java:63`).
+3. **NetworkPolicy блокирует межсервисный трафик.** Default-deny ingress+egress включён, но egress-правила для gRPC не строятся вообще (только ingress со стороны callee) — тест проверяет только ingress и даёт ложную уверенность (`k8s/network_policies.py:71,135`, `k8s/test_network_policy_reachability.py:46`). Аналогично Prometheus в namespace `monitoring`, а scrape-разрешение ищет его по `podSelector` внутри `mpp` — мониторинг будет заблокирован.
+4. **Self-service не управляет реальным data plane.** Partner self-service пишет новые версии `PARTNER`-конфига в Configuration Service, но REST-gateway/SMPP-gateway/notification-service грузят партнёров из статического файла при старте (`partner-rest-receiver/src/main.rs:89`, `partner-notification-service/internal/config/partner.go:1`). Партнёр может создать application/sender/webhook через UI и получить успех, но live-трафик этого не увидит без ручного рестарта — главный функциональный разрыв self-service.
+5. **Identity-контур не production-класса.** Partner portal предлагает вставить JWT вручную и хранит его в `localStorage` (`partner-portal-ui/src/views/LoginView.vue:1`, `stores/auth.ts:8`); partner-self-service-api доверяет роли из JWT, не проверяя `partner_portal_role_assignments` в IAM (`partner-self-service-api/internal/auth/jwt.go:18`). В backoffice деактивация сотрудника блокирует новый логин, но `CheckPermission` не проверяет `staff_accounts.active` — уже выпущенный 8-часовой токен продолжит давать права (`iam-service/internal/store/store.go:86`).
+6. **Не все защитные механизмы реально работают.** Partner REST receiver использует `AlwaysAdmit` — GLOBAL/PARTNER pause не останавливает приём (`partner-rest-receiver/src/main.rs:118`). У Partner SMPP Gateway есть heartbeat-метод, но нет периодического вызова — живая сессия истечёт в Redis при живом TCP bind (`SessionRedisRegistry.java:49`). Delivery Reconciliation пишет `queue_msg_id` как `operator_id`, ломая reconciliation/query_sm (`delivery-reconciliation-service/.../Main.java:187`).
+7. **Нет production release pipeline.** CI тестирует только 5 из 41 сервисов, self-service/admin-компоненты не покрыты (`.github/workflows/ci.yml:131`); нет сборки/сканирования/подписи/публикации образов, deploy/smoke/canary/rollback; манифесты используют placeholder registry и `:latest` (`k8s/generate_manifests.py:380`).
+
+### P1 — до стабильной эксплуатации
+
+- **Observability**: многие `/metrics` отдают только `*_up 1`, OpenTelemetry на `noopExporter`, нет alert rules/дашбордов/централизованных логов/реального OTel Collector (уже отложено в `development_plan.md:206`).
+- **Security**: Vault standalone/file storage без HA/auto-unseal, TLS выключен (`infra/terraform/vault.tf:5`); Kafka — plaintext listener без SASL/ACL, хотя HLD требует ACL (`infra/kafka/generate_kafka_topics.py:201`); один Postgres-юзер на все сервисы, ClickHouse — `admin` (`infra/terraform/postgresql.tf:40`); ни один Dockerfile не задаёт `USER`, нет pod security context.
+- **Конкурентные изменения**: self-service делает read-modify-write всего partner-документа без ETag/expected version/idempotency key (`partner-self-service-api/internal/httpapi/partnerconfig.go:84`) — параллельные изменения могут тихо затереть друг друга.
+- **Autoscaling**: KEDA считает topic как `stage.<service-name>`, но, например, Config Cache Projector потребляет `config.changes` (`k8s/generate_manifests.py:559`, `config-cache-projector/internal/kafkaio/consumer.go:16`) — большинство autoscaling-сигналов смотрит не туда.
+- **Capacity/DR**: модель до 20k TPS расчётная, не измеренная (`capacity_model.md:4`); локальный результат на 300 TPS нестабилен и выше целевого p99 (`PLATFORM_STATE_FOR_REVIEW.md:9`); нет проверенного backup/restore, RPO/RTO, DR-топологии, chaos-прогонов, production runbook.
+
+### P2 — функциональная полнота
+
+Уже отражено в разделах ниже этого файла: provisioning нового оператора без ручного изменения compose/K8s, модерация шаблонов/sender ID, TPS/statistics dashboards, PDU-журналы, MT session disconnect, requests/approval workflow, полноценные partner message search/status/DLR.
+
+### Рекомендованный порядок (аудита)
+
+1. K8s scheduling + NetworkPolicy + секреты + единый каталог сервисов.
+2. Один E2E-сценарий: партнёр/application через портал → реальное сообщение принимается немедленно → обрабатывается → DLR/callback без рестарта.
+3. Полноценный IdP/OIDC PKCE, MFA, отзыв сессий, единая IAM-проверка staff/partner.
+4. CI для всех сервисов, immutable image digest, security scan/SBOM/signing, staging deploy, smoke/rollback.
+5. Реальные метрики/трейсинг/логи, SLO, alerting.
+6. Load/failover/chaos/backup-restore испытания — только затем возвращаться к P2 экранам.
+
+Минимальный go-live gate: чистый кластер разворачивается автоматически, все поды Ready, self-service реально меняет data plane, отзыв пользователя/ключа действует за измеримый SLA, релиз откатывается, backup восстанавливается, целевой TPS и failure modes подтверждены на production-подобном стенде.
+
+**Статус**: зафиксировано как backlog 2026-09-10, реализация не начата — ждёт отдельного планового захода (масштаб и домен — инфра/K8s/security, не backoffice-экраны, которыми занят остальной этот файл).
+
+---
+
 ## Текущее состояние (уже живое, задеплоено, работает)
 
 | Область | Экран | Статус |
