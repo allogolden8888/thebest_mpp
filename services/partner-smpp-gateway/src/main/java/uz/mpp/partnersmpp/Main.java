@@ -7,6 +7,7 @@ import uz.mpp.partnersmpp.grpcserver.DeliverSmServer;
 import uz.mpp.partnersmpp.health.HealthServer;
 import uz.mpp.partnersmpp.kafkaio.IncomingPublisher;
 import uz.mpp.partnersmpp.registry.SessionRedisRegistry;
+import uz.mpp.partnersmpp.registry.SessionHeartbeatScheduler;
 import uz.mpp.partnersmpp.server.ChannelRegistry;
 import uz.mpp.partnersmpp.server.PartnerAuthenticator;
 import uz.mpp.partnersmpp.server.PartnerSmppServer;
@@ -36,8 +37,13 @@ public final class Main {
         String kafkaBrokers = env("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap.mpp.svc:9092");
         IncomingPublisher publisher = new IncomingPublisher(kafkaBrokers);
 
-        String redisUri = "redis://" + env("REDIS_RUNTIME_HOST", "localhost") + ":" + env("REDIS_RUNTIME_PORT", "6379");
-        SessionRedisRegistry sessionRegistry = new SessionRedisRegistry(redisUri, env("HOSTNAME", "partner-smpp-gateway-0"), Duration.ofSeconds(30));
+        String redisUri = RedisUrl.buildRuntimeUrl();
+        Duration heartbeatInterval = Duration.ofSeconds(Long.parseLong(env("SESSION_HEARTBEAT_INTERVAL_SECONDS", "30")));
+        SessionRedisRegistry sessionRegistry = new SessionRedisRegistry(
+            redisUri,
+            env("HOSTNAME", "partner-smpp-gateway-0"),
+            heartbeatInterval
+        );
 
         // AUTH_VERIFIER_MODE=vault (по умолчанию) — реальный партнёрский
         // конфиг + реальный Vault (VaultAuthenticator, см. README "Vault-
@@ -74,6 +80,11 @@ public final class Main {
         }
 
         ChannelRegistry channelRegistry = new ChannelRegistry();
+        SessionHeartbeatScheduler heartbeatScheduler = new SessionHeartbeatScheduler(
+            channelRegistry,
+            sessionRegistry,
+            heartbeatInterval
+        );
         String endpoint = env("HOSTNAME", "partner-smpp-gateway-0") + ":" + env("SMPP_PORT", "2775");
         PartnerSmppServer smppServer = new PartnerSmppServer(
             authenticator,
@@ -92,6 +103,8 @@ public final class Main {
             .build()
             .start();
         System.out.println("gRPC PartnerDeliverSmService слушает :" + Integer.parseInt(env("GRPC_PORT", "9000")));
+
+        heartbeatScheduler.start();
 
         if (vaultClientForHealth != null) {
             VaultClient vaultForCheck = vaultClientForHealth;
@@ -115,6 +128,7 @@ public final class Main {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             grpcServer.shutdown();
             smppServer.stop();
+            heartbeatScheduler.close();
             sessionRegistry.close();
             publisher.close();
             health.stop();

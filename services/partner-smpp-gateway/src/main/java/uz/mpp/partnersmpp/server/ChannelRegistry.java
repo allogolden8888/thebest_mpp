@@ -2,6 +2,7 @@ package uz.mpp.partnersmpp.server;
 
 import io.netty.channel.Channel;
 
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -18,11 +19,18 @@ public final class ChannelRegistry {
     public record ActiveSession(Channel channel, long sessionEpoch) {
     }
 
-    private final Map<String, ActiveSession> sessions = new ConcurrentHashMap<>();
+    /** Immutable identity of a currently bound session, safe to hand to background workers. */
+    public record ActiveSessionRef(String partnerId, String systemId, long sessionEpoch) {
+    }
+
+    private record SessionKey(String partnerId, String systemId) {
+    }
+
+    private final Map<SessionKey, ActiveSession> sessions = new ConcurrentHashMap<>();
     private final AtomicLong epochSource = new AtomicLong();
 
-    private static String key(String partnerId, String systemId) {
-        return partnerId + ":" + systemId;
+    private static SessionKey key(String partnerId, String systemId) {
+        return new SessionKey(partnerId, systemId);
     }
 
     /** register — вызывается при успешном bind; возвращает новый session_epoch. */
@@ -43,5 +51,20 @@ public final class ChannelRegistry {
 
     public ActiveSession lookup(String partnerId, String systemId) {
         return sessions.get(key(partnerId, systemId));
+    }
+
+    /**
+     * Consistent-enough point-in-time snapshot for the Redis heartbeat worker.
+     * A session that closes immediately after the snapshot is harmless because
+     * Redis updates are guarded by {@code session_epoch}.
+     */
+    public List<ActiveSessionRef> activeSessionsSnapshot() {
+        return sessions.entrySet().stream()
+            .map(entry -> new ActiveSessionRef(
+                entry.getKey().partnerId(),
+                entry.getKey().systemId(),
+                entry.getValue().sessionEpoch()
+            ))
+            .toList();
     }
 }

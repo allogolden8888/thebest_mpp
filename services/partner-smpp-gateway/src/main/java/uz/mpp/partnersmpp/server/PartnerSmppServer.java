@@ -98,13 +98,15 @@ public final class PartnerSmppServer {
 
     public void stop() {
         if (serverChannel != null) {
-            serverChannel.close();
+            serverChannel.close().syncUninterruptibly();
         }
         if (bossGroup != null) {
-            bossGroup.shutdownGracefully();
+            bossGroup.shutdownGracefully(0, 5, TimeUnit.SECONDS).syncUninterruptibly();
         }
         if (workerGroup != null) {
-            workerGroup.shutdownGracefully();
+            // Wait until child-channel channelInactive callbacks have removed
+            // their Redis registrations before Main closes the Redis client.
+            workerGroup.shutdownGracefully(0, 5, TimeUnit.SECONDS).syncUninterruptibly();
         }
     }
 }

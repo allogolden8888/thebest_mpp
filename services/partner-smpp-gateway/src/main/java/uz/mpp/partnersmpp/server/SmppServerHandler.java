@@ -29,7 +29,7 @@ public final class SmppServerHandler extends SimpleChannelInboundHandler<ByteBuf
     }
 
     public interface UnbindListener {
-        void onUnbind(String partnerId, String systemId);
+        void onUnbind(String partnerId, String systemId, long sessionEpoch);
     }
 
     private final PartnerAuthenticator authenticator;
@@ -43,6 +43,7 @@ public final class SmppServerHandler extends SimpleChannelInboundHandler<ByteBuf
     private String partnerId;
     private String applicationId;
     private String systemId;
+    private long sessionEpoch;
 
     public SmppServerHandler(PartnerAuthenticator authenticator, IncomingPublishFunction incomingSink,
                               TokenBucket rateLimiter, ChannelRegistry channelRegistry) {
@@ -139,6 +140,7 @@ public final class SmppServerHandler extends SimpleChannelInboundHandler<ByteBuf
         this.systemId = body.systemId();
         if (channelRegistry != null) {
             long epoch = channelRegistry.register(partnerId, systemId, ctx.channel());
+            this.sessionEpoch = epoch;
             if (bindListener != null) {
                 bindListener.onBind(partnerId, systemId, epoch);
             }
@@ -199,7 +201,7 @@ public final class SmppServerHandler extends SimpleChannelInboundHandler<ByteBuf
         if (channelRegistry != null && partnerId != null) {
             channelRegistry.unregisterIfSameChannel(partnerId, systemId, ctx.channel());
             if (unbindListener != null) {
-                unbindListener.onUnbind(partnerId, systemId);
+                unbindListener.onUnbind(partnerId, systemId, sessionEpoch);
             }
             partnerId = null; // idempotency guard — evita двойной unregister (unbind + channelInactive)
         }

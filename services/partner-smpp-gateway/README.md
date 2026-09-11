@@ -2,7 +2,34 @@
 
 **Основание:** `development_plan.md` — Субагент 1, Operator/partner-facing протоколы. `services_specifictaion.md` §2.2: SMPP bind/unbind, `submit_sm`, `deliver_sm`, partner-side `query_sm`, `enquire_link`. **Архитектурное решение LLD, соблюдено буквально**: "Не рекомендуется делать критический Gateway полностью зависимым от старой сторонней SMPP-библиотеки" — внутренний `smpp-codec`/`smpp-pdu-model` реализован с нуля на Netty (`src/main/java/uz/mpp/partnersmpp/codec/`), JSMPP/cloudhopper не используются даже как зависимость.
 
-**Статус:** реально компилируется и тестируется — `mvn test`, **59/59** (Java 25, было 38 — +21 по итогам Vault-аутентификации ниже: `VaultClientTest` 9, `PartnerConfigLoaderTest` 5, `VaultAuthenticatorTest` 7). Codec протестирован round-trip. **Полный SMPP-сервер протестирован через реальный TCP localhost socket** (не мок) — `PartnerSmppServerIntegrationTest`: настоящий Netty-сервер на эфемерном порту, настоящий `java.net.Socket`-клиент, настоящая сериализация PDU в обе стороны. Redis-путь протестирован против реального локального Redis (brew).
+**Статус:** реально компилируется и тестируется — `mvn test`, **71 тест** (Java 25). Codec протестирован round-trip. **Полный SMPP-сервер протестирован через реальный TCP localhost socket** (не мок) — `PartnerSmppServerIntegrationTest`: настоящий Netty-сервер на эфемерном порту, настоящий `java.net.Socket`-клиент, настоящая сериализация PDU в обе стороны. Redis-путь протестирован против реального локального Redis (brew). Последний прогон: 67/71 прошли, оставшиеся 4 `VaultClientTest` требуют запущенный dev Vault на `127.0.0.1:8200`; отдельный heartbeat/registry/TCP-набор — 24/24.
+
+## P0: периодический heartbeat живых SMPP-сессий (2026-09-11)
+
+`Main` теперь запускает `SessionHeartbeatScheduler`: один fixed-delay worker
+раз в `SESSION_HEARTBEAT_INTERVAL_SECONDS` (default 30с) берёт snapshot только
+текущих bound-каналов и продлевает Redis TTL (3×interval). Fixed delay не
+накапливает очередь при медленном Redis; ошибка одной сессии не останавливает
+остальные и не отменяет следующие тики. При shutdown worker гарантированно
+останавливается до закрытия Redis client.
+
+Heartbeat и unregister теперь fenced по `gateway_instance_id + session_epoch`
+атомарными Lua scripts: запоздавший tick/close старого TCP-сеанса не может
+продлить или удалить запись нового bind. Если TTL текущей локальной живой
+сессии истёк во время краткого отказа Redis, heartbeat восстанавливает запись;
+чужую/newer запись он не перезаписывает. Дополнительно закрыта локальная гонка
+out-of-order bind callbacks: меньший epoch не перезаписывает уже
+зарегистрированный больший.
+
+В том же production path исправлен Redis URI: `REDIS_RUNTIME_PASSWORD` из
+ExternalSecret теперь реально включается и URL-экранируется; остаются
+`REDIS_RUNTIME_URL` override и passwordless local-dev режим.
+
+Проверка: `SessionHeartbeatSchedulerTest`, `SessionRedisRegistryTest`,
+`RedisUrlTest`, `ChannelRegistryTest`, `PartnerSmppServerIntegrationTest` —
+**24/24 passed**, включая periodic stop, изоляцию ошибки, восстановление
+утраченной Redis-записи текущего bind, stale heartbeat, stale unregister,
+out-of-order register и настоящий Redis/TCP.
 
 ## Проверено кодревью (CODE_REVIEW.md): все 4 находки по partner-smpp-gateway
 
@@ -34,7 +61,7 @@ mvn test
 | `send_submit_sm_resp` | `SmppServerHandler::handleSubmitSm` | `PartnerSmppServerIntegrationTest` — реальный `submit_sm_resp` с `ESME_ROK`/`ESME_RINVBNDSTS`/`ESME_RTHROTTLED` |
 | `handle_deliver_sm_command` / `send_deliver_sm` | `grpcserver/DeliverSmServer` (`platform-contracts/grpc/partner_gateway.proto`, `PartnerDeliverSmService`) | `DeliverSmServerTest` — `DELIVERED`/`NO_ACTIVE_SESSION`/`STALE_EPOCH`, реальная запись PDU-байтов в `EmbeddedChannel` |
 | `handle_enquire_link` | `SmppServerHandler` | `PartnerSmppServerIntegrationTest` — реальный `enquire_link_resp` |
-| `heartbeat_tick` | `registry/SessionRedisRegistry::heartbeat` | `SessionRedisRegistryTest` — обновляет `heartbeat`, не трогает остальные поля |
+| `heartbeat_tick` | `registry/SessionHeartbeatScheduler` + fenced `SessionRedisRegistry::heartbeat` | Периодический worker + реальные Redis-тесты TTL/stale epoch/error isolation/shutdown |
 | `handle_partner_query_sm` | **не реализовано** | — читает PostgreSQL read model через Partner API-совместимый lookup — принадлежит периметру Partner API, не реализовано в этом срезе (см. ниже) |
 
 ## smpp-codec — что реально протестировано
@@ -59,5 +86,5 @@ mvn test
 * **`sync_rate_limit_counters`** (периодическая синхронизация локального token bucket в Runtime Redis, ~1с) — не реализовано; `TokenBucket` полностью локален (in-memory per-connection), агрегированный per-partner счётчик через несколько соединений/инстансов не пишется в Redis.
 * **`handle_deliver_sm_command`/`send_deliver_sm` — fire-and-forget.** `DeliverSmServer` возвращает `DELIVERED` сразу после успешной записи в канал, не дожидаясь реального `deliver_sm_resp` от партнёра. Корреляция по `sequence_number` с ожидающим gRPC-вызовом (полноценный `smpp-window` для gateway-initiated PDU) не реализована — `SmppServerHandler` принимает `DELIVER_SM_RESP` и молча игнорирует его (см. докстринг в коде).
 * **`handle_partner_query_sm`** — не реализовано вообще, требует PostgreSQL read model lookup, совместимый с Partner API (другой сервис Субагента 1, ещё не реализован на момент этого среза).
-* **Heartbeat tick не запущен периодически** — `SessionRedisRegistry.heartbeat` реализован и протестирован, но `Main.java` не заводит периодический таймер, вызывающий его (TTL сессии в Redis истечёт при живом TCP-соединении без heartbeat — это баг для прода, зафиксированный здесь честно, не скрытый).
+* **Cross-pod duplicate bind policy не завершена.** Redis fencing защищает registry-запись, но потерявший ownership старый TCP-канал на другом gateway ещё не закрывается автоматически; нужен отдельный lease/takeover protocol и integration-тест двух gateway instances.
 * **`/metrics`** — плейсхолдер (валидный 200), без реальных счётчиков.
