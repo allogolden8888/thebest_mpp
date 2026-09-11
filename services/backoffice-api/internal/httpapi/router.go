@@ -91,6 +91,13 @@ func NewRouter(d Deps) *chi.Mux {
 		r.Post("/login", handleLogin(d.IamClient, d.TokenIssuer))
 	})
 
+	// GET /v1/.well-known/jwks.json — BACKOFFICE_ROADMAP.md P0 "секреты",
+	// JWKS/kid rotation (jwks.go package doc). Тот же класс исключения из
+	// d.Validator.Middleware, что POST /v1/auth/login выше — публичный по
+	// определению (RFC 7517), не может требовать токен, который он же
+	// помогает проверять.
+	r.Get("/v1/.well-known/jwks.json", handleJWKS(d.Validator))
+
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(d.Validator.Middleware)
 

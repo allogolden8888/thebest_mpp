@@ -49,10 +49,16 @@ func newTestRSAKey(t *testing.T) *rsa.PrivateKey {
 	return key
 }
 
+// testToken — kid проставляется через auth.KeyID(&key.PublicKey), та же
+// логика, что реальный auth.TokenIssuer.Issue (JWKS/kid rotation,
+// internal/auth/keys.go) — auth.NewValidator(&key.PublicKey) в этом файле
+// считает kid тем же способом, иначе токены отвергались бы с ErrMissingKid/
+// ErrUnknownKid.
 func testToken(t *testing.T, key *rsa.PrivateKey, subject string) string {
 	t.Helper()
 	claims := jwt.RegisteredClaims{Subject: subject, ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))}
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token.Header["kid"] = auth.KeyID(&key.PublicKey)
 	signed, err := token.SignedString(key)
 	if err != nil {
 		t.Fatalf("подпись тестового токена failed: %v", err)
@@ -1710,5 +1716,60 @@ func TestHandleStaffAccountsCreateListDeactivateRoundTrip(t *testing.T) {
 	}
 	if !deactivateOut.Deactivated {
 		t.Fatalf("ожидали deactivated=true")
+	}
+}
+
+// TestHandleJWKSPublicNoAuthAndMatchesIssuedToken — GET
+// /v1/.well-known/jwks.json (jwks.go, BACKOFFICE_ROADMAP.md P0 "секреты"):
+// доступен БЕЗ Authorization (тот же класс исключения, что /v1/auth/login),
+// и несёт kid, реально совпадающий с kid токена, выпущенного TokenIssuer'ом
+// того же ключа — доказывает, что issuer.go/jwt.go/jwks.go считают kid
+// одинаково, не только по отдельности в unit-тестах internal/auth.
+func TestHandleJWKSPublicNoAuthAndMatchesIssuedToken(t *testing.T) {
+	deps, _, _, _ := testDeps(t)
+	key := newTestRSAKey(t)
+	deps.Validator = auth.NewValidator(&key.PublicKey)
+	issuer := auth.NewTokenIssuer(key)
+	deps.TokenIssuer = issuer
+
+	router := NewRouter(deps)
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/v1/.well-known/jwks.json")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("ожидали 200 без Authorization, получили %d", resp.StatusCode)
+	}
+
+	var out auth.JWKSet
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if len(out.Keys) != 1 {
+		t.Fatalf("ожидали 1 ключ в JWKS, получили %d", len(out.Keys))
+	}
+	jwk := out.Keys[0]
+	if jwk.Kty != "RSA" || jwk.Alg != "RS256" || jwk.Use != "sig" {
+		t.Fatalf("неожиданные метаданные JWK: %+v", jwk)
+	}
+	wantKid := auth.KeyID(&key.PublicKey)
+	if jwk.Kid != wantKid {
+		t.Fatalf("kid в JWKS = %q, want %q (auth.KeyID того же ключа)", jwk.Kid, wantKid)
+	}
+
+	token, _, err := issuer.Issue("alice")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	claims, err := deps.Validator.ParseBearer("Bearer " + token)
+	if err != nil {
+		t.Fatalf("токен, выпущенный TokenIssuer'ом этого ключа, должен проходить Validator: %v", err)
+	}
+	if claims.Subject != "alice" {
+		t.Fatalf("sub = %q, want alice", claims.Subject)
 	}
 }

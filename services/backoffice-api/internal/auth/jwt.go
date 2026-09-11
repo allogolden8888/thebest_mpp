@@ -46,17 +46,55 @@ type Claims struct {
 	RealmAccess realmAccess `json:"realm_access"`
 }
 
+// Validator — JWKS/kid rotation (keys.go package doc): держит НЕСКОЛЬКО
+// одновременно действующих публичных ключей (обычно текущий + N предыдущих,
+// см. main.go loadJWTValidationKeys), не один хардкоженный ключ. Выбор
+// ключа для конкретного токена идёт по `kid` из заголовка токена, а не
+// перебором/единственным вариантом — ровно тот механизм, который даёт
+// rotation-окно: пока не истекли старые 8h-TTL токены, их kid всё ещё есть
+// в этой map, новые токены уже подписываются другим kid (issuer.go).
 type Validator struct {
-	publicKey *rsa.PublicKey
+	keys map[string]*rsa.PublicKey
 }
 
+// NewValidator — единственный ключ (тот же сигнатура, что до JWKS/kid
+// rotation — намеренно, чтобы не переписывать ~25 существующих call site'ов
+// в router_test.go, у которых ровно один ключ на тест). kid считается
+// автоматически через KeyID (keys.go), вызывающему не нужно ничего знать
+// про kid для однокелевого случая.
 func NewValidator(publicKey *rsa.PublicKey) *Validator {
-	return &Validator{publicKey: publicKey}
+	return &Validator{keys: map[string]*rsa.PublicKey{KeyID(publicKey): publicKey}}
+}
+
+// NewValidatorFromKeys — current + previous, для реальной rotation (main.go
+// loadJWTValidationKeys) и тестов, которым нужно больше одного одновременно
+// действующего ключа. kid каждого ключа считается через KeyID — вызывающему
+// не нужно самому сопоставлять ключ с kid.
+func NewValidatorFromKeys(current *rsa.PublicKey, previous ...*rsa.PublicKey) *Validator {
+	v := NewValidator(current)
+	for _, pub := range previous {
+		v.keys[KeyID(pub)] = pub
+	}
+	return v
+}
+
+// JWKS — текущий набор ключей в формате RFC 7517, для GET
+// /v1/.well-known/jwks.json (httpapi/jwks.go). Отдаёт ВСЕ известные ключи
+// (current + previous) — ровно то, что должно быть публично доступно для
+// верификации токенов, подписанных любым из них.
+func (v *Validator) JWKS() JWKSet {
+	keys := make([]JWK, 0, len(v.keys))
+	for kid, pub := range v.keys {
+		keys = append(keys, jwkFromPublicKey(kid, pub))
+	}
+	return JWKSet{Keys: keys}
 }
 
 var (
 	ErrMissingBearer  = errors.New("отсутствует Authorization: Bearer <token>")
 	ErrMissingSubject = errors.New("токен не содержит claim sub")
+	ErrMissingKid     = errors.New("токен не содержит заголовок kid")
+	ErrUnknownKid     = errors.New("kid токена не входит в текущий JWKS-набор")
 )
 
 func (v *Validator) ParseBearer(header string) (*Claims, error) {
@@ -71,7 +109,15 @@ func (v *Validator) ParseBearer(header string) (*Claims, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
 			return nil, fmt.Errorf("неожидаемый метод подписи: %v", t.Method.Alg())
 		}
-		return v.publicKey, nil
+		kid, ok := t.Header["kid"].(string)
+		if !ok || kid == "" {
+			return nil, ErrMissingKid
+		}
+		pub, ok := v.keys[kid]
+		if !ok {
+			return nil, ErrUnknownKid
+		}
+		return pub, nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("проверка токена не пройдена: %w", err)

@@ -40,7 +40,13 @@ SECRET_KEYS = {
     "redis-configuration-credentials": ["REDIS_CONFIGURATION_HOST", "REDIS_CONFIGURATION_PORT", "REDIS_CONFIGURATION_PASSWORD"],
     "redis-billing-credentials": ["REDIS_BILLING_HOST", "REDIS_BILLING_PORT", "REDIS_BILLING_PASSWORD"],
     "clickhouse-credentials": ["CLICKHOUSE_HOST", "CLICKHOUSE_PORT", "CLICKHOUSE_DB", "CLICKHOUSE_USER", "CLICKHOUSE_PASSWORD"],
-    "backoffice-jwt-keypair": ["JWT_PUBLIC_KEY_PEM", "JWT_PRIVATE_KEY_PEM"],
+    # JWT_PREVIOUS_PUBLIC_KEYS_PEM — JWKS/kid rotation grace window
+    # (infra/terraform/vault-secrets.tf backoffice_jwt_previous_public_keys_pem,
+    # backoffice-api/internal/auth/keys.go). Всегда присутствует в Vault (пустая
+    # строка вне ротации), поэтому всегда включаем в ExternalSecret — та же
+    # схема "поле всегда есть, но может быть пустым", что остальные ключи
+    # здесь, а не отдельный опциональный ExternalSecret на время ротации.
+    "backoffice-jwt-keypair": ["JWT_PUBLIC_KEY_PEM", "JWT_PRIVATE_KEY_PEM", "JWT_PREVIOUS_PUBLIC_KEYS_PEM"],
     "partner-oidc-verification": ["JWT_PUBLIC_KEY_PEM"],
     "operator-webhook-auth": ["WEBHOOK_AUTH_TOKEN"],
 }

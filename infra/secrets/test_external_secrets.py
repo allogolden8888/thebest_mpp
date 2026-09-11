@@ -8,7 +8,9 @@ from generate_external_secrets import (
 EXPECTED_RUNTIME_SECRETS = {
     "backoffice-jwt-keypair": {
         "path": "backoffice-jwt",
-        "keys": {"JWT_PUBLIC_KEY_PEM", "JWT_PRIVATE_KEY_PEM"},
+        # JWT_PREVIOUS_PUBLIC_KEYS_PEM — JWKS/kid rotation grace window
+        # (infra/terraform/vault-secrets.tf, backoffice-api/internal/auth/keys.go).
+        "keys": {"JWT_PUBLIC_KEY_PEM", "JWT_PRIVATE_KEY_PEM", "JWT_PREVIOUS_PUBLIC_KEYS_PEM"},
     },
     "partner-oidc-verification": {
         "path": "partner-oidc-verification",

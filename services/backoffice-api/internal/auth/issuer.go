@@ -26,10 +26,15 @@ const tokenTTL = 8 * time.Hour
 
 type TokenIssuer struct {
 	privateKey *rsa.PrivateKey
+	kid        string
 }
 
+// NewTokenIssuer — kid вычисляется из публичной половины privateKey
+// (KeyID, keys.go), не задаётся отдельно: issuer всегда подписывает ТЕКУЩИМ
+// ключом, и его kid обязан совпадать с тем, что Validator посчитает для
+// того же ключа при верификации (см. keys.go package doc).
 func NewTokenIssuer(privateKey *rsa.PrivateKey) *TokenIssuer {
-	return &TokenIssuer{privateKey: privateKey}
+	return &TokenIssuer{privateKey: privateKey, kid: KeyID(&privateKey.PublicKey)}
 }
 
 // Issue — sub=externalID (staff_accounts.external_id = username, см.
@@ -49,7 +54,13 @@ func (i *TokenIssuer) Issue(externalID string) (token string, expiresAt time.Tim
 		},
 	}
 
-	signed, err := jwt.NewWithClaims(jwt.SigningMethodRS256, claims).SignedString(i.privateKey)
+	jwtToken := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	// kid в заголовке — JWKS/kid rotation (keys.go package doc): Validator
+	// на другой стороне выбирает верификационный ключ ПО ЭТОМУ полю, а не
+	// перебором всех известных ключей подряд.
+	jwtToken.Header["kid"] = i.kid
+
+	signed, err := jwtToken.SignedString(i.privateKey)
 	if err != nil {
 		return "", time.Time{}, err
 	}

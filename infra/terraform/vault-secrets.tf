@@ -33,6 +33,24 @@ variable "backoffice_jwt_private_key_pem" {
   sensitive   = true
 }
 
+# JWKS/kid rotation (backoffice-api/internal/auth/keys.go, BACKOFFICE_ROADMAP.md
+# P0 "секреты" — "статический public key нужно заменить на JWKS/kid
+# rotation"). Пусто по умолчанию: local/dev и текущий production bootstrap
+# работают ровно с одним ключом (backoffice_jwt_public_key_pem/private_key_pem
+# выше), как и раньше. Заполняется ТОЛЬКО во время ротации — оператор кладёт
+# сюда старый public key ПЕРЕД тем, как поменять
+# backoffice_jwt_public_key_pem/private_key_pem на новую пару, ждёт истечения
+# максимального TTL токенов (8h, TokenIssuer tokenTTL), затем очищает это
+# поле обратно в "". Несколько PEM-блоков можно конкатенировать в одну
+# строку — main.go's loadJWTPreviousPublicKeys сам находит границы блоков по
+# -----BEGIN/END-----, отдельной переменной на каждый ключ заводить не нужно.
+variable "backoffice_jwt_previous_public_keys_pem" {
+  description = "0+ конкатенированных PKIX/SPKI RSA public keys предыдущих backoffice issuer keypair'ов, для grace window во время ротации (TF_VAR_backoffice_jwt_previous_public_keys_pem); пусто вне ротации"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 variable "partner_oidc_public_key_pem" {
   description = "PKIX/SPKI RSA public key partner IdP для статической JWT-верификации (TF_VAR_partner_oidc_public_key_pem)"
   type        = string
@@ -169,6 +187,10 @@ resource "vault_kv_secret_v2" "backoffice_jwt" {
   data_json = jsonencode({
     JWT_PUBLIC_KEY_PEM  = var.backoffice_jwt_public_key_pem
     JWT_PRIVATE_KEY_PEM = var.backoffice_jwt_private_key_pem
+    # JWKS/kid rotation grace window — см. variable "backoffice_jwt_previous_public_keys_pem"
+    # выше. Пустая строка вне ротации: backoffice-api's loadJWTPreviousPublicKeys
+    # трактует "" как "нет предыдущих ключей", не как ошибку конфигурации.
+    JWT_PREVIOUS_PUBLIC_KEYS_PEM = var.backoffice_jwt_previous_public_keys_pem
   })
 }
 

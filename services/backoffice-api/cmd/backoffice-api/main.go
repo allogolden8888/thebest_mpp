@@ -54,14 +54,10 @@ func buildPostgresDSN() string {
 	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?pool_max_conns=%s", user, password, host, port, db, poolMaxConns)
 }
 
-func loadJWTPublicKey() (*rsa.PublicKey, error) {
-	pemData := os.Getenv("JWT_PUBLIC_KEY_PEM")
-	if pemData == "" {
-		return nil, fmt.Errorf("JWT_PUBLIC_KEY_PEM не задан")
-	}
+func parseRSAPublicKeyPEM(pemData string) (*rsa.PublicKey, error) {
 	block, _ := pem.Decode([]byte(pemData))
 	if block == nil {
-		return nil, fmt.Errorf("не удалось разобрать PEM из JWT_PUBLIC_KEY_PEM")
+		return nil, fmt.Errorf("не удалось разобрать PEM")
 	}
 	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
@@ -69,9 +65,60 @@ func loadJWTPublicKey() (*rsa.PublicKey, error) {
 	}
 	rsaPub, ok := pub.(*rsa.PublicKey)
 	if !ok {
-		return nil, fmt.Errorf("JWT_PUBLIC_KEY_PEM не является RSA-ключом")
+		return nil, fmt.Errorf("ключ не является RSA-ключом")
 	}
 	return rsaPub, nil
+}
+
+func loadJWTPublicKey() (*rsa.PublicKey, error) {
+	pemData := os.Getenv("JWT_PUBLIC_KEY_PEM")
+	if pemData == "" {
+		return nil, fmt.Errorf("JWT_PUBLIC_KEY_PEM не задан")
+	}
+	rsaPub, err := parseRSAPublicKeyPEM(pemData)
+	if err != nil {
+		return nil, fmt.Errorf("JWT_PUBLIC_KEY_PEM: %w", err)
+	}
+	return rsaPub, nil
+}
+
+// loadJWTPreviousPublicKeys — JWKS/kid rotation (internal/auth/keys.go
+// package doc, BACKOFFICE_ROADMAP.md P0 "секреты"). Опционально: ноль или
+// больше публичных ключей ПРЕДЫДУЩИХ keypair'ов, которые ещё должны
+// верифицировать уже выпущенные, но ещё не истёкшие (8h TTL) токены во
+// время ротации. Один env var с НЕСКОЛЬКИМИ конкатенированными PEM-блоками
+// (не JWT_PREVIOUS_PUBLIC_KEY_PEM_1/_2/...) — pem.Decode сам находит
+// границы блоков по -----BEGIN/END-----, отдельная индексация не нужна и не
+// ограничивает число ключей числом заранее заведённых env var'ов. Пусто по
+// умолчанию — локальный/dev docker-compose работает с ОДНИМ ключом, как и
+// раньше, никакой новой обязательной конфигурации.
+func loadJWTPreviousPublicKeys() ([]*rsa.PublicKey, error) {
+	pemData := os.Getenv("JWT_PREVIOUS_PUBLIC_KEYS_PEM")
+	if pemData == "" {
+		return nil, nil
+	}
+	rest := []byte(pemData)
+	var keys []*rsa.PublicKey
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("JWT_PREVIOUS_PUBLIC_KEYS_PEM: x509.ParsePKIXPublicKey: %w", err)
+		}
+		rsaPub, ok := pub.(*rsa.PublicKey)
+		if !ok {
+			return nil, fmt.Errorf("JWT_PREVIOUS_PUBLIC_KEYS_PEM: один из ключей не является RSA-ключом")
+		}
+		keys = append(keys, rsaPub)
+	}
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("JWT_PREVIOUS_PUBLIC_KEYS_PEM задан, но не содержит ни одного разборного PEM-блока")
+	}
+	return keys, nil
 }
 
 // loadJWTPrivateKey — luminous-hugging-charm.md, BACKOFFICE_DESIGN_SPEC.md
@@ -169,7 +216,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("не удалось загрузить JWT public key: %v", err)
 	}
-	validator := auth.NewValidator(pubKey)
+	previousPubKeys, err := loadJWTPreviousPublicKeys()
+	if err != nil {
+		log.Fatalf("не удалось загрузить JWT_PREVIOUS_PUBLIC_KEYS_PEM: %v", err)
+	}
+	validator := auth.NewValidatorFromKeys(pubKey, previousPubKeys...)
 
 	privKey, err := loadJWTPrivateKey()
 	if err != nil {
