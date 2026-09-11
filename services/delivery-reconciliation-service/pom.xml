@@ -97,6 +97,7 @@
             <include>common/types.proto</include>
             <include>common/stage_contract.proto</include>
             <include>events/config_and_control.proto</include>
+            <include>events/dlq_record.proto</include>
             <include>events/operator_events.proto</include>
             <include>events/message_events.proto</include>
             <include>grpc/operator_gateway.proto</include>

@@ -1,8 +1,10 @@
 package uz.mpp.deliveryreconciliation;
 
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.jooq.DSLContext;
@@ -31,6 +33,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.UUID;
@@ -186,22 +189,93 @@ public final class Main {
 
     /** handle_reconciliation_execute — consumer stage.delivery-reconciliation (StageExecuteCommand). */
     private static void runExecuteConsumer(CaseStore store, StageCompletedPublisher publisher) {
-        try (KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(consumerProps("delivery-reconciliation-service"))) {
+        try (KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(executeConsumerProps())) {
             consumer.subscribe(Collections.singletonList("stage.delivery-reconciliation"));
             while (true) {
                 ConsumerRecords<String, byte[]> records = consumer.poll(Duration.ofSeconds(1));
-                for (var record : records) {
-                    try {
-                        StageExecuteCommand cmd = StageExecuteCommand.parseFrom(record.value());
-                        UUID messageId = UUID.fromString(cmd.getMessageId());
-                        UUID stageExecutionId = UUID.fromString(cmd.getStageExecutionId());
-                        String operatorId = cmd.getDeliveryReconciliation().getQueueMsgId(); // placeholder — см. README
-                        openCase(store, publisher, messageId, stageExecutionId, operatorId);
-                    } catch (Exception e) {
-                        System.err.println("handle_reconciliation_execute failed: " + e.getMessage());
+                // Обрабатываем партиции независимо. После ошибки нельзя
+                // продолжать более поздними offset той же партиции: их
+                // commit перескочил бы через неуспешную запись. Другие
+                // партиции при этом не обязаны останавливаться.
+                for (TopicPartition partition : records.partitions()) {
+                    for (var record : records.records(partition)) {
+                        StageExecuteCommand cmd = null;
+                        try {
+                            cmd = StageExecuteCommand.parseFrom(record.value());
+                            UUID messageId = UUID.fromString(cmd.getMessageId());
+                            UUID stageExecutionId = UUID.fromString(cmd.getStageExecutionId());
+                            String operatorId = operatorIdFrom(cmd);
+                            openCase(store, publisher, messageId, stageExecutionId, operatorId);
+                            commitRecord(consumer, record.topic(), record.partition(), record.offset());
+                        } catch (MissingResolvedOperatorIdException e) {
+                            try {
+                                // Старые команды после schema rollout нельзя ни
+                                // превращать в повреждённый case, ни подтверждать
+                                // одним auto-commit. Сначала штатный DlqRecord,
+                                // затем offset. Replay возможен только после
+                                // обогащения original_command правильным operator.
+                                publisher.publishDlq(cmd, "RESOLVED_OPERATOR_ID_MISSING", e.getMessage()).get();
+                                commitRecord(consumer, record.topic(), record.partition(), record.offset());
+                                System.err.println("legacy stage.delivery-reconciliation command -> DLQ: "
+                                    + cmd.getMessageId());
+                            } catch (Exception dlqError) {
+                                rewindForRetry(consumer, record.topic(), record.partition(), record.offset());
+                                System.err.println("publish reconciliation DLQ failed; offset not committed: "
+                                    + dlqError.getMessage());
+                                break;
+                            }
+                        } catch (Exception e) {
+                            // DB/Kafka и неизвестные ошибки считаются transient.
+                            // poll уже сдвинул локальную позицию, поэтому одного
+                            // отказа от commit недостаточно: явно перематываемся.
+                            rewindForRetry(consumer, record.topic(), record.partition(), record.offset());
+                            System.err.println("handle_reconciliation_execute failed; offset not committed: " + e.getMessage());
+                            break;
+                        }
                     }
                 }
             }
+        }
+    }
+
+    private static Properties executeConsumerProps() {
+        Properties props = consumerProps("delivery-reconciliation-service");
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
+        return props;
+    }
+
+    private static void commitRecord(KafkaConsumer<String, byte[]> consumer,
+                                     String topic, int partition, long offset) {
+        consumer.commitSync(Map.of(new TopicPartition(topic, partition), new OffsetAndMetadata(offset + 1)));
+    }
+
+    private static void rewindForRetry(KafkaConsumer<String, byte[]> consumer,
+                                       String topic, int partition, long offset) {
+        consumer.seek(new TopicPartition(topic, partition), offset);
+    }
+
+    /**
+     * Извлекает operator_id из его собственного protobuf-поля.
+     *
+     * <p>До исправления сюда подставлялся {@code queue_msg_id} —
+     * технический ID очереди Delivery, не идентификатор оператора.
+     * Такая строка записывалась в {@code reconciliation_cases.operator_id}
+     * и делала невозможным корректный resolve Operator endpoint/query_sm.
+     * Пустое новое поле означает старую или повреждённую команду:
+     * fail closed, без выдумывания operator_id из другого namespace.
+     */
+    static String operatorIdFrom(StageExecuteCommand cmd) {
+        String operatorId = cmd.getDeliveryReconciliation().getResolvedOperatorId().trim();
+        if (operatorId.isEmpty()) {
+            throw new MissingResolvedOperatorIdException(
+                "DeliveryReconciliationExtension.resolved_operator_id обязателен");
+        }
+        return operatorId;
+    }
+
+    private static final class MissingResolvedOperatorIdException extends IllegalArgumentException {
+        private MissingResolvedOperatorIdException(String message) {
+            super(message);
         }
     }
 

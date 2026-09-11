@@ -96,9 +96,20 @@ pub fn build_stage_execute(
             // не решение самого Pipeline Engine), поэтому это константа, не поле
             // из ExecutionState — источник этого значения лежит вне сервиса
             // (Scheduler Background Lane решает, когда диспетчеризовать эту стадию).
+            // operator_id нельзя восстанавливать из queue_msg_id (разные
+            // namespace). Источник истины — результат Destination
+            // Resolution, уже накопленный в ExecutionState и так же
+            // передаваемый Delivery. Пустое значение означает порчу
+            // pipeline state; лучше не публиковать ложную команду.
+            let resolved_operator_id = state
+                .resolved_operator_id
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or("Delivery Reconciliation без resolved_operator_id в состоянии")?;
             StageExtension::DeliveryReconciliation(DeliveryReconciliationExtension {
                 triggering_outcome: Outcome::SubmissionOutcomeUnknown as i32,
                 queue_msg_id: String::new(),
+                resolved_operator_id,
             })
         }
         StageName::Unspecified => return Err("StageName::Unspecified недопустим для диспетчеризации".to_string()),
@@ -289,15 +300,28 @@ mod tests {
     #[test]
     fn delivery_reconciliation_command_carries_delivery_reconciliation_extension() {
         let pipeline = pipeline();
-        let state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "acme".into(), false);
+        let mut state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "acme".into(), false);
+        state.resolved_operator_id = Some("beeline".into());
         let decision = NextStageDecision { node_id: "n6_reconciliation".into(), stage_name: "DELIVERY_RECONCILIATION".into() };
         let command = build_stage_execute(&decision, &state, "998901331835", "se6".into()).unwrap();
         match command.stage_extension {
             Some(StageExtension::DeliveryReconciliation(ext)) => {
                 assert_eq!(ext.triggering_outcome, Outcome::SubmissionOutcomeUnknown as i32);
+                assert_eq!(ext.resolved_operator_id, "beeline");
             }
             other => panic!("ожидали DeliveryReconciliationExtension, получили {other:?}"),
         }
+    }
+
+    #[test]
+    fn delivery_reconciliation_without_operator_is_rejected_not_filled_from_queue_id() {
+        let pipeline = pipeline();
+        let state = ExecutionState::new_from_incoming("m1".into(), &pipeline, 1, 2, i64::MAX, "acme".into(), false);
+        let decision = NextStageDecision { node_id: "n6_reconciliation".into(), stage_name: "DELIVERY_RECONCILIATION".into() };
+
+        let error = build_stage_execute(&decision, &state, "998901331835", "se6".into()).unwrap_err();
+
+        assert!(error.contains("resolved_operator_id"));
     }
 
     #[test]

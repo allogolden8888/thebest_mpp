@@ -1,5 +1,6 @@
 package uz.mpp.deliveryreconciliation.kafkaio;
 
+import com.google.protobuf.Timestamp;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
@@ -7,8 +8,11 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import uz.mpp.platformcontracts.common.v1.StageCompletedEvent;
+import uz.mpp.platformcontracts.common.v1.StageExecuteCommand;
+import uz.mpp.platformcontracts.events.v1.DlqRecord;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Properties;
 import java.util.concurrent.Future;
 
@@ -20,6 +24,7 @@ import java.util.concurrent.Future;
 public final class StageCompletedPublisher {
 
     private static final String TOPIC = "stage.completed";
+    private static final String DLQ_TOPIC = "stage.delivery-reconciliation.dlq";
 
     // 10с — как и в billing-service (тот же класс риска, см. ниже).
     private static final Duration PRODUCER_SEND_TIMEOUT = Duration.ofSeconds(10);
@@ -55,6 +60,26 @@ public final class StageCompletedPublisher {
 
     public Future<?> publish(StageCompletedEvent event) {
         return producer.send(new ProducerRecord<>(TOPIC, event.getMessageId(), event.toByteArray()));
+    }
+
+    /**
+     * Карантин permanent-invalid команды reconciliation. Возвращаемый Future
+     * вызывающая сторона обязана дождаться ДО commit входного offset: иначе
+     * сбой самого DLQ снова превратился бы в тихую потерю сообщения.
+     */
+    public Future<?> publishDlq(StageExecuteCommand command, String reasonCode, String errorDetail) {
+        Instant now = Instant.now();
+        DlqRecord record = DlqRecord.newBuilder()
+            .setStageExecutionId(command.getStageExecutionId())
+            .setMessageId(command.getMessageId())
+            .setStageName(command.getStageName())
+            .setAttempt(command.getAttempt())
+            .setOriginalCommand(command)
+            .setReasonCode(reasonCode)
+            .setErrorDetail(errorDetail)
+            .setCreatedAt(Timestamp.newBuilder().setSeconds(now.getEpochSecond()).setNanos(now.getNano()))
+            .build();
+        return producer.send(new ProducerRecord<>(DLQ_TOPIC, command.getMessageId(), record.toByteArray()));
     }
 
     public void close() {

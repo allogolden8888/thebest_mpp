@@ -135,6 +135,12 @@ message DeliveryReconciliationExtension {
   // SUBMISSION_OUTCOME_UNKNOWN, поле оставлено расширяемым.
   Outcome triggering_outcome = 1;
   string queue_msg_id = 2;
+  // Оператор, разрешённый Destination Resolution и сохранённый
+  // Pipeline Engine в ExecutionState. Не выводится из queue_msg_id:
+  // это два независимых identifier namespace. Нужен для
+  // reconciliation_cases.operator_id и выбора Operator SMPP endpoint/query_sm.
+  // Добавление поля с новым номером wire-совместимо со старыми читателями.
+  string resolved_operator_id = 3;
 }
 
 // Общий контракт результата стадии (HLD §6). Публикуется в stage.completed.

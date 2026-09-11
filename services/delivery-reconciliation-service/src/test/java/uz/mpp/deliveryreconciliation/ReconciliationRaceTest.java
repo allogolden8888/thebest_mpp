@@ -11,7 +11,6 @@ import uz.mpp.deliveryreconciliation.store.CaseStore;
 import uz.mpp.deliveryreconciliation.store.ReconciliationCase;
 
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -40,9 +39,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * дедлайну.
  */
 class ReconciliationRaceTest {
-
-    /** Замерено на стенде: SMSC в одной сети со стендом, DLR приходит через 20–70 мс. */
-    private static final Instant NOW = Instant.parse("2026-09-09T10:00:00Z");
 
     private static StageCompletedPublisher publisher(MockProducer<String, byte[]> mock) {
         return new StageCompletedPublisher(mock);
@@ -97,7 +93,9 @@ class ReconciliationRaceTest {
         MockProducer<String, byte[]> mock = mockProducer();
         UUID messageId = UUID.randomUUID();
 
-        store.create(messageId, UUID.randomUUID(), "op-1", NOW.plus(2, ChronoUnit.MINUTES).plusSeconds(3600));
+        // Дедлайн относителен реального времени: фиксированная дата
+        // сделала тест необратимо красным после наступления этой даты.
+        store.create(messageId, UUID.randomUUID(), "op-1", Instant.now().plusSeconds(3600));
         assertTrue(store.findExpiredOpenCases(Instant.now(), 10).isEmpty(),
             "предусловие теста: по дедлайну этот case сейчас не выбирается");
 
