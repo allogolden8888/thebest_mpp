@@ -93,6 +93,7 @@ jobs:
           cd k8s
           python3 generate_manifests.py
           python3 network_policies.py
+          python3 service_entries.py
       - name: Generate ExternalSecret/SecretStore (reads SECRET_K8S_NAME from k8s/generate_manifests.py)
         run: |
           cd infra/secrets

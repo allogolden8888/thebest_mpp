@@ -23,3 +23,9 @@ infra/docker/dev-secrets/
 # репозитория.
 access/
 preprocessed_configs/
+# Реальные резолвленные FQDN/IP managed PostgreSQL/Redis/ClickHouse конкретного
+# окружения — производится infra/terraform/export_external_hosts.sh после
+# terraform apply, environment-specific, не источник истины (Terraform — им).
+# k8s/external-hosts.example.json (fixture, RFC 5737/.example) коммитится
+# нормально — см. k8s/external_hosts.py.
+k8s/external-hosts.json
