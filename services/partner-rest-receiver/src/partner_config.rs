@@ -1,13 +1,28 @@
-//! Партнёрский конфиг-снапшот — `config_schemas/partner.schema.json`. В проде
-//! это `config.changes` (entity_type=PARTNER), спроецированный в локальный
-//! in-process snapshot (HLD §16); здесь, как и у остальных сервисов этого
-//! среза (Routing/Policy — их README), снапшот грузится один раз при
-//! старте из статического файла, hot-reload не реализован.
+//! Партнёрский конфиг-снапшот — `config_schemas/partner.schema.json`.
+//!
+//! BACKOFFICE_ROADMAP.md "Production Readiness Review" P0 #4: раньше
+//! снапшот грузился РОВНО ОДИН РАЗ при старте из статического файла
+//! (`PARTNER_CONFIG_PATH`) и никогда не обновлялся. Теперь (см.
+//! `config_source.rs`/`config_reload.rs`) снапшот либо грузится один раз
+//! из статического файла (`PARTNER_CONFIG_PATH`, явно заданный — local dev
+//! без Configuration Redis), либо строится bootstrap-чтением из
+//! Configuration Redis + живьём обновляется через `config.changes`-
+//! консьюмер — тот же
+//! `config:current:partner:{id}`/`config:version:partner:{id}:{version}`,
+//! который уже пишет `config-cache-projector`, реально работающий в
+//! проде. Тот же дизайн, что Go-сиблинг
+//! `services/partner-notification-service/internal/config` (тот же P0 #4
+//! пункт, оба сервиса читают тот же ключевой формат).
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Deserialize)]
+// Serialize (в дополнение к Deserialize) — нужен только config_reload.rs'
+// тестам, которые сами засеивают Configuration Redis реальным JSON перед
+// чтением через config_source::fetch_partner (round-trip тест, не мок).
+// Не используется на настоящем пути записи — payload_json туда пишет
+// configuration-service (не этот сервис).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
     // Не читается этим сервисом сегодня — единственный поддерживаемый в этом
     // срезе `auth.rs::EnvAuthVerifier` не различает API_KEY/MTLS/SMPP_BIND,
@@ -22,7 +37,7 @@ pub struct AuthConfig {
     pub credential_ref: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Application {
     pub application_id: String,
     // Не читается — операционное/UI-поле (Backoffice), не участвует ни в
@@ -35,13 +50,13 @@ pub struct Application {
     pub allowed_channels: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Partner {
     pub partner_id: String,
-    // Не читается — конфиг грузится один раз из статического файла в этом
-    // срезе (hot-reload/дедупликация версий из `config.changes` не
-    // реализованы, см. README), некому сравнивать версии.
-    #[allow(dead_code)]
+    // Читается config_reload.rs для логирования (какая версия только что
+    // стала живой) — не участвует в сравнении/дедупликации версий здесь:
+    // Configuration Redis (config:current:partner:{id}) уже решает, какая
+    // версия "текущая", это поле просто отражает то, что вернул fetch_partner.
     pub version: u64,
     pub status: String,
     pub applications: Vec<Application>,
@@ -51,13 +66,29 @@ impl Partner {
     pub fn is_active(&self) -> bool {
         self.status == "active"
     }
+
+    /// `IsArchived` (Go-сиблинг, `internal/config/partner.go`): партнёр,
+    /// снятый с обслуживания целиком — не `"suspended"` (тот
+    /// временный/обратимый, partner_id остаётся резолвимым, чтобы запросы
+    /// получали осмысленный отказ через обычную auth/rate-limit цепочку,
+    /// а не "неизвестный партнёр"). Только `archived` означает "удалить
+    /// из живого снапшота", см. `config_reload.rs::handle_config_change`.
+    pub fn is_archived(&self) -> bool {
+        self.status == "archived"
+    }
 }
 
 /// Снапшот по всем партнёрам — в этом срезе строится из одного файла с одним
 /// партнёром (Фаза 2.2, тот же паттерн упрощения, что у Routing/Policy),
 /// но структура (`HashMap` по `partner_id`) уже общая, рассчитана на
 /// множество партнёров.
-#[derive(Debug, Default)]
+///
+/// `Clone` — нужен для `ArcSwap`-паттерна (`config_reload.rs`): каждое
+/// живое обновление публикует НОВЫЙ `Arc<PartnerSnapshot>` (copy-on-write
+/// на уровне всей структуры, `HashMap::clone` — партнёров в этом срезе
+/// мало, полное клонирование на upsert/remove проще и безопаснее, чем
+/// частичная мутация, и не на хот-пасе запроса).
+#[derive(Debug, Default, Clone)]
 pub struct PartnerSnapshot {
     partners: HashMap<String, Partner>,
 }
@@ -75,6 +106,28 @@ impl PartnerSnapshot {
         let partner = self.get(partner_id)?;
         let application = partner.applications.iter().find(|a| a.application_id == application_id)?;
         Some((partner, application))
+    }
+
+    pub fn len(&self) -> usize {
+        self.partners.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.partners.is_empty()
+    }
+
+    /// Публикует/заменяет одного партнёра в снапшоте (add-or-replace by
+    /// `partner_id`) — используется по `config_reload.rs` для
+    /// active/suspended-обновлений с `config.changes`.
+    pub fn upsert(&mut self, partner: Partner) {
+        self.partners.insert(partner.partner_id.clone(), partner);
+    }
+
+    /// Убирает партнёра из снапшота целиком — archived-статус или
+    /// отсутствие в Configuration Redis (см. `config_reload.rs`). No-op,
+    /// если `partner_id` уже отсутствует.
+    pub fn remove(&mut self, partner_id: &str) {
+        self.partners.remove(partner_id);
     }
 }
 
@@ -112,5 +165,60 @@ mod tests {
         let snapshot = PartnerSnapshot::from_partners(vec![real_partner()]);
         assert!(snapshot.application("unknown", "click_uz_main").is_none());
         assert!(snapshot.application("click_uz", "unknown_app").is_none());
+    }
+
+    #[test]
+    fn archived_status_is_distinct_from_active_and_suspended() {
+        let mut partner = real_partner();
+        assert!(!partner.is_archived());
+        partner.status = "suspended".to_string();
+        assert!(!partner.is_archived(), "suspended остаётся резолвимым, не archived");
+        partner.status = "archived".to_string();
+        assert!(partner.is_archived());
+        assert!(!partner.is_active());
+    }
+
+    #[test]
+    fn upsert_adds_new_partner_without_affecting_others() {
+        let mut snapshot = PartnerSnapshot::from_partners(vec![real_partner()]);
+        let mut second = real_partner();
+        second.partner_id = "beta".to_string();
+        second.applications[0].application_id = "beta_app".to_string();
+
+        snapshot.upsert(second);
+
+        assert!(snapshot.application("click_uz", "click_uz_main").is_some());
+        assert!(snapshot.application("beta", "beta_app").is_some());
+        assert_eq!(snapshot.len(), 2);
+    }
+
+    #[test]
+    fn upsert_replaces_existing_partner_version() {
+        let mut snapshot = PartnerSnapshot::from_partners(vec![real_partner()]);
+        let mut updated = real_partner();
+        updated.version = 99;
+        updated.applications[0].rate_limit_tps = 1;
+
+        snapshot.upsert(updated);
+
+        let (partner, app) = snapshot.application("click_uz", "click_uz_main").expect("должно найтись");
+        assert_eq!(partner.version, 99);
+        assert_eq!(app.rate_limit_tps, 1);
+        assert_eq!(snapshot.len(), 1, "upsert существующего partner_id должен заменить, не задублировать");
+    }
+
+    #[test]
+    fn remove_drops_partner_from_live_map() {
+        let mut snapshot = PartnerSnapshot::from_partners(vec![real_partner()]);
+        snapshot.remove("click_uz");
+        assert!(snapshot.application("click_uz", "click_uz_main").is_none());
+        assert!(snapshot.is_empty());
+    }
+
+    #[test]
+    fn remove_unknown_partner_is_noop() {
+        let mut snapshot = PartnerSnapshot::from_partners(vec![real_partner()]);
+        snapshot.remove("unknown");
+        assert_eq!(snapshot.len(), 1);
     }
 }

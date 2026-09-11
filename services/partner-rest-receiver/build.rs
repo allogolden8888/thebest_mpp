@@ -2,6 +2,16 @@
 // services/destination-resolution-service/build.rs. stage_contract.proto не
 // нужен — этот сервис публикует IncomingMessage, не потребляет/строит
 // StageExecuteCommand/StageCompletedEvent.
+//
+// config_and_control.proto (ConfigChangeEvent) — BACKOFFICE_ROADMAP.md P0 #4:
+// теперь compiled наравне с message_events.proto в ОДНОМ вызове
+// compile_protos ниже (не отдельный prost_build::Config с extern_path, как у
+// destination-resolution-service) — модульная раскладка этого сервиса
+// (`pub mod mpp { pub mod common { pub mod v1 {...} } pub mod events { pub
+// mod v1 {...} } }` в src/proto.rs) уже зеркалит protobuf package-структуру
+// один в один, так что prost генерирует cross-package ссылки на
+// mpp.common.v1.ConfigEntityType как super::super::common::v1::ConfigEntityType
+// без какого-либо extern_path.
 fn main() {
     let proto_root = std::env::var("PLATFORM_CONTRACTS_DIR")
         .unwrap_or_else(|_| "../../platform-contracts".to_string());
@@ -25,6 +35,7 @@ fn main() {
             format!("{proto_root}/common/enums.proto"),
             format!("{proto_root}/common/types.proto"),
             format!("{proto_root}/events/message_events.proto"),
+            format!("{proto_root}/events/config_and_control.proto"),
         ],
         &includes,
     )
@@ -33,4 +44,5 @@ fn main() {
     println!("cargo:rerun-if-changed={proto_root}/common/enums.proto");
     println!("cargo:rerun-if-changed={proto_root}/common/types.proto");
     println!("cargo:rerun-if-changed={proto_root}/events/message_events.proto");
+    println!("cargo:rerun-if-changed={proto_root}/events/config_and_control.proto");
 }
