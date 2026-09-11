@@ -18,6 +18,18 @@
     "http_profile": { "$ref": "#/$defs/http_profile" }
   },
   "$defs": {
+    "webhook_auth": {
+      "description": "credential_ref — ссылка на секрет в Vault (тот же vault://<kv_path>/<property> формат и mount 'mpp', что partner.schema.json applications[].auth.credential_ref — см. credential-issuer-service/README.md), НЕ сам секрет. Конвенция для operator: vault://operators/{operator_id}/webhook_hmac (HMAC_SIGNATURE) или vault://operators/{operator_id}/webhook_bearer (BEARER_TOKEN) — operator-http-gateway резолвит per-operator, не общий на всех операторов секрет (BACKOFFICE_ROADMAP.md P0#1, до этого поля один WEBHOOK_AUTH_TOKEN env var аутентифицировал DLR webhook от ЛЮБОГО оператора). Обязателен для HMAC_SIGNATURE/BEARER_TOKEN (see if/then ниже) — оба реально проверяют предъявленный секрет. Не обязателен для MTLS: клиентский сертификат — не credential_ref-адресуемый секрет в этой модели (нет per-request предъявляемого значения, которое нужно было бы сверять; проверка происходит на уровне TLS-терминации, не в этом коде).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["HMAC_SIGNATURE", "BEARER_TOKEN", "MTLS"] },
+        "credential_ref": { "type": "string" }
+      },
+      "if": { "properties": { "type": { "enum": ["HMAC_SIGNATURE", "BEARER_TOKEN"] } } },
+      "then": { "required": ["credential_ref"] }
+    },
     "smpp_profile": {
       "type": "object",
       "additionalProperties": false,
@@ -54,15 +66,7 @@
       "properties": {
         "endpoint_url": { "type": "string", "format": "uri" },
         "tps_limit": { "type": "integer", "exclusiveMinimum": 0 },
-        "webhook_auth": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["type"],
-          "properties": {
-            "type": { "enum": ["HMAC_SIGNATURE", "BEARER_TOKEN", "MTLS"] },
-            "credential_ref": { "type": "string" }
-          }
-        },
+        "webhook_auth": { "$ref": "#/$defs/webhook_auth" },
         "retry_policy": { "$ref": "#/$defs/retry_policy" },
         "reconnect_policy": { "$ref": "#/$defs/reconnect_policy" }
       }

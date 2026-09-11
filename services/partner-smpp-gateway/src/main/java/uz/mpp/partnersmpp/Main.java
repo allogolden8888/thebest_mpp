@@ -2,6 +2,9 @@ package uz.mpp.partnersmpp;
 
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
+import uz.mpp.partnersmpp.admission.ExecutionControlConsumer;
+import uz.mpp.partnersmpp.admission.ExecutionControlSnapshot;
+import uz.mpp.partnersmpp.admission.SnapshotAdmissionGate;
 import uz.mpp.partnersmpp.config.PartnerConfigLoader;
 import uz.mpp.partnersmpp.grpcserver.DeliverSmServer;
 import uz.mpp.partnersmpp.health.HealthServer;
@@ -36,6 +39,9 @@ public final class Main {
 
         String kafkaBrokers = env("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap.mpp.svc:9092");
         IncomingPublisher publisher = new IncomingPublisher(kafkaBrokers);
+        ExecutionControlSnapshot controlSnapshot = new ExecutionControlSnapshot();
+        ExecutionControlConsumer controlConsumer = new ExecutionControlConsumer(kafkaBrokers, controlSnapshot);
+        controlConsumer.start();
 
         String redisUri = RedisUrl.buildRuntimeUrl();
         Duration heartbeatInterval = Duration.ofSeconds(Long.parseLong(env("SESSION_HEARTBEAT_INTERVAL_SECONDS", "30")));
@@ -90,6 +96,7 @@ public final class Main {
             authenticator,
             publisher::publish,
             Double.parseDouble(env("RATE_LIMIT_TPS", "300")),
+            new SnapshotAdmissionGate(controlSnapshot),
             channelRegistry,
             (partnerId, systemId, sessionEpoch) ->
                 sessionRegistry.register(partnerId, systemId, systemId + "-" + sessionEpoch, sessionEpoch, endpoint),
@@ -106,10 +113,16 @@ public final class Main {
 
         heartbeatScheduler.start();
 
+        Map<String, java.util.concurrent.Callable<Void>> checks = new HashMap<>();
+        checks.put("execution_control", () -> {
+            if (!controlSnapshot.isReady()) {
+                throw new IllegalStateException("full execution.control snapshot with GLOBAL sentinel is not ready");
+            }
+            return null;
+        });
         if (vaultClientForHealth != null) {
             VaultClient vaultForCheck = vaultClientForHealth;
             Map<String, PartnerConfigLoader.SmppBindCredential> credsForCheck = smppCredentialsForHealth;
-            Map<String, java.util.concurrent.Callable<Void>> checks = new HashMap<>();
             checks.put("vault", () -> {
                 vaultForCheck.ping();
                 return null;
@@ -120,8 +133,8 @@ public final class Main {
                 }
                 return null;
             });
-            health.setDependencyChecks(checks);
         }
+        health.setDependencyChecks(checks);
 
         health.setReady(true);
 
@@ -129,6 +142,7 @@ public final class Main {
             grpcServer.shutdown();
             smppServer.stop();
             heartbeatScheduler.close();
+            controlConsumer.close();
             sessionRegistry.close();
             publisher.close();
             health.stop();

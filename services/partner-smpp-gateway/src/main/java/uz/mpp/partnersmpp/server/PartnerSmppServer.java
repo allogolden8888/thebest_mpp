@@ -8,6 +8,7 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.handler.timeout.ReadTimeoutHandler;
+import uz.mpp.partnersmpp.admission.AdmissionGate;
 import uz.mpp.partnersmpp.core.TokenBucket;
 import uz.mpp.partnersmpp.kafkaio.IncomingPublishFunction;
 
@@ -37,6 +38,7 @@ public final class PartnerSmppServer {
     private final PartnerAuthenticator authenticator;
     private final IncomingPublishFunction incomingSink;
     private final double rateLimitTps;
+    private final AdmissionGate admissionGate;
 
     private final ChannelRegistry channelRegistry;
     private final SmppServerHandler.BindListener bindListener;
@@ -47,21 +49,23 @@ public final class PartnerSmppServer {
     private EventLoopGroup workerGroup;
     private Channel serverChannel;
 
-    public PartnerSmppServer(PartnerAuthenticator authenticator, IncomingPublishFunction incomingSink, double rateLimitTps) {
-        this(authenticator, incomingSink, rateLimitTps, new ChannelRegistry());
+    public PartnerSmppServer(PartnerAuthenticator authenticator, IncomingPublishFunction incomingSink,
+                             double rateLimitTps, AdmissionGate admissionGate) {
+        this(authenticator, incomingSink, rateLimitTps, admissionGate, new ChannelRegistry());
     }
 
     public PartnerSmppServer(PartnerAuthenticator authenticator, IncomingPublishFunction incomingSink,
-                              double rateLimitTps, ChannelRegistry channelRegistry) {
-        this(authenticator, incomingSink, rateLimitTps, channelRegistry, null, null);
+                              double rateLimitTps, AdmissionGate admissionGate, ChannelRegistry channelRegistry) {
+        this(authenticator, incomingSink, rateLimitTps, admissionGate, channelRegistry, null, null);
     }
 
     public PartnerSmppServer(PartnerAuthenticator authenticator, IncomingPublishFunction incomingSink,
-                              double rateLimitTps, ChannelRegistry channelRegistry,
+                              double rateLimitTps, AdmissionGate admissionGate, ChannelRegistry channelRegistry,
                               SmppServerHandler.BindListener bindListener, SmppServerHandler.UnbindListener unbindListener) {
         this.authenticator = authenticator;
         this.incomingSink = incomingSink;
         this.rateLimitTps = rateLimitTps;
+        this.admissionGate = admissionGate;
         this.channelRegistry = channelRegistry;
         this.bindListener = bindListener;
         this.unbindListener = unbindListener;
@@ -87,7 +91,7 @@ public final class PartnerSmppServer {
                     ch.pipeline().addLast(new SmppServerHandler(
                         authenticator, incomingSink,
                         new TokenBucket(rateLimitTps, rateLimitTps, System.currentTimeMillis()),
-                        channelRegistry, bindListener, unbindListener
+                        admissionGate, channelRegistry, bindListener, unbindListener
                     ));
                 }
             });

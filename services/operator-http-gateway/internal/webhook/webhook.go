@@ -7,6 +7,7 @@
 package webhook
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -27,28 +28,67 @@ import (
 const maxWebhookBodyBytes = 64 * 1024
 
 // Authenticator — webhook_auth (services_specifictaion.md §2.9a: "подпись/
-// токен для валидации входящего DLR"). StaticTokenAuthenticator — заглушка
-// на один общий secret (реальный источник — per-operator config snapshot,
-// не подключён, см. README).
+// токен для валидации входящего DLR").
 type Authenticator interface {
 	Authenticate(r *http.Request, body []byte) bool
 }
 
-type StaticTokenAuthenticator struct {
-	Token string
+// ExpectedTokenLookup — "для этого operator_id, какой сейчас действующий
+// bearer-токен webhook". Composition (Configuration Redis credential_ref +
+// Vault secret value + TTL cache) живёт в internal/webhookauth, не здесь —
+// этот пакет только использует результат через узкий интерфейс, чтобы
+// оставаться юнит-тестируемым без реального Redis/Vault (см. webhook_test.go).
+type ExpectedTokenLookup interface {
+	// ExpectedToken возвращает found=false (без ошибки), когда для
+	// operatorID нет действующего токена (не сконфигурирован, конфиг ещё
+	// не опубликован, auth.type не BEARER_TOKEN и т.п.) — OperatorTokenAuthenticator
+	// трактует found=false и err!=nil ОДИНАКОВО (fail closed), см. Authenticate.
+	ExpectedToken(ctx context.Context, operatorID string) (token string, found bool, err error)
 }
 
-// Authenticate — CODE_REVIEW.md HIGH finding: раньше `==` сравнение
-// строк — не constant-time, время сравнения зависит от длины совпавшего
-// префикса, теоретически позволяя восстановить токен побайтово через
-// замеры времени ответа. subtle.ConstantTimeCompare требует равной длины
-// операндов — сравниваем через промежуточный fixed-size хэш не нужно,
-// т.к. ConstantTimeCompare сам возвращает 0 при разной длине без утечки
-// через ранний return (в отличие от `==`).
-func (a StaticTokenAuthenticator) Authenticate(r *http.Request, body []byte) bool {
-	got := r.Header.Get("Authorization")
-	want := "Bearer " + a.Token
-	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+// dummyOperatorToken — BACKOFFICE_ROADMAP.md P0#1 timing-safety: тот же
+// принцип, что iam-service dummyHash (internal/store/store.go
+// VerifyStaffCredentials) — известный/несуществующий operator_id ВСЕГДА
+// выполняет один и тот же ConstantTimeCompare той же формы, что и запрос с
+// реально известным operator_id, но неверным токеном. Без этого
+// "operator_id не существует/не сконфигурирован" отвечал бы быстрее, чем
+// "operator_id существует, токен неверный" (ExpectedToken для неизвестного
+// вернулся бы раньше, до реального Vault-round-trip), раскрывая по времени
+// ответа, какие operator_id вообще сконфигурированы в этой платформе.
+const dummyOperatorToken = "timing-safety-dummy-operator-webhook-token"
+
+// OperatorTokenAuthenticator — per-operator bearer-токен, resolve по
+// operator_id из URL (r.PathValue("operator_id"), см. Handler/main.go route
+// "/webhook/dlr/{operator_id}"). Заменяет прежний StaticTokenAuthenticator
+// (один общий WEBHOOK_AUTH_TOKEN env var на ВСЕХ операторов сразу —
+// BACKOFFICE_ROADMAP.md P0#1: утечка/ротация credential'а ОДНОГО оператора
+// затрагивала всех остальных, и не было способа отозвать доступ только
+// одному оператору).
+type OperatorTokenAuthenticator struct {
+	Lookup ExpectedTokenLookup
+}
+
+// Authenticate — CODE_REVIEW.md HIGH finding (унаследовано от прежнего
+// StaticTokenAuthenticator): `==` сравнение строк не constant-time.
+// subtle.ConstantTimeCompare сохранён здесь один-в-один, но теперь
+// сравнивается с per-operator значением, не с одним общим на всех.
+func (a OperatorTokenAuthenticator) Authenticate(r *http.Request, _ []byte) bool {
+	got := []byte(r.Header.Get("Authorization"))
+	operatorID := r.PathValue("operator_id")
+
+	if operatorID == "" {
+		subtle.ConstantTimeCompare(got, []byte("Bearer "+dummyOperatorToken))
+		return false
+	}
+
+	expected, found, err := a.Lookup.ExpectedToken(r.Context(), operatorID)
+	if err != nil || !found {
+		subtle.ConstantTimeCompare(got, []byte("Bearer "+dummyOperatorToken))
+		return false
+	}
+
+	want := []byte("Bearer " + expected)
+	return subtle.ConstantTimeCompare(got, want) == 1
 }
 
 // DlrWebhookPayload — рабочее предположение формата (см. пакетный докстринг
@@ -68,7 +108,17 @@ type DlrWebhookPayload struct {
 }
 
 // RawDlr — handle_dlr_webhook выход, до публикации в OperatorDlr proto.
+//
+// OperatorID — BACKOFFICE_ROADMAP.md P0#1: раньше отсутствовал здесь,
+// main.go тегировало КАЖДЫЙ входящий DLR статическим OPERATOR_ID пода
+// (env-переменная), независимо от того, какой оператор его физически
+// прислал — на одном /webhook/dlr эндпоинте без per-operator идентификации
+// это было единственным источником истины (неверным, если пул реплик
+// когда-либо обслуживал больше одного оператора). Теперь заполняется
+// Handler'ом из URL (/webhook/dlr/{operator_id}), не из env — тот же путь,
+// что уже используется для резолва per-operator webhook-токена.
 type RawDlr struct {
+	OperatorID    string
 	SmscMessageID string
 	SegmentID     int32
 	RawStatus     string
@@ -86,11 +136,23 @@ func ParseDlrWebhookPayload(body []byte) (RawDlr, error) {
 	return RawDlr{SmscMessageID: payload.SmscMessageID, SegmentID: payload.SegmentID, RawStatus: payload.Status}, nil
 }
 
-// Handler — HTTP-обработчик /webhook/dlr. onValid вызывается для успешно
-// аутентифицированного и разобранного RawDlr (публикация в Kafka —
-// ответственность вызывающей стороны, см. cmd/.../main.go).
+// Handler — HTTP-обработчик /webhook/dlr/{operator_id}. onValid вызывается
+// для успешно аутентифицированного и разобранного RawDlr (публикация в
+// Kafka — ответственность вызывающей стороны, см. cmd/.../main.go).
 func Handler(authenticator Authenticator, onValid func(RawDlr)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// operator_id обязателен маршрутом (main.go регистрирует
+		// "/webhook/dlr/{operator_id}", не голый "/webhook/dlr") — пустое
+		// значение здесь означало бы вызов handler'а в обход этого
+		// маршрута (например напрямую в тесте) или экзотический путь вроде
+		// "/webhook/dlr//", который net/http пропускает как пустой
+		// PathValue, а не 404. Явная проверка вместо того, чтобы дать
+		// Authenticate молча провалиться на operatorID="".
+		if r.PathValue("operator_id") == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
 		r.Body = http.MaxBytesReader(w, r.Body, maxWebhookBodyBytes)
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -113,6 +175,7 @@ func Handler(authenticator Authenticator, onValid func(RawDlr)) http.HandlerFunc
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		dlr.OperatorID = r.PathValue("operator_id")
 
 		onValid(dlr)
 		w.WriteHeader(http.StatusOK)

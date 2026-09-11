@@ -40,6 +40,28 @@ import (
 	"mpp/partner-self-service-api/internal/telemetry"
 )
 
+// loadJWTPrivateKey — BACKOFFICE_ROADMAP.md Production Readiness Review
+// P0#5, internal/auth/issuer.go package doc: новый, отдельный от
+// JWT_PUBLIC_KEY_PEM keypair — partner-self-service-api впервые сам
+// ПОДПИСЫВАЕТ токены (POST /v1/self-service/auth/login), не только
+// валидирует чужие. Тот же паттерн разбора PKCS1, что backoffice-api
+// (cmd/backoffice-api/main.go).
+func loadJWTPrivateKey() (*rsa.PrivateKey, error) {
+	pemData := os.Getenv("JWT_PRIVATE_KEY_PEM")
+	if pemData == "" {
+		return nil, fmt.Errorf("JWT_PRIVATE_KEY_PEM не задан")
+	}
+	block, _ := pem.Decode([]byte(pemData))
+	if block == nil {
+		return nil, fmt.Errorf("не удалось разобрать PEM из JWT_PRIVATE_KEY_PEM")
+	}
+	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("x509.ParsePKCS1PrivateKey: %w", err)
+	}
+	return key, nil
+}
+
 func env(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -107,11 +129,21 @@ func main() {
 	if err != nil {
 		log.Fatalf("не удалось загрузить JWT public key: %v", err)
 	}
-	validator := auth.NewValidator(
-		pubKey,
-		env("PARTNER_SELF_SERVICE_API_JWT_AUDIENCE", "partner-self-service-api"),
-		env("PARTNER_SELF_SERVICE_API_JWT_ISSUER", "https://keycloak.mpp.svc/realms/mpp"),
-	)
+	jwtAudience := env("PARTNER_SELF_SERVICE_API_JWT_AUDIENCE", "partner-self-service-api")
+	jwtIssuer := env("PARTNER_SELF_SERVICE_API_JWT_ISSUER", "https://keycloak.mpp.svc/realms/mpp")
+	validator := auth.NewValidator(pubKey, jwtAudience, jwtIssuer)
+
+	// privKey/tokenIssuer — BACKOFFICE_ROADMAP.md Production Readiness
+	// Review P0#5 (internal/auth/issuer.go package doc). Тот же
+	// audience/issuer, что validator выше — Issue() проставляет их в каждый
+	// выпущенный токен, иначе Validator.ParseBearer (jwt.go, требует
+	// jwt.WithAudience/jwt.WithIssuer) отклонял бы токены, которые этот же
+	// сервис только что сам выпустил.
+	privKey, err := loadJWTPrivateKey()
+	if err != nil {
+		log.Fatalf("не удалось загрузить JWT private key: %v", err)
+	}
+	tokenIssuer := auth.NewTokenIssuer(privKey, jwtAudience, jwtIssuer)
 
 	configConn, err := dialGRPC(env("CONFIGURATION_SERVICE_ADDR", "configuration-service.mpp.svc:9000"))
 	if err != nil {
@@ -134,6 +166,17 @@ func main() {
 	}
 	defer chatConn.Close()
 
+	// iamConn — BACKOFFICE_ROADMAP.md Production Readiness Review P0#5
+	// (auth.go's handleLogin, internal/auth/resolve.go's ResolveLiveAccess).
+	// Новая зависимость этого сервиса — раньше partner-self-service-api не
+	// говорил с iam-service вообще (см. package doc jwt.go). Тот же
+	// dialGRPC/grpcConnCheck паттерн, что остальные соединения выше.
+	iamConn, err := dialGRPC(env("IAM_SERVICE_ADDR", "iam-service.mpp.svc:9000"))
+	if err != nil {
+		log.Fatalf("не удалось подключиться к IAM Service: %v", err)
+	}
+	defer iamConn.Close()
+
 	tp := telemetry.NewProvider(sdktrace.NewBatchSpanProcessor(noopExporter{}))
 	defer func() { _ = telemetry.Shutdown(context.Background(), tp) }()
 
@@ -143,6 +186,8 @@ func main() {
 		CredentialClient:    grpcv1.NewCredentialIssuerServiceClient(credentialConn),
 		ChatClient:          grpcv1.NewChatServiceClient(chatConn),
 		TemplatesServiceURL: env("TEMPLATE_MANAGEMENT_SERVICE_URL", "http://template-management-service.mpp.svc:8080"),
+		IamClient:           grpcv1.NewIamServiceClient(iamConn),
+		TokenIssuer:         tokenIssuer,
 		TracerProvider:      tp,
 	})
 
@@ -150,6 +195,7 @@ func main() {
 		"configuration-service":     grpcConnCheck(configConn),
 		"credential-issuer-service": grpcConnCheck(credentialConn),
 		"chat-service":              grpcConnCheck(chatConn),
+		"iam-service":               grpcConnCheck(iamConn),
 	})
 	healthState.SetReady(true)
 

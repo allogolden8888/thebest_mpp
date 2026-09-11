@@ -4,6 +4,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
+import uz.mpp.partnersmpp.admission.AdmissionGate;
 import uz.mpp.partnersmpp.codec.*;
 import uz.mpp.partnersmpp.core.IncomingMessageBuilder;
 import uz.mpp.partnersmpp.core.SubmitValidator;
@@ -35,6 +36,7 @@ public final class SmppServerHandler extends SimpleChannelInboundHandler<ByteBuf
     private final PartnerAuthenticator authenticator;
     private final IncomingPublishFunction incomingSink;
     private final TokenBucket rateLimiter;
+    private final AdmissionGate admissionGate;
     private final ChannelRegistry channelRegistry;
     private final BindListener bindListener;
     private final UnbindListener unbindListener;
@@ -46,16 +48,17 @@ public final class SmppServerHandler extends SimpleChannelInboundHandler<ByteBuf
     private long sessionEpoch;
 
     public SmppServerHandler(PartnerAuthenticator authenticator, IncomingPublishFunction incomingSink,
-                              TokenBucket rateLimiter, ChannelRegistry channelRegistry) {
-        this(authenticator, incomingSink, rateLimiter, channelRegistry, null, null);
+                              TokenBucket rateLimiter, AdmissionGate admissionGate, ChannelRegistry channelRegistry) {
+        this(authenticator, incomingSink, rateLimiter, admissionGate, channelRegistry, null, null);
     }
 
     public SmppServerHandler(PartnerAuthenticator authenticator, IncomingPublishFunction incomingSink,
-                              TokenBucket rateLimiter, ChannelRegistry channelRegistry,
+                              TokenBucket rateLimiter, AdmissionGate admissionGate, ChannelRegistry channelRegistry,
                               BindListener bindListener, UnbindListener unbindListener) {
         this.authenticator = authenticator;
         this.incomingSink = incomingSink;
         this.rateLimiter = rateLimiter;
+        this.admissionGate = admissionGate;
         this.channelRegistry = channelRegistry;
         this.bindListener = bindListener;
         this.unbindListener = unbindListener;
@@ -153,14 +156,17 @@ public final class SmppServerHandler extends SimpleChannelInboundHandler<ByteBuf
             respond(ctx, CommandId.SUBMIT_SM_RESP, CommandStatus.ESME_RINVBNDSTS, seq, null);
             return;
         }
-        if (!rateLimiter.tryAcquire(System.currentTimeMillis())) {
-            respond(ctx, CommandId.SUBMIT_SM_RESP, CommandStatus.ESME_RTHROTTLED, seq, null);
-            return;
-        }
-
         SubmitValidator.ValidationResult validation = SubmitValidator.validate(body);
         if (!validation.valid()) {
             respond(ctx, CommandId.SUBMIT_SM_RESP, CommandStatus.ESME_RINVMSGLEN, seq, null);
+            return;
+        }
+        if (!admissionGate.admit(partnerId)) {
+            respond(ctx, CommandId.SUBMIT_SM_RESP, CommandStatus.ESME_RTHROTTLED, seq, null);
+            return;
+        }
+        if (!rateLimiter.tryAcquire(System.currentTimeMillis())) {
+            respond(ctx, CommandId.SUBMIT_SM_RESP, CommandStatus.ESME_RTHROTTLED, seq, null);
             return;
         }
 

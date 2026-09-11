@@ -983,10 +983,11 @@ services:
       - "9110:9090"
       - "8081:8080"
     environment:
-      # Локальный dev-only RSA-кейпейр (infra/docker/dev-secrets/, не
-      # коммитится — см. .gitignore), только публичная половина. Общий на
-      # все 3 self-service/compliance API ниже — один "локальный IdP" для
-      # локальной проверки, не настоящий Keycloak.
+      # JWT_PUBLIC_KEY_PEM — тот же общий локальный dev-only "IdP" keypair,
+      # что billing-self-service-api/compliance-api ниже, используется этим
+      # сервисом только чтобы ВАЛИДИРОВАТЬ чужие (гипотетические Keycloak)
+      # токены — оставлен общим намеренно, отдельного смысла под конкретно
+      # ЭТУ половину нет.
       JWT_PUBLIC_KEY_PEM: |
         -----BEGIN PUBLIC KEY-----
         MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAr6ChhBR6hStwLBcl/n3z
@@ -997,16 +998,61 @@ services:
         h6xvXwJXLNNqjAE6Dy5OfO0RYWHhm7qQ+62pzOO1Kj63YDr7FKydtVswNUmIfgj9
         KwIDAQAB
         -----END PUBLIC KEY-----
+      # JWT_PRIVATE_KEY_PEM — BACKOFFICE_ROADMAP.md Production Readiness
+      # Review P0#5, internal/auth/issuer.go package doc there — OWN
+      # keypair, deliberately NOT the shared dev-keypair above (or
+      # backoffice-api's own JWT_PRIVATE_KEY_PEM below). partner-self-
+      # service-api now itself ISSUES tokens (POST /v1/self-service/auth/
+      # login), not just validates them — a service that becomes a token
+      # ISSUER changes its trust properties and needs its own key, same
+      # reasoning already applied to backoffice-api's own keypair (see
+      # comment there). infra/docker/dev-secrets/partner_self_service_jwt_*.pem.
+      JWT_PRIVATE_KEY_PEM: |
+        -----BEGIN RSA PRIVATE KEY-----
+        MIIEogIBAAKCAQEAty4rEufFa7cdTbPGzHrXBRZsxugyYHaYTgP4+zFRFx/yl4g8
+        E4oztU6SRT3jAYxloirIXoeON6cY5xSjTWWwO9dYSd4Jd4jS1I/ymLSBrhKQWVWV
+        54xJpG0QO15irBrpBd4iTH+NzfpEr/Z4jKQeRK1jbE5FiJ9ePv9Qle25tbmsAeGj
+        aAOibkaLgHTtbaDHI8mKdhxpNHcE0cp/je3LbtImAiuI8ZZohbdYDK42PYsbgZgP
+        qUlqhAKrDW4JA0Z81kxqXrlqMr3vTOzzGl1FRGFIYeXulOIz8SvyNdapLz9KlG2P
+        JUcVs+KHSQPHOW3ACQbaEctZbpi2X9NTqfafKwIDAQABAoIBACesViPoErf7ltsn
+        Xp0W1c8CRljmHVMLHH15Gsm8qqVpg+8R0IEi44QXGlLozmudbr2qqm7eyQyAokIa
+        FCxFI+AyCasl7cL33UGwU4iDP7rlxmGyyZ62oZR9EpDpJlHEGkftDlynG51K4OmD
+        ZiR/vxZ8vxXL9f9bFNxsC5YNQLV8vVh2zEhYYGXXOeKGZk4nRGWHwojlyltjSZ9y
+        hyu+XEy1XU8hL/kuFLwusY4nZxDkZZmGaa3sXvmIjl2d7WV4RsS3qqtTQgI2ETM/
+        yshIBpMjEmmZi3/GhpMePHNn2KniFh5nCY8cDX+mPS5+hOGzsK/sSu2LT2+aVyCD
+        EJbNxyECgYEA2b9QAyUPCz3RBbTIrx0fn6Sp9YJMIQFq0mhOsJVF9iwb2Sxk/8Pg
+        EKRE7TZjbJ9ZCsLzSxQh6FmZtPwwA9SuFiGIGi7vxdVPWXPLM/PcWfhRBwvqOpK0
+        qwq89G+h2Oge3NQ61ilQB/Tf5LJGtI2j4SuT/EqyafgG+eVNjkX7DMkCgYEA11xJ
+        CVp/j5w/a5N32j3vc4VlobW6ghvuotV6rdpKsgkTZouRPP0fdRgIlophWKwqOqAO
+        AMewkHOkzkb7z4S0PoEj/HJXTqHk+55RN2Aq33sSNhHFytqkmcm99bNfH9IPlU/+
+        oswtXdSV+PePYanwR5+2ab0HdYZWKz0yiLh0qlMCgYAr2bk1SOtEqkhDy+p2SXkq
+        3zBS/tBx/SUUBmmCai1SrANXsvcMAthGwa4Xz1Iqd9SotCXmwsEpV5H6vqa0vsno
+        LwyHqVgkERcPvp/3cG65t6Ypsx6SeSTlJR50Y17GnchJVHwc0OkLESddmQFgLv4H
+        xIziy/AuIwLUpHb/5dvu8QKBgEdFomI3Ego8An0eo8aVQr6vgg//bYcLqXE4R05r
+        9NZwzHveaqWNe7Cr0IPJrifDaoJWX+wAKj3UF9GwijuGRoR9BqTQTnaWe4qOPYCf
+        EfE98Kv2O8hDjb/blUNQJoYIZeHbRIEqI0VvSmbHvyrqK7v4bk0WIvbRC4lpymSW
+        7v1DAoGAKKCc2er/aPjltubCFt3ohJ/cA4+OTC/1+ktFKkhrqMOwcvSONgxhAQgt
+        B798rU55YsIUogpnO6SV67kwUEAhxLP2EYReKLbDTgytMJSi9QnZUFaubWZHLBfV
+        CZtjOiBkzuSMIJ+cTDizdc9ep6N6qN8GfoPJHx2bTA2Nt7sbqV0=
+        -----END RSA PRIVATE KEY-----
       CONFIGURATION_SERVICE_ADDR: configuration-service:9000
       CREDENTIAL_ISSUER_SERVICE_ADDR: credential-issuer-service:9000
       TEMPLATE_MANAGEMENT_SERVICE_URL: http://template-management-service:8080
       CHAT_SERVICE_ADDR: chat-service:9000
+      # IAM_SERVICE_ADDR — BACKOFFICE_ROADMAP.md Production Readiness
+      # Review P0#5: новая зависимость, до этого захода
+      # partner-self-service-api не говорил с iam-service вообще.
+      # auth.go's handleLogin (VerifyPartnerPortalCredentials) и
+      # internal/auth/resolve.go's ResolveLiveAccess (ResolvePartnerPortalAccess).
+      IAM_SERVICE_ADDR: iam-service:9000
     depends_on:
       configuration-service:
         condition: service_started
       credential-issuer-service:
         condition: service_started
       chat-service:
+        condition: service_started
+      iam-service:
         condition: service_started
 
   billing-self-service-api:

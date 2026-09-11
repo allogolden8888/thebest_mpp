@@ -24,8 +24,11 @@ import (
 	"mpp/operator-http-gateway/internal/health"
 	"mpp/operator-http-gateway/internal/httpio"
 	"mpp/operator-http-gateway/internal/kafkaio"
+	"mpp/operator-http-gateway/internal/opconfig"
 	"mpp/operator-http-gateway/internal/registry"
+	vaultpkg "mpp/operator-http-gateway/internal/vault"
 	"mpp/operator-http-gateway/internal/webhook"
+	"mpp/operator-http-gateway/internal/webhookauth"
 
 	grpcv1 "mpp/platformcontracts/grpc/v1"
 )
@@ -35,6 +38,27 @@ func env(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// buildVaultTokenSource — byte-for-byte mirror of
+// credential-issuer-service/cmd/credential-issuer-service/main.go's
+// function of the same name: VAULT_TOKEN set means local/dev/break-glass
+// (static token, no Kubernetes auth login — the same escape hatch `vault`
+// CLI itself supports). Production path (VAULT_TOKEN unset) — real
+// Kubernetes auth login, role "operator-webhook-credential-readers"
+// (infra/terraform/vault-secrets.tf), standard projected ServiceAccount
+// JWT path.
+func buildVaultTokenSource(addr string, httpClient *http.Client) vaultpkg.TokenSource {
+	if staticToken := os.Getenv("VAULT_TOKEN"); staticToken != "" {
+		log.Println("VAULT_TOKEN задан — используется статический токен (local/dev/break-glass), не Kubernetes auth login")
+		return vaultpkg.StaticTokenSource{StaticToken: staticToken}
+	}
+	return &vaultpkg.KubernetesAuthTokenSource{
+		Addr:       addr,
+		Role:       env("VAULT_K8S_AUTH_ROLE", "operator-webhook-credential-readers"),
+		JWTPath:    env("VAULT_K8S_JWT_PATH", "/var/run/secrets/kubernetes.io/serviceaccount/token"),
+		HTTPClient: httpClient,
+	}
 }
 
 // redisEndpointResolver — grpcserver.EndpointResolver поверх registry.Client.
@@ -79,6 +103,29 @@ func main() {
 		log.Printf("register_route failed: %v", err)
 	}
 
+	// opconfig.Reader — Configuration Redis (config-cache-projector's
+	// entity_type=operator projection), тот же bootstrap/cache-miss
+	// паттерн, что уже использует billing-service (TariffCache). Отдельный
+	// Redis-клиент от redisClient выше (Runtime Redis, register_route/
+	// heartbeat) — разные Redis-инстансы (data_infrastructure_spec.md §2.1
+	// vs §2.2), уже отдельная secret-запись в SECRET_DEPENDENCIES.
+	opConfigReader := opconfig.NewReader(
+		env("REDIS_CONFIGURATION_HOST", "localhost")+":"+env("REDIS_CONFIGURATION_PORT", "6379"),
+		env("REDIS_CONFIGURATION_PASSWORD", ""),
+	)
+	defer opConfigReader.Close()
+
+	// Vault — BACKOFFICE_ROADMAP.md P0#1: заменяет прежний общий
+	// WEBHOOK_AUTH_TOKEN (один секрет на ВСЕХ операторов сразу).
+	// buildVaultTokenSource выбирает между VAULT_TOKEN (local/dev/
+	// break-glass) и реальным Kubernetes auth login — byte-for-byte та же
+	// схема, что credential-issuer-service.
+	vaultAddr := env("VAULT_ADDR", "http://vault.vault-system.svc:8200")
+	vaultHTTPClient := &http.Client{Timeout: 10 * time.Second}
+	vaultClient := vaultpkg.NewClient(vaultAddr, env("VAULT_MOUNT", "mpp"), buildVaultTokenSource(vaultAddr, vaultHTTPClient), vaultHTTPClient)
+
+	webhookAuthLookup := webhookauth.New(opConfigReader, vaultClient)
+
 	brokers := strings.Split(env("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap.mpp.svc:9092"), ",")
 	publisher, err := kafkaio.NewPublisher(brokers)
 	if err != nil {
@@ -106,27 +153,28 @@ func main() {
 
 	// handle_dlr_webhook + normalize_and_publish_dlr
 	//
-	// CODE_REVIEW.md HIGH finding: раньше был insecure-дефолт
-	// "demo-webhook-token", если WEBHOOK_AUTH_TOKEN не задан — под мог
-	// годами принимать DLR с общеизвестным демо-токеном, если деплой забыл
-	// переопределить переменную. Теперь обязателен, как и JWT_PUBLIC_KEY_PEM
-	// в backoffice-api/partner-api — сервис не стартует без него, а не
-	// тихо работает с угадываемым секретом. Остаётся общим на все операторы
-	// этого пода (per-operator секрет из config.changes не подключён — см.
-	// README "Что НЕ реализовано"), но хотя бы не предсказуем по умолчанию.
-	webhookToken := os.Getenv("WEBHOOK_AUTH_TOKEN")
-	if webhookToken == "" {
-		log.Fatalf("WEBHOOK_AUTH_TOKEN не задан — сервис не может аутентифицировать входящие DLR")
-	}
-	authenticator := webhook.StaticTokenAuthenticator{Token: webhookToken}
+	// BACKOFFICE_ROADMAP.md P0#1: раньше ОДИН общий WEBHOOK_AUTH_TOKEN env
+	// var аутентифицировал DLR от ЛЮБОГО оператора на голом "/webhook/dlr"
+	// (CODE_REVIEW.md HIGH finding до этого — insecure-дефолт
+	// "demo-webhook-token" — было закрыто раньше, но общий секрет на всех
+	// операторов сразу остался: утечка/ротация credential'а одного
+	// оператора требовала бы регенерации секрета для ВСЕХ, и не было
+	// способа отозвать доступ только одному). Маршрут теперь несёт
+	// operator_id (тот же identifier, что operator.schema.json
+	// operator_id/OPERATOR_ID env var — не изобретён заново), и
+	// OperatorTokenAuthenticator резолвит per-operator токен через
+	// webhookAuthLookup (Configuration Redis credential_ref -> Vault
+	// secret value, internal/webhookauth) — операторы больше не делят один
+	// секрет.
+	authenticator := webhook.OperatorTokenAuthenticator{Lookup: webhookAuthLookup}
 	webhookHandler := webhook.Handler(authenticator, func(dlr webhook.RawDlr) {
-		event := kafkaio.BuildDlrEvent(operatorID, dlr, time.Now())
+		event := kafkaio.BuildDlrEvent(dlr.OperatorID, dlr, time.Now())
 		if err := publisher.PublishDlr(context.Background(), event); err != nil {
 			log.Printf("normalize_and_publish_dlr failed: %v", err)
 		}
 	})
 	webhookMux := http.NewServeMux()
-	webhookMux.HandleFunc("/webhook/dlr", webhookHandler)
+	webhookMux.HandleFunc("/webhook/dlr/{operator_id}", webhookHandler)
 	// CODE_REVIEW.md CRITICAL finding: этот сервер обязан быть доступен из
 	// интернета (реальные операторы шлют DLR сюда) и раньше не имел ни
 	// ReadTimeout/WriteTimeout/IdleTimeout, ни MaxHeaderBytes — тривиальный
@@ -159,7 +207,9 @@ func main() {
 	}()
 
 	healthState.SetDependencyChecks(map[string]func(context.Context) error{
-		"redis": redisClient.Ping,
+		"redis_runtime":       redisClient.Ping,
+		"redis_configuration": opConfigReader.Ping,
+		"vault":               vaultClient.Ping,
 	})
 	healthState.SetReady(true)
 	log.Println("operator-http-gateway готов")

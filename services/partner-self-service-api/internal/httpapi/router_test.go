@@ -37,12 +37,89 @@ const (
 	testIssuer   = "https://keycloak.mpp.svc/realms/mpp"
 )
 
+// fakeIamServer — минимальная in-memory реализация grpcv1.IamServiceServer
+// для роутер-тестов (BACKOFFICE_ROADMAP.md Production Readiness Review
+// P0#5) — тот же принцип, что fakeConfigServer/fakeCredentialServer выше:
+// ResolvePartnerPortalAccess/VerifyPartnerPortalCredentials эмулируют
+// РЕЗУЛЬТАТ настоящего iam-service (bcrypt-сравнение и SQL-джойн живут там,
+// проверены отдельными Postgres-тестами того сервиса), не переизобретают их
+// здесь.
+type fakeIamServer struct {
+	grpcv1.UnimplementedIamServiceServer
+
+	mu     sync.Mutex
+	access map[string]partnerAccess
+	creds  map[string]partnerCredential
+}
+
+type partnerAccess struct {
+	active    bool
+	partnerID string
+	roles     []string
+}
+
+type partnerCredential struct {
+	password   string
+	externalID string
+	partnerID  string
+}
+
+func newFakeIamServer() *fakeIamServer {
+	return &fakeIamServer{access: map[string]partnerAccess{}, creds: map[string]partnerCredential{}}
+}
+
+// setAccess — регистрирует, что ResolveLiveAccess (internal/auth/resolve.go)
+// должен вернуть для этого external_id на КАЖДЫЙ последующий запрос, пока
+// тест явно не поменяет это значение повторным вызовом (см.
+// TestResolveLiveAccessReflectsRoleAndDeactivationWithoutNewLogin — прямое
+// доказательство того, что смена роли/деактивация не требуют нового логина).
+func (f *fakeIamServer) setAccess(externalID string, active bool, partnerID string, roles []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.access[externalID] = partnerAccess{active: active, partnerID: partnerID, roles: roles}
+}
+
+func (f *fakeIamServer) setCredentials(username, password, externalID, partnerID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.creds[username] = partnerCredential{password: password, externalID: externalID, partnerID: partnerID}
+}
+
+func (f *fakeIamServer) ResolvePartnerPortalAccess(ctx context.Context, req *grpcv1.ResolvePartnerPortalAccessRequest) (*grpcv1.ResolvePartnerPortalAccessResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.access[req.GetExternalId()]
+	if !ok {
+		return &grpcv1.ResolvePartnerPortalAccessResponse{Active: false}, nil
+	}
+	return &grpcv1.ResolvePartnerPortalAccessResponse{Active: a.active, PartnerId: a.partnerID, Roles: a.roles}, nil
+}
+
+func (f *fakeIamServer) VerifyPartnerPortalCredentials(ctx context.Context, req *grpcv1.VerifyPartnerPortalCredentialsRequest) (*grpcv1.VerifyPartnerPortalCredentialsResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cred, ok := f.creds[req.GetUsername()]
+	if !ok || cred.password != req.GetPassword() {
+		return &grpcv1.VerifyPartnerPortalCredentialsResponse{Ok: false}, nil
+	}
+	return &grpcv1.VerifyPartnerPortalCredentialsResponse{Ok: true, ExternalId: cred.externalID, PartnerId: cred.partnerID}, nil
+}
+
 // testToken — auth.Claims несёт неэкспортируемый тип realmAccess, поэтому
 // снаружи пакета auth собираем эквивалентный набор через jwt.MapClaims —
 // на валидацию (aud/iss/exp/partner_id) и на разбор в auth.Claims это не
 // влияет, jwt.ParseWithClaims работает по JSON, не по Go-типу подписчика.
-func testToken(t *testing.T, key *rsa.PrivateKey, partnerID string, roles []string) string {
+// partner_id/roles записаны в сам JWT ЗДЕСЬ только чтобы пройти
+// Validator.ParseBearer (требует непустой partner_id claim, jwt.go) — ЧТО
+// РЕАЛЬНО увидят хендлеры, определяет f.iam.setAccess ниже (ResolveLiveAccess
+// перезаписывает оба поля живым результатом), не эти claim'ы напрямую. Тесты,
+// которым нужно доказать, что claim'ы игнорируются (см.
+// TestResolveLiveAccessReflectsRoleAndDeactivationWithoutNewLogin), намеренно
+// заводят токен с ОДНИМИ значениями и f.iam.setAccess с ДРУГИМИ.
+func testToken(t *testing.T, f *testFixture, partnerID string, roles []string) string {
 	t.Helper()
+	sub := "user-" + partnerID
+	f.iam.setAccess(sub, true, partnerID, roles)
 	claims := jwt.MapClaims{
 		"partner_id": partnerID,
 		"realm_access": map[string]interface{}{
@@ -51,10 +128,10 @@ func testToken(t *testing.T, key *rsa.PrivateKey, partnerID string, roles []stri
 		"aud": testAudience,
 		"iss": testIssuer,
 		"exp": jwt.NewNumericDate(time.Now().Add(time.Hour)).Unix(),
-		"sub": "user-" + partnerID,
+		"sub": sub,
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
-	signed, err := token.SignedString(key)
+	signed, err := token.SignedString(f.key)
 	if err != nil {
 		t.Fatalf("подпись тестового токена failed: %v", err)
 	}
@@ -170,6 +247,7 @@ type testFixture struct {
 	key    *rsa.PrivateKey
 	config *fakeConfigServer
 	cred   *fakeCredentialServer
+	iam    *fakeIamServer
 }
 
 func newTestFixture(t *testing.T) *testFixture {
@@ -186,17 +264,22 @@ func newTestFixture(t *testing.T) *testFixture {
 	credSrv := &fakeCredentialServer{}
 	credConn := dialBufconn(t, func(s *grpc.Server) { grpcv1.RegisterCredentialIssuerServiceServer(s, credSrv) })
 
+	iamSrv := newFakeIamServer()
+	iamConn := dialBufconn(t, func(s *grpc.Server) { grpcv1.RegisterIamServiceServer(s, iamSrv) })
+
 	router := NewRouter(Deps{
 		Validator:        validator,
 		ConfigClient:     grpcv1.NewConfigServiceClient(configConn),
 		CredentialClient: grpcv1.NewCredentialIssuerServiceClient(credConn),
+		IamClient:        grpcv1.NewIamServiceClient(iamConn),
+		TokenIssuer:      auth.NewTokenIssuer(key, testAudience, testIssuer),
 		TracerProvider:   sdktrace.NewTracerProvider(),
 	})
 
 	server := httptest.NewServer(router)
 	t.Cleanup(server.Close)
 
-	return &testFixture{server: server, key: key, config: configSrv, cred: credSrv}
+	return &testFixture{server: server, key: key, config: configSrv, cred: credSrv, iam: iamSrv}
 }
 
 // TestListTemplatesForcesPartnerIDFromClaims — прямое доказательство находки
@@ -220,10 +303,13 @@ func TestListTemplatesForcesPartnerIDFromClaims(t *testing.T) {
 		t.Fatalf("генерация ключа failed: %v", err)
 	}
 	validator := auth.NewValidator(&key.PublicKey, testAudience, testIssuer)
+	iamSrv := newFakeIamServer()
+	iamSrv.setAccess("user-acme", true, "acme", nil)
 	router := NewRouter(Deps{
 		Validator:           validator,
 		ConfigClient:        grpcv1.NewConfigServiceClient(dialBufconn(t, func(s *grpc.Server) { grpcv1.RegisterConfigServiceServer(s, newFakeConfigServer()) })),
 		CredentialClient:    grpcv1.NewCredentialIssuerServiceClient(dialBufconn(t, func(s *grpc.Server) { grpcv1.RegisterCredentialIssuerServiceServer(s, &fakeCredentialServer{}) })),
+		IamClient:           grpcv1.NewIamServiceClient(dialBufconn(t, func(s *grpc.Server) { grpcv1.RegisterIamServiceServer(s, iamSrv) })),
 		TemplatesServiceURL: upstream.URL,
 		TracerProvider:      sdktrace.NewTracerProvider(),
 	})
@@ -309,7 +395,7 @@ func TestListApplicationsRequiresAuth(t *testing.T) {
 func TestListApplicationsReturnsSeededConfig(t *testing.T) {
 	f := newTestFixture(t)
 	f.config.seed("acme", []byte(seedPartnerConfig))
-	token := testToken(t, f.key, "acme", nil)
+	token := testToken(t, f, "acme", nil)
 
 	status, body := doRequest(t, f, http.MethodGet, "/v1/self-service/applications", token, "")
 	if status != http.StatusOK {
@@ -327,7 +413,7 @@ func TestListApplicationsReturnsSeededConfig(t *testing.T) {
 func TestCreateApplicationRequiresAdmin(t *testing.T) {
 	f := newTestFixture(t)
 	f.config.seed("acme", []byte(seedPartnerConfig))
-	token := testToken(t, f.key, "acme", nil) // без роли partner-admin
+	token := testToken(t, f, "acme", nil) // без роли partner-admin
 
 	body := `{"application_id":"app2","display_name":"Second","auth":{"type":"API_KEY","credential_ref":"vault://x"},"rate_limit_tps":10,"allowed_channels":["SMS"]}`
 	status, _ := doRequest(t, f, http.MethodPost, "/v1/self-service/applications", token, body)
@@ -339,7 +425,7 @@ func TestCreateApplicationRequiresAdmin(t *testing.T) {
 func TestCreateApplicationAsAdminSucceedsAndPersists(t *testing.T) {
 	f := newTestFixture(t)
 	f.config.seed("acme", []byte(seedPartnerConfig))
-	token := testToken(t, f.key, "acme", []string{"partner-admin"})
+	token := testToken(t, f, "acme", []string{"partner-admin"})
 
 	body := `{"application_id":"app2","display_name":"Second","auth":{"type":"API_KEY","credential_ref":"vault://x"},"rate_limit_tps":10,"allowed_channels":["SMS"]}`
 	status, respBody := doRequest(t, f, http.MethodPost, "/v1/self-service/applications", token, body)
@@ -363,7 +449,7 @@ func TestCreateApplicationAsAdminSucceedsAndPersists(t *testing.T) {
 func TestCreateApplicationDuplicateIDReturnsConflict(t *testing.T) {
 	f := newTestFixture(t)
 	f.config.seed("acme", []byte(seedPartnerConfig))
-	token := testToken(t, f.key, "acme", []string{"partner-admin"})
+	token := testToken(t, f, "acme", []string{"partner-admin"})
 
 	body := `{"application_id":"app1","display_name":"Dup","auth":{"type":"API_KEY","credential_ref":"vault://x"},"rate_limit_tps":10,"allowed_channels":["SMS"]}`
 	status, _ := doRequest(t, f, http.MethodPost, "/v1/self-service/applications", token, body)
@@ -377,7 +463,7 @@ func TestPartnerCannotSeeAnotherPartnersApplications(t *testing.T) {
 	f.config.seed("acme", []byte(seedPartnerConfig))
 	// beta не засеян вообще — GetActiveVersion должен вернуть ошибку (502),
 	// а не случайно отдать конфиг acme.
-	token := testToken(t, f.key, "beta", nil)
+	token := testToken(t, f, "beta", nil)
 
 	status, _ := doRequest(t, f, http.MethodGet, "/v1/self-service/applications", token, "")
 	if status != http.StatusBadGateway {
@@ -388,7 +474,7 @@ func TestPartnerCannotSeeAnotherPartnersApplications(t *testing.T) {
 func TestSenderLifecycleCreateThenArchive(t *testing.T) {
 	f := newTestFixture(t)
 	f.config.seed("acme", []byte(seedPartnerConfig))
-	token := testToken(t, f.key, "acme", []string{"partner-admin"})
+	token := testToken(t, f, "acme", []string{"partner-admin"})
 
 	createBody := `{"sender_id":"5252","type":"SHORT_NUMBER"}`
 	status, respBody := doRequest(t, f, http.MethodPost, "/v1/self-service/senders", token, createBody)
@@ -420,7 +506,7 @@ func TestSenderLifecycleCreateThenArchive(t *testing.T) {
 func TestUpdateSenderStatusUnknownSenderReturns404(t *testing.T) {
 	f := newTestFixture(t)
 	f.config.seed("acme", []byte(seedPartnerConfig))
-	token := testToken(t, f.key, "acme", []string{"partner-admin"})
+	token := testToken(t, f, "acme", []string{"partner-admin"})
 
 	status, _ := doRequest(t, f, http.MethodPatch, "/v1/self-service/senders/DOES_NOT_EXIST", token, `{"status":"archived"}`)
 	if status != http.StatusNotFound {
@@ -431,7 +517,7 @@ func TestUpdateSenderStatusUnknownSenderReturns404(t *testing.T) {
 func TestWebhookPutThenGetRoundTrips(t *testing.T) {
 	f := newTestFixture(t)
 	f.config.seed("acme", []byte(seedPartnerConfig))
-	token := testToken(t, f.key, "acme", []string{"partner-admin"})
+	token := testToken(t, f, "acme", []string{"partner-admin"})
 
 	putBody := `{"notification_callback_url":"https://partner.example.com/notify"}`
 	status, respBody := doRequest(t, f, http.MethodPut, "/v1/self-service/applications/app1/webhook", token, putBody)
@@ -457,7 +543,7 @@ func TestWebhookPutThenGetRoundTrips(t *testing.T) {
 func TestWebhookPutRejectsNonHTTPScheme(t *testing.T) {
 	f := newTestFixture(t)
 	f.config.seed("acme", []byte(seedPartnerConfig))
-	token := testToken(t, f.key, "acme", []string{"partner-admin"})
+	token := testToken(t, f, "acme", []string{"partner-admin"})
 
 	status, _ := doRequest(t, f, http.MethodPut, "/v1/self-service/applications/app1/webhook", token, `{"notification_callback_url":"file:///etc/passwd"}`)
 	if status != http.StatusBadRequest {
@@ -478,7 +564,7 @@ func TestWebhookTestSendHitsConfiguredURL(t *testing.T) {
 	seeded := strings.Replace(seedPartnerConfig, `"allowed_channels": ["SMS"]`,
 		fmt.Sprintf(`"allowed_channels": ["SMS"], "notification_callback_url": %q`, echoSrv.URL), 1)
 	f.config.seed("acme", []byte(seeded))
-	token := testToken(t, f.key, "acme", nil)
+	token := testToken(t, f, "acme", nil)
 
 	status, respBody := doRequest(t, f, http.MethodPost, "/v1/self-service/applications/app1/webhook/test", token, "")
 	if status != http.StatusOK {
@@ -506,7 +592,7 @@ func TestListCredentialsScopedToPartner(t *testing.T) {
 		{Id: 1, PartnerId: "acme", ApplicationId: "app1", CredentialRef: "vault://partners/acme/app1/api_key", Status: "active"},
 		{Id: 2, PartnerId: "other", ApplicationId: "appX", CredentialRef: "vault://partners/other/appX/api_key", Status: "active"},
 	}
-	token := testToken(t, f.key, "acme", nil)
+	token := testToken(t, f, "acme", nil)
 
 	status, respBody := doRequest(t, f, http.MethodGet, "/v1/self-service/credentials", token, "")
 	if status != http.StatusOK {
@@ -525,13 +611,13 @@ func TestRotateCredentialRequiresAdminAndReturnsPlaintextOnce(t *testing.T) {
 	f := newTestFixture(t)
 	f.config.seed("acme", []byte(seedPartnerConfig))
 
-	viewerToken := testToken(t, f.key, "acme", nil)
+	viewerToken := testToken(t, f, "acme", nil)
 	status, _ := doRequest(t, f, http.MethodPost, "/v1/self-service/applications/app1/credentials/rotate", viewerToken, "")
 	if status != http.StatusForbidden {
 		t.Fatalf("ожидали 403 без роли partner-admin, получили %d", status)
 	}
 
-	adminToken := testToken(t, f.key, "acme", []string{"partner-admin"})
+	adminToken := testToken(t, f, "acme", []string{"partner-admin"})
 	status, respBody := doRequest(t, f, http.MethodPost, "/v1/self-service/applications/app1/credentials/rotate", adminToken, "")
 	if status != http.StatusOK {
 		t.Fatalf("ожидали 200, получили %d: %s", status, respBody)
@@ -545,5 +631,160 @@ func TestRotateCredentialRequiresAdminAndReturnsPlaintextOnce(t *testing.T) {
 	}
 	if len(f.cred.rotateCalls) != 1 || f.cred.rotateCalls[0].GetPartnerId() != "acme" {
 		t.Fatalf("RotateCredential вызван с неверным partner_id: %+v", f.cred.rotateCalls)
+	}
+}
+
+// TestHandleLoginHappyPathIssuesUsableToken — BACKOFFICE_ROADMAP.md
+// Production Readiness Review P0#5 (auth.go). Доказывает, что POST
+// /v1/self-service/auth/login реально работает end-to-end: creds → выпущен
+// JWT → тот же JWT реально проходит защищённый маршрут этого же сервиса, не
+// только "структурно похож на JWT".
+func TestHandleLoginHappyPathIssuesUsableToken(t *testing.T) {
+	f := newTestFixture(t)
+	f.config.seed("acme", []byte(seedPartnerConfig))
+	f.iam.setCredentials("alice", "correct-password", "user-alice", "acme")
+	f.iam.setAccess("user-alice", true, "acme", []string{"partner-admin"})
+
+	status, body := doRequest(t, f, http.MethodPost, "/v1/self-service/auth/login", "", `{"username":"alice","password":"correct-password"}`)
+	if status != http.StatusOK {
+		t.Fatalf("ожидали 200, получили %d: %s", status, body)
+	}
+	var out loginResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if out.Token == "" || out.ExpiresAt == "" {
+		t.Fatalf("ожидали непустые token/expires_at, получили %+v", out)
+	}
+
+	// Токен, выпущенный логином, реально проходит RequireAdmin-защищённый
+	// маршрут (роль partner-admin была зарегистрирована выше через
+	// f.iam.setAccess) — доказывает, что issuer.go/resolve.go/jwt.go
+	// согласованы друг с другом (audience/issuer совпадают, sub/partner_id
+	// реально резолвятся), не только по отдельности.
+	status, respBody := doRequest(t, f, http.MethodPost, "/v1/self-service/applications/app1/credentials/rotate", out.Token, "")
+	if status != http.StatusOK {
+		t.Fatalf("токен от /v1/self-service/auth/login должен проходить partner-admin-защищённый маршрут, получили %d: %s", status, respBody)
+	}
+}
+
+func TestHandleLoginRejectsWrongPassword(t *testing.T) {
+	f := newTestFixture(t)
+	f.iam.setCredentials("alice", "correct-password", "user-alice", "acme")
+
+	status, _ := doRequest(t, f, http.MethodPost, "/v1/self-service/auth/login", "", `{"username":"alice","password":"wrong"}`)
+	if status != http.StatusUnauthorized {
+		t.Fatalf("ожидали 401 на неверный пароль, получили %d", status)
+	}
+}
+
+func TestHandleLoginMissingFieldsReturns400(t *testing.T) {
+	f := newTestFixture(t)
+
+	status, _ := doRequest(t, f, http.MethodPost, "/v1/self-service/auth/login", "", `{"username":"alice"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("ожидали 400 без password, получили %d", status)
+	}
+}
+
+// TestResolveLiveAccessReflectsRoleAndDeactivationWithoutNewLogin — the
+// central proof for BACKOFFICE_ROADMAP.md Production Readiness Review P0#5:
+// a role change or deactivation applied through IAM Service (in production,
+// via backoffice-ui's "Partner Users" screen) takes effect on the very next
+// request with the SAME already-issued token, without a new login. Before
+// ResolveLiveAccess (internal/auth/resolve.go) existed, this service trusted
+// realm_access.roles baked into the JWT at issue time — a revoked role or
+// deactivated account only stopped working once the 8h token expired.
+func TestResolveLiveAccessReflectsRoleAndDeactivationWithoutNewLogin(t *testing.T) {
+	f := newTestFixture(t)
+	f.config.seed("acme", []byte(seedPartnerConfig))
+
+	// Токен подписан с partner_id/roles-claim'ами, которые НЕ совпадают с
+	// тем, что вернёт ResolvePartnerPortalAccess ниже — если бы
+	// авторизация всё ещё читала claim'ы напрямую, эти проверки бы не
+	// отличили одно от другого. token issued once, never re-minted below.
+	sub := "user-acme-live"
+	claims := jwt.MapClaims{
+		"partner_id":   "acme",
+		"realm_access": map[string]interface{}{"roles": []string{}}, // claim врёт: пусто
+		"aud":          testAudience,
+		"iss":          testIssuer,
+		"exp":          jwt.NewNumericDate(time.Now().Add(time.Hour)).Unix(),
+		"sub":          sub,
+	}
+	token, err := jwt.NewWithClaims(jwt.SigningMethodRS256, claims).SignedString(f.key)
+	if err != nil {
+		t.Fatalf("подпись тестового токена failed: %v", err)
+	}
+
+	// Шаг 1: живой IAM говорит active=true, роль partner-admin — тот же
+	// токен уже должен проходить RequireAdmin, хотя сам JWT claim ролей пуст.
+	f.iam.setAccess(sub, true, "acme", []string{"partner-admin"})
+	status, body := doRequest(t, f, http.MethodPost, "/v1/self-service/applications/app1/credentials/rotate", token, "")
+	if status != http.StatusOK {
+		t.Fatalf("шаг 1: ожидали 200 (роль пришла из ResolvePartnerPortalAccess, не из claim'а), получили %d: %s", status, body)
+	}
+
+	// Шаг 2: роль отозвана (тот же аккаунт, тот же токен, НИКАКОГО нового
+	// логина) — тот же в точности запрос теперь должен получить 403.
+	f.iam.setAccess(sub, true, "acme", nil)
+	status, body = doRequest(t, f, http.MethodPost, "/v1/self-service/applications/app1/credentials/rotate", token, "")
+	if status != http.StatusForbidden {
+		t.Fatalf("шаг 2: ожидали 403 сразу после отзыва роли без нового логина, получили %d: %s", status, body)
+	}
+
+	// Шаг 3: аккаунт целиком деактивирован — тот же токен теперь должен
+	// быть отклонён даже на read-only маршруте (не только RequireAdmin-
+	// гейтнутом), доказывая, что ResolveLiveAccess смонтирован глобально,
+	// не только на мутирующих маршрутах.
+	f.iam.setAccess(sub, false, "", nil)
+	status, body = doRequest(t, f, http.MethodGet, "/v1/self-service/applications", token, "")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("шаг 3: ожидали 401 после деактивации без нового логина, получили %d: %s", status, body)
+	}
+}
+
+// TestResolveLiveAccessFailsClosedOnIamUnavailable — та же fail-closed
+// гарантия, что backoffice-api's RequirePermission (internal/auth/
+// permission.go там): недоступность IAM Service не должна означать "молча
+// разрешить". Ошибка эмулируется закрытием gRPC-соединения ДО запроса —
+// tls/network-класс ошибки, не codes.Unavailable от самого iam-service.
+func TestResolveLiveAccessFailsClosedOnIamUnavailable(t *testing.T) {
+	f := newTestFixture(t)
+	f.config.seed("acme", []byte(seedPartnerConfig))
+	token := testToken(t, f, "acme", nil)
+
+	// Ломаем IAM-зависимость руками — проще и надёжнее, чем гонять реальный
+	// bufconn-сервер вниз/вверх: перевыпускаем роутер с IamClient,
+	// указывающим на уже закрытое соединение.
+	deadConn, err := grpc.NewClient("passthrough:///dead",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return nil, fmt.Errorf("iam-service недоступен (тестовая эмуляция)")
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("grpc.NewClient failed: %v", err)
+	}
+	defer deadConn.Close()
+
+	router := NewRouter(Deps{
+		Validator:        auth.NewValidator(&f.key.PublicKey, testAudience, testIssuer),
+		ConfigClient:     grpcv1.NewConfigServiceClient(dialBufconn(t, func(s *grpc.Server) { grpcv1.RegisterConfigServiceServer(s, f.config) })),
+		CredentialClient: grpcv1.NewCredentialIssuerServiceClient(dialBufconn(t, func(s *grpc.Server) { grpcv1.RegisterCredentialIssuerServiceServer(s, f.cred) })),
+		IamClient:        grpcv1.NewIamServiceClient(deadConn),
+		TracerProvider:   sdktrace.NewTracerProvider(),
+	})
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/self-service/applications", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("ожидали 503 (fail-closed) при недоступном IAM Service, получили %d", resp.StatusCode)
 	}
 }

@@ -28,7 +28,7 @@ pub fn router(state: Arc<HealthState>) -> Router {
                         if state.ready.load(Ordering::Relaxed) {
                             (axum::http::StatusCode::OK, "ready")
                         } else {
-                            (axum::http::StatusCode::SERVICE_UNAVAILABLE, "pipeline definition not loaded")
+                            (axum::http::StatusCode::SERVICE_UNAVAILABLE, "pipeline bootstrap not complete")
                         }
                     }
                 }

@@ -500,6 +500,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/iam/partner-portal-users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listPartnerPortalUsers"];
+        put?: never;
+        post: operations["createPartnerPortalUser"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/iam/partner-portal-users/{external_id}/deactivate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["deactivatePartnerPortalUser"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/partners/{partner_id}/applications/{application_id}/credentials/rotate": {
         parameters: {
             query?: never;
@@ -974,6 +1006,30 @@ export interface components {
         };
         CreateStaffAccountResponse: {
             account: components["schemas"]["StaffAccount"];
+        };
+        PartnerPortalUser: {
+            external_id: string;
+            username: string;
+            partner_id: string;
+            display_name: string;
+            active: boolean;
+            /** Format: date-time */
+            created_at: string;
+        };
+        PartnerPortalUsersResponse: {
+            users: components["schemas"]["PartnerPortalUser"][];
+        };
+        CreatePartnerPortalUserRequest: {
+            username: string;
+            password: string;
+            partner_id: string;
+            display_name: string;
+        };
+        CreatePartnerPortalUserResponse: {
+            user: components["schemas"]["PartnerPortalUser"];
+        };
+        DeactivatePartnerPortalUserResponse: {
+            deactivated: boolean;
         };
         DeactivateStaffAccountResponse: {
             deactivated: boolean;
@@ -1997,6 +2053,74 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DeactivateStaffAccountResponse"];
+                };
+            };
+        };
+    };
+    listPartnerPortalUsers: {
+        parameters: {
+            query?: {
+                partner_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PartnerPortalUsersResponse"];
+                };
+            };
+        };
+    };
+    createPartnerPortalUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreatePartnerPortalUserRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreatePartnerPortalUserResponse"];
+                };
+            };
+        };
+    };
+    deactivatePartnerPortalUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                external_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeactivatePartnerPortalUserResponse"];
                 };
             };
         };

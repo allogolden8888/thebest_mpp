@@ -44,7 +44,19 @@ type Deps struct {
 	// (templates.go) — см. doc-комментарий там за тем, почему это
 	// аутентифицированный прокси, а не прямой клиентский вызов.
 	TemplatesServiceURL string
-	TracerProvider      trace.TracerProvider
+	// IamClient — BACKOFFICE_ROADMAP.md Production Readiness Review P0#5
+	// (auth.go's handleLogin, internal/auth/resolve.go's ResolveLiveAccess).
+	// Новая зависимость этого сервиса — до этого захода
+	// partner-self-service-api вообще не говорил с iam-service (см. package
+	// doc jwt.go за тем, почему раньше — осознанное упрощение, теперь
+	// закрытое).
+	IamClient grpcv1.IamServiceClient
+	// TokenIssuer — auth.go's handleLogin, internal/auth/issuer.go. Первый
+	// случай, когда partner-self-service-api сам ПОДПИСЫВАЕТ JWT, не только
+	// валидирует чужие — см. package doc там за разбором отдельного от
+	// остальных self-service API keypair'а.
+	TokenIssuer    *auth.TokenIssuer
+	TracerProvider trace.TracerProvider
 }
 
 func NewRouter(d Deps) *chi.Mux {
@@ -59,8 +71,27 @@ func NewRouter(d Deps) *chi.Mux {
 	}))
 	r.Use(maxBodyMiddleware)
 
+	// POST /v1/self-service/auth/login — BACKOFFICE_ROADMAP.md Production
+	// Readiness Review P0#5 (auth.go). Единственный маршрут этого сервиса
+	// БЕЗ d.Validator.Middleware — вызывающий по определению ещё не имеет
+	// JWT на этом шаге, это и есть то, что этот маршрут выдаёт. Отдельный
+	// r.Route ДО группы с Use(d.Validator.Middleware) ниже — в chi нельзя
+	// смонтировать маршрут без middleware внутри роутера, который уже вызвал
+	// Use() (тот же порядок, что backoffice-api/internal/httpapi/router.go).
+	r.Route("/v1/self-service/auth", func(r chi.Router) {
+		r.Post("/login", handleLogin(d.IamClient, d.TokenIssuer))
+	})
+
 	r.Route("/v1/self-service", func(r chi.Router) {
 		r.Use(d.Validator.Middleware)
+		// ResolveLiveAccess — BACKOFFICE_ROADMAP.md Production Readiness
+		// Review P0#5 (internal/auth/resolve.go). Смонтирован ПОСЛЕ
+		// Validator.Middleware (нужны claims в контексте) и ПЕРЕД всеми
+		// mountXxx ниже — перезаписывает claims.PartnerID/claims.IsAdmin()
+		// живым результатом IamService.ResolvePartnerPortalAccess ДО того,
+		// как любой хендлер их прочитает, так что ни один из них не
+		// нуждается в изменении.
+		r.Use(auth.ResolveLiveAccess(d.IamClient))
 
 		mountApplications(r, d)
 		mountSenders(r, d)

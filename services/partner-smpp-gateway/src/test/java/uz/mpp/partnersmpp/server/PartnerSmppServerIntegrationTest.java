@@ -4,6 +4,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import uz.mpp.partnersmpp.admission.AdmissionGate;
 import uz.mpp.partnersmpp.codec.*;
 import uz.mpp.platformcontracts.events.v1.IncomingMessage;
 
@@ -34,13 +35,18 @@ class PartnerSmppServerIntegrationTest {
     }
 
     private PartnerSmppServer startServer(double tps, CopyOnWriteArrayList<IncomingMessage> sink) throws InterruptedException {
+        return startServer(tps, sink, ignored -> true);
+    }
+
+    private PartnerSmppServer startServer(double tps, CopyOnWriteArrayList<IncomingMessage> sink,
+                                          AdmissionGate admissionGate) throws InterruptedException {
         StaticAuthenticator auth = new StaticAuthenticator(Map.of(
             "click_uz_main", new StaticAuthenticator.Credential("s3cr3t", "click_uz", "click_uz_main")
         ));
         server = new PartnerSmppServer(auth, (msg, callback) -> {
             sink.add(msg);
             callback.accept(null, null);
-        }, tps);
+        }, tps, admissionGate);
         return server;
     }
 
@@ -170,6 +176,31 @@ class PartnerSmppServerIntegrationTest {
                 "второй submit_sm сразу после первого должен быть throttled при capacity=1");
 
             assertEquals(1, sink.size(), "throttled submit не должен попасть в incoming sink");
+        }
+    }
+
+    @Test
+    void executionControlRejectsSubmitWithSmppThrottledStatus() throws Exception {
+        CopyOnWriteArrayList<IncomingMessage> sink = new CopyOnWriteArrayList<>();
+        int port = startServer(100, sink, ignored -> false).start(0);
+
+        try (Socket socket = new Socket("127.0.0.1", port)) {
+            DataInputStream in = new DataInputStream(socket.getInputStream());
+            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+
+            writePdu(out, Pdu.withBody(CommandId.BIND_TRANSCEIVER, CommandStatus.ESME_ROK, 1,
+                new BindTransceiver("click_uz_main", "s3cr3t", "", (byte) 0x34, (byte) 0, (byte) 0, "")));
+            readPdu(in);
+
+            writePdu(out, Pdu.withBody(CommandId.SUBMIT_SM, CommandStatus.ESME_ROK, 2,
+                new ShortMessagePdu("", (byte) 0, (byte) 1, "x", (byte) 0, (byte) 1,
+                    "998901234567", (byte) 0, (byte) 0, (byte) 0, (byte) 0, (byte) 0,
+                    (byte) 0, (byte) 0, "blocked".getBytes())));
+
+            Pdu response = readPdu(in);
+            assertEquals(CommandId.SUBMIT_SM_RESP, response.header().commandId());
+            assertEquals(CommandStatus.ESME_RTHROTTLED, response.header().commandStatus());
+            assertTrue(sink.isEmpty(), "admission-rejected submit must not be published");
         }
     }
 }

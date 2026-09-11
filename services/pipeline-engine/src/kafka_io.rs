@@ -14,6 +14,7 @@
 //! ни на строку — только слой хранения вокруг них.
 
 use crate::build_stage_execute::build_stage_execute;
+use crate::execution_control::{AdmissionContext, AdmissionDecision, ControlSnapshot, HoldScope};
 use crate::execution_state::{Decision, ExecutionState, NextStageDecision, handle_stage_completed};
 use crate::offset_tracker::{OffsetTracker, PartitionKey};
 use crate::pipeline_graph::PipelineDefinition;
@@ -101,6 +102,7 @@ fn spawn_periodic_committer(consumer: Arc<StreamConsumer>, tracker: Arc<OffsetTr
 
 pub const INCOMING_TOPIC: &str = "incoming.messages";
 pub const COMPLETED_TOPIC: &str = "stage.completed";
+pub const SCHEDULER_STANDARD_COMMANDS_TOPIC: &str = "scheduler.standard.commands";
 
 /// Дефолт для `deadline_ms` — не задокументирован дословно нигде (сама
 /// wire-таблица `StageExecuteCommand.deadline` тоже ещё не заполняется, это
@@ -109,6 +111,78 @@ pub const COMPLETED_TOPIC: &str = "stage.completed";
 /// типичного round-trip любой стадии, короче, чем стоит ждать перед тем,
 /// как считать стадию зависшей.
 const DEFAULT_STAGE_TIMEOUT_MS: i64 = 30_000;
+
+fn admission_for_stage(control: &ControlSnapshot, state: &ExecutionState, stage_name: &str) -> AdmissionDecision {
+    control.check_admission(AdmissionContext {
+        partner_id: &state.partner_id,
+        stage_name,
+        operator_route_id: state.route_id.as_deref(),
+    })
+}
+
+/// Пока команда held, обычный 30-секундный stage deadline запускать нельзя:
+/// иначе Critical Sweep обойдёт PAUSED уже через 30 секунд. Запись остаётся
+/// видимой sweep только на общем message TTL — после него ждать снятия pause
+/// уже бессмысленно. При обычном dispatch применяется stage timeout.
+fn dispatch_deadline_ms(state: &ExecutionState, admission: &AdmissionDecision, now_ms: i64) -> i64 {
+    match admission {
+        AdmissionDecision::Admit => now_ms + DEFAULT_STAGE_TIMEOUT_MS,
+        AdmissionDecision::Hold(_) => state.message_ttl_ms,
+    }
+}
+
+fn stage_name_from_wire(value: i32) -> Result<crate::proto::common::StageName, String> {
+    let stage = crate::proto::common::StageName::try_from(value)
+        .map_err(|_| format!("неизвестный StageName={value} для SchedulerHoldCommand"))?;
+    if stage == crate::proto::common::StageName::Unspecified {
+        return Err("UNSPECIFIED StageName для SchedulerHoldCommand".to_string());
+    }
+    Ok(stage)
+}
+
+/// `publish_hold_command` (service_internal_methods.md §1.4) — чистая сборка
+/// wire-команды; Kafka ack выполняется в `publish_dispatch` ниже.
+fn build_hold_command(
+    command: &crate::proto::common::StageExecuteCommand,
+    hold: &HoldScope,
+    held_at_ms: i64,
+) -> Result<crate::proto::events::SchedulerHoldCommand, String> {
+    let stage = stage_name_from_wire(command.stage_name)?;
+    Ok(crate::proto::events::SchedulerHoldCommand {
+        message_id: command.message_id.clone(),
+        stage_execution_id: command.stage_execution_id.clone(),
+        scope: hold.scope as i32,
+        scope_id: hold.scope_id.clone(),
+        stage_name: stage as i32,
+        held_at: Some(to_timestamp(held_at_ms)),
+    })
+}
+
+/// Единственная точка фактической диспетчеризации Pipeline Engine: либо
+/// StageExecuteCommand в stage.*, либо SchedulerHoldCommand в Standard Lane.
+/// Успех означает broker ack; только после него вызывающая сторона разрешает
+/// продвижение входного consumer offset.
+async fn publish_dispatch(
+    producer: &FutureProducer,
+    stage_topic: &str,
+    command: &crate::proto::common::StageExecuteCommand,
+    admission: &AdmissionDecision,
+    now_ms: i64,
+) -> Result<(), String> {
+    let (topic, bytes) = match admission {
+        AdmissionDecision::Admit => (stage_topic, command.encode_to_vec()),
+        AdmissionDecision::Hold(scope) => (
+            SCHEDULER_STANDARD_COMMANDS_TOPIC,
+            build_hold_command(command, scope, now_ms)?.encode_to_vec(),
+        ),
+    };
+    let record = FutureRecord::to(topic).key(&command.message_id).payload(&bytes);
+    producer
+        .send(record, Duration::from_secs(5))
+        .await
+        .map(|_| ())
+        .map_err(|(error, _)| error.to_string())
+}
 
 pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
@@ -272,6 +346,7 @@ async fn process_one_incoming_record(
     producer: &FutureProducer,
     pipeline: &PipelineDefinition,
     store: &RedisStateStore,
+    control: &ControlSnapshot,
 ) -> bool {
     let Ok(incoming) = IncomingMessage::decode(payload) else {
         tracing::error!("не удалось декодировать IncomingMessage");
@@ -290,7 +365,9 @@ async fn process_one_incoming_record(
         return false;
     };
     state.destination_address = destination_address;
-    state.deadline_ms = now_ms() + DEFAULT_STAGE_TIMEOUT_MS;
+    let dispatch_now_ms = now_ms();
+    let admission = admission_for_stage(control, &state, &pipeline.entry_node().stage_name);
+    state.deadline_ms = dispatch_deadline_ms(&state, &admission, dispatch_now_ms);
     let stage_execution_id = state.awaiting_stage_execution_id.clone().unwrap_or_default();
 
     match store.cas_advance(None, None, &state).await {
@@ -305,10 +382,8 @@ async fn process_one_incoming_record(
         }
     }
 
-    let bytes = command.encode_to_vec();
-    let record = FutureRecord::to(topic).key(&command.message_id).payload(&bytes);
-    if let Err((e, _)) = producer.send(record, Duration::from_secs(5)).await {
-        tracing::error!("не удалось опубликовать первую StageExecuteCommand: {e}");
+    if let Err(e) = publish_dispatch(producer, topic, &command, &admission, dispatch_now_ms).await {
+        tracing::error!("не удалось опубликовать первую dispatch/hold-команду: {e}");
         // Тот же откат, что был в последовательной версии: CAS уже создал
         // состояние с expected=None, но команда не опубликована — без
         // отката повторная обработка того же incoming.messages увидела бы
@@ -328,6 +403,7 @@ pub async fn run_incoming_loop(
     producer: FutureProducer,
     pipeline: Arc<ArcSwap<PipelineDefinition>>,
     store: Arc<RedisStateStore>,
+    control: Arc<ControlSnapshot>,
 ) {
     let consumer = Arc::new(consumer);
     let semaphore = Arc::new(Semaphore::new(concurrency_limit("PIPELINE_INCOMING_CONCURRENCY", 256)));
@@ -360,6 +436,7 @@ pub async fn run_incoming_loop(
                 // подменит граф между ними.
                 let pipeline_snapshot = pipeline.load_full();
                 let store_task = store.clone();
+                let control_task = control.clone();
                 let tracker_task = tracker.clone();
                 let key_task = key.clone();
 
@@ -367,7 +444,7 @@ pub async fn run_incoming_loop(
                     let _permit = permit;
                     let done = match tokio::time::timeout(
                         process_timeout,
-                        process_one_incoming_record(&payload, &producer_task, &pipeline_snapshot, &store_task),
+                        process_one_incoming_record(&payload, &producer_task, &pipeline_snapshot, &store_task, &control_task),
                     )
                     .await
                     {
@@ -422,6 +499,7 @@ async fn process_one_completed_record(
     producer: &FutureProducer,
     pipeline: &PipelineDefinition,
     store: &RedisStateStore,
+    control: &ControlSnapshot,
 ) -> bool {
     let Ok(event) = StageCompletedEvent::decode(payload) else {
         tracing::error!("не удалось декодировать StageCompletedEvent");
@@ -498,7 +576,13 @@ async fn process_one_completed_record(
             true
         }
         Ok(AdvanceOutcome::Next(topic, command)) => {
-            state.deadline_ms = now_ms() + DEFAULT_STAGE_TIMEOUT_MS;
+            let dispatch_now_ms = now_ms();
+            let Some(node) = pipeline.node(&state.current_node_id) else {
+                tracing::error!("новое состояние message_id={} ссылается на несуществующий node={}", event.message_id, state.current_node_id);
+                return false;
+            };
+            let admission = admission_for_stage(control, &state, &node.stage_name);
+            state.deadline_ms = dispatch_deadline_ms(&state, &admission, dispatch_now_ms);
             match store.cas_advance(expected_before.as_deref(), expected_before.as_deref(), &state).await {
                 Ok(CasOutcome::Ok) => {}
                 Ok(CasOutcome::Conflict { actual_awaiting }) => {
@@ -513,10 +597,8 @@ async fn process_one_completed_record(
                     return false; // не коммитим — переобработается
                 }
             }
-            let bytes = command.encode_to_vec();
-            let record = FutureRecord::to(&topic).key(&command.message_id).payload(&bytes);
-            if let Err((e, _)) = producer.send(record, Duration::from_secs(5)).await {
-                tracing::error!("не удалось опубликовать StageExecuteCommand: {e}");
+            if let Err(e) = publish_dispatch(producer, &topic, &command, &admission, dispatch_now_ms).await {
+                tracing::error!("не удалось опубликовать StageExecuteCommand/SchedulerHoldCommand: {e}");
                 return false;
             }
             true
@@ -543,6 +625,7 @@ pub async fn run_completed_loop(
     producer: FutureProducer,
     pipeline: Arc<ArcSwap<PipelineDefinition>>,
     store: Arc<RedisStateStore>,
+    control: Arc<ControlSnapshot>,
 ) {
     // Реальная находка (нагрузочный прогон 100 msg/s ingest): этот цикл
     // видит В ПЯТЬ РАЗ больше трафика, чем run_incoming_loop (одно
@@ -579,6 +662,7 @@ pub async fn run_completed_loop(
                 let producer_task = producer.clone();
                 let pipeline_snapshot = pipeline.load_full();
                 let store_task = store.clone();
+                let control_task = control.clone();
                 let tracker_task = tracker.clone();
                 let key_task = key.clone();
 
@@ -586,7 +670,7 @@ pub async fn run_completed_loop(
                     let _permit = permit;
                     let done = match tokio::time::timeout(
                         process_timeout,
-                        process_one_completed_record(&payload, &producer_task, &pipeline_snapshot, &store_task),
+                        process_one_completed_record(&payload, &producer_task, &pipeline_snapshot, &store_task, &control_task),
                     )
                     .await
                     {
@@ -679,6 +763,7 @@ async fn process_one_retry_trigger_record(
     producer: &FutureProducer,
     pipeline: &PipelineDefinition,
     store: &RedisStateStore,
+    control: &ControlSnapshot,
 ) -> bool {
     let Ok(task) = crate::proto::events::SchedulerBackgroundTask::decode(payload) else {
         tracing::error!("не удалось декодировать SchedulerBackgroundTask из pipeline.retry.triggers");
@@ -726,7 +811,9 @@ async fn process_one_retry_trigger_record(
             return false;
         }
     };
-    state.deadline_ms = now_ms() + DEFAULT_STAGE_TIMEOUT_MS;
+    let dispatch_now_ms = now_ms();
+    let admission = admission_for_stage(control, &state, &node.stage_name);
+    state.deadline_ms = dispatch_deadline_ms(&state, &admission, dispatch_now_ms);
 
     // expected=None: только что проверили awaiting_stage_execution_id.is_some()==false
     // выше — CAS должен увидеть ровно то же самое, иначе это гонка с ещё
@@ -751,10 +838,8 @@ async fn process_one_retry_trigger_record(
         tracing::error!("DELIVERY без известного топика — быть не может, но defensive check");
         return false;
     };
-    let bytes = command.encode_to_vec();
-    let record = FutureRecord::to(topic).key(&command.message_id).payload(&bytes);
-    if let Err((e, _)) = producer.send(record, Duration::from_secs(5)).await {
-        tracing::error!("не удалось опубликовать retry StageExecuteCommand для message_id={}: {e}", task.message_id);
+    if let Err(e) = publish_dispatch(producer, topic, &command, &admission, dispatch_now_ms).await {
+        tracing::error!("не удалось опубликовать retry StageExecuteCommand/SchedulerHoldCommand для message_id={}: {e}", task.message_id);
         return false;
     }
     true
@@ -765,6 +850,7 @@ pub async fn run_retry_trigger_loop(
     producer: FutureProducer,
     pipeline: Arc<ArcSwap<PipelineDefinition>>,
     store: Arc<RedisStateStore>,
+    control: Arc<ControlSnapshot>,
 ) {
     // build_consumer уже подписал на топик (см. main.rs) — та же
     // конвенция, что у run_incoming_loop/run_completed_loop, повторный
@@ -796,6 +882,7 @@ pub async fn run_retry_trigger_loop(
                 let producer_task = producer.clone();
                 let pipeline_snapshot = pipeline.load_full();
                 let store_task = store.clone();
+                let control_task = control.clone();
                 let tracker_task = tracker.clone();
                 let key_task = key.clone();
 
@@ -803,7 +890,7 @@ pub async fn run_retry_trigger_loop(
                     let _permit = permit;
                     let done = match tokio::time::timeout(
                         process_timeout,
-                        process_one_retry_trigger_record(&payload, &producer_task, &pipeline_snapshot, &store_task),
+                        process_one_retry_trigger_record(&payload, &producer_task, &pipeline_snapshot, &store_task, &control_task),
                     )
                     .await
                     {
@@ -861,6 +948,51 @@ mod tests {
                 segment_count,
             })),
         }
+    }
+
+    #[test]
+    fn hold_command_preserves_dispatch_identity_scope_stage_and_time() {
+        let pipeline = pipeline();
+        let incoming = incoming_sms("m-hold", "998901331835", 1);
+        let (_state, _destination_address, command) = handle_incoming(&incoming, &pipeline).unwrap();
+        let hold_scope = HoldScope {
+            scope: crate::proto::common::ExecutionControlScope::PartnerStage,
+            scope_id: "click_uz:DESTINATION_RESOLUTION".into(),
+        };
+
+        let hold = build_hold_command(&command, &hold_scope, 1_700_000_123_456).unwrap();
+
+        assert_eq!(hold.message_id, command.message_id);
+        assert_eq!(hold.stage_execution_id, command.stage_execution_id);
+        assert_eq!(hold.scope, crate::proto::common::ExecutionControlScope::PartnerStage as i32);
+        assert_eq!(hold.scope_id, "click_uz:DESTINATION_RESOLUTION");
+        assert_eq!(hold.stage_name, StageName::DestinationResolution as i32);
+        assert_eq!(hold.held_at.unwrap(), to_timestamp(1_700_000_123_456));
+    }
+
+    #[test]
+    fn held_dispatch_uses_message_ttl_not_normal_stage_timeout() {
+        let pipeline = pipeline();
+        let mut state = ExecutionState::new_from_incoming(
+            "m1".into(),
+            &pipeline,
+            1,
+            2,
+            1_700_100_000_000,
+            "click_uz".into(),
+            false,
+        );
+        state.route_id = Some("route-1".into());
+        let hold = AdmissionDecision::Hold(HoldScope {
+            scope: crate::proto::common::ExecutionControlScope::OperatorRoute,
+            scope_id: "route-1".into(),
+        });
+
+        assert_eq!(dispatch_deadline_ms(&state, &hold, 1_700_000_000_000), state.message_ttl_ms);
+        assert_eq!(
+            dispatch_deadline_ms(&state, &AdmissionDecision::Admit, 1_700_000_000_000),
+            1_700_000_000_000 + DEFAULT_STAGE_TIMEOUT_MS
+        );
     }
 
     #[test]

@@ -445,3 +445,133 @@ func handleIamDeactivateStaffAccount(client grpcv1.IamServiceClient) http.Handle
 		}{Deactivated: resp.GetDeactivated()})
 	}
 }
+
+type iamPartnerPortalUserResponse struct {
+	ExternalID  string `json:"external_id"`
+	Username    string `json:"username"`
+	PartnerID   string `json:"partner_id"`
+	DisplayName string `json:"display_name"`
+	Active      bool   `json:"active"`
+	CreatedAt   string `json:"created_at"`
+}
+
+func toIamPartnerPortalUserResponse(u *grpcv1.PartnerPortalUser) iamPartnerPortalUserResponse {
+	return iamPartnerPortalUserResponse{
+		ExternalID:  u.GetExternalId(),
+		Username:    u.GetUsername(),
+		PartnerID:   u.GetPartnerId(),
+		DisplayName: u.GetDisplayName(),
+		Active:      u.GetActive(),
+		CreatedAt:   formatTimestamp(u.GetCreatedAt()),
+	}
+}
+
+// handleIamListPartnerPortalUsers — GET /v1/iam/partner-portal-users?partner_id=
+// (BACKOFFICE_ROADMAP.md Production Readiness Review P0#5 — до этого захода
+// PartnerUsersView.vue могло только назначать РОЛИ external_id, который
+// предполагался уже существующим ("заводится при первом логине" — это
+// предположение полагалось на JIT-provisioning через реальный Keycloak,
+// который никогда не был построен, см. platform-contracts/grpc/iam.proto
+// package doc). Пустой partner_id — все пользователи (тот же passthrough-
+// фильтр, что ListPartnerPortalAssignments).
+func handleIamListPartnerPortalUsers(client grpcv1.IamServiceClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		resp, err := client.ListPartnerPortalUsers(r.Context(), &grpcv1.ListPartnerPortalUsersRequest{
+			PartnerId: r.URL.Query().Get("partner_id"),
+		})
+		if err != nil {
+			internalError(w, http.StatusBadGateway, "iam_list_partner_portal_users: gRPC-вызов IAM Service не удался", err)
+			return
+		}
+
+		users := make([]iamPartnerPortalUserResponse, 0, len(resp.GetUsers()))
+		for _, u := range resp.GetUsers() {
+			users = append(users, toIamPartnerPortalUserResponse(u))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(struct {
+			Users []iamPartnerPortalUserResponse `json:"users"`
+		}{Users: users})
+	}
+}
+
+type createPartnerPortalUserRequestBody struct {
+	Username    string `json:"username"`
+	Password    string `json:"password"`
+	PartnerID   string `json:"partner_id"`
+	DisplayName string `json:"display_name"`
+}
+
+// handleIamCreatePartnerPortalUser — POST /v1/iam/partner-portal-users.
+// created_by — claims.Subject, НЕ из тела (тот же принцип, что везде в этом
+// файле). Это единственный способ произвести реально логинящегося партнёра
+// со стороны бэкофиса — существующий /v1/iam/partner-portal-assignments
+// (выше) только назначает РОЛЬ уже существующему external_id, ничего не
+// создаёт.
+func handleIamCreatePartnerPortalUser(client grpcv1.IamServiceClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := auth.ClaimsFromContext(r.Context())
+		if !ok {
+			http.Error(w, "нет claims в контексте", http.StatusInternalServerError)
+			return
+		}
+
+		var body createPartnerPortalUserRequestBody
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "неверное тело запроса: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if body.Username == "" || body.Password == "" || body.PartnerID == "" || body.DisplayName == "" {
+			http.Error(w, "требуются username, password, partner_id и display_name", http.StatusBadRequest)
+			return
+		}
+
+		resp, err := client.CreatePartnerPortalUser(r.Context(), &grpcv1.CreatePartnerPortalUserRequest{
+			Username:    body.Username,
+			Password:    body.Password,
+			PartnerId:   body.PartnerID,
+			DisplayName: body.DisplayName,
+			CreatedBy:   claims.Subject,
+		})
+		if err != nil {
+			writeIamGRPCError(w, "iam_create_partner_portal_user", err)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(struct {
+			User iamPartnerPortalUserResponse `json:"user"`
+		}{User: toIamPartnerPortalUserResponse(resp.GetUser())})
+	}
+}
+
+// handleIamDeactivatePartnerPortalUser — POST /v1/iam/partner-portal-users/
+// {external_id}/deactivate, тот же POST-action/идемпотентный паттерн, что
+// handleIamDeactivateStaffAccount. actor — claims.Subject.
+func handleIamDeactivatePartnerPortalUser(client grpcv1.IamServiceClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := auth.ClaimsFromContext(r.Context())
+		if !ok {
+			http.Error(w, "нет claims в контексте", http.StatusInternalServerError)
+			return
+		}
+
+		externalID := chi.URLParam(r, "external_id")
+
+		resp, err := client.DeactivatePartnerPortalUser(r.Context(), &grpcv1.DeactivatePartnerPortalUserRequest{
+			ExternalId: externalID,
+			Actor:      claims.Subject,
+		})
+		if err != nil {
+			writeIamGRPCError(w, "iam_deactivate_partner_portal_user", err)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(struct {
+			Deactivated bool `json:"deactivated"`
+		}{Deactivated: resp.GetDeactivated()})
+	}
+}

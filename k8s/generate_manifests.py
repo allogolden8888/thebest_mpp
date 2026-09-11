@@ -351,7 +351,18 @@ SECRET_DEPENDENCIES: dict[str, list[str]] = {
     "partner-rest-receiver": ["redis-runtime", "redis-configuration"],
     "partner-smpp-gateway": ["redis-runtime", "redis-configuration"],
     "operator-smpp-session-manager": ["redis-runtime", "redis-configuration"],
-    "operator-http-gateway": ["redis-runtime", "redis-configuration", "operator-webhook-auth"],
+    # BACKOFFICE_ROADMAP.md P0#1 (2026-09): "operator-webhook-auth" (один
+    # общий WEBHOOK_AUTH_TOKEN на ВСЕХ операторов сразу) удалён — то же
+    # рассуждение, что у credential-issuer-service ниже про Vault: этот
+    # сервис теперь ходит в Vault по Kubernetes auth
+    # (vault_kubernetes_auth_backend_role.operator_webhook_credential_readers,
+    # infra/terraform/vault-secrets.tf) за per-operator секретом
+    # (credential_ref из operator.schema.json http_profile.webhook_auth,
+    # резолвится через Configuration Redis — уже есть в списке ниже), не по
+    # статическому токену из k8s Secret. VAULT_ADDR/VAULT_MOUNT — не
+    # секреты, main.go уже дефолтит их на прод-значения, ничего
+    # дополнительно инжектить здесь не нужно.
+    "operator-http-gateway": ["redis-runtime", "redis-configuration"],
     "pipeline-engine": ["redis-runtime", "redis-configuration"],
     "destination-resolution-service": ["redis-configuration"],
     "policy-service": ["redis-runtime", "redis-configuration"],
@@ -493,7 +504,6 @@ SECRET_K8S_NAME = {
     # внешний IdP partner portal нельзя сводить в один RSA keypair.
     "backoffice-jwt-keypair": "backoffice-jwt-keypair",
     "partner-oidc-verification": "partner-oidc-verification",
-    "operator-webhook-auth": "operator-webhook-auth",
     # Форма отличается от пяти секретов выше (один Vault-путь = одна запись
     # в этом Secret) — у partner-credentials каждый ключ (один на
     # credential_ref) читает СВОЙ собственный Vault-путь, не общую запись.

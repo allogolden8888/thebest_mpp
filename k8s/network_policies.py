@@ -26,8 +26,8 @@ VAULT_NAMESPACE = "vault-system"
 NAMESPACE_NAME_LABEL = "kubernetes.io/metadata.name"
 
 # Ключи SECRET_DEPENDENCIES (generate_manifests.py), которые указывают на
-# managed-зависимость вне mesh, а не на in-cluster секрет (operator-webhook-auth/
-# partner-oidc-verification/backoffice-jwt-keypair — не сетевые destinations).
+# managed-зависимость вне mesh, а не на in-cluster секрет (partner-oidc-verification/
+# backoffice-jwt-keypair — не сетевые destinations).
 EXTERNAL_DB_KEYS = ("postgresql", "redis-runtime", "redis-configuration", "redis-billing", "clickhouse")
 
 # RFC1918 + link-local (включает 169.254.169.254 — cloud metadata) + loopback —
@@ -203,6 +203,16 @@ CROSS_NAMESPACE_CALLS = [
     ),
     NamespacedCall(
         "partner-smpp-gateway",
+        VAULT_NAMESPACE,
+        {"app.kubernetes.io/name": "vault", "app.kubernetes.io/instance": "vault", "component": "server"},
+        VAULT_PORT,
+        "vault",
+    ),
+    # BACKOFFICE_ROADMAP.md P0#1 (2026-09) — operator-http-gateway теперь
+    # читает per-operator webhook credentials из Vault (Kubernetes auth +
+    # KV v2 read), тот же egress-паттерн, что три сервиса выше.
+    NamespacedCall(
+        "operator-http-gateway",
         VAULT_NAMESPACE,
         {"app.kubernetes.io/name": "vault", "app.kubernetes.io/instance": "vault", "component": "server"},
         VAULT_PORT,

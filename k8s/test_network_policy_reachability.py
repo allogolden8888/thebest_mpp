@@ -218,6 +218,8 @@ def test_cross_namespace_egress_uses_namespace_and_pod_intersection():
         ("credential-issuer-service", VAULT_NAMESPACE, 8200),
         ("partner-rest-receiver", VAULT_NAMESPACE, 8200),
         ("partner-smpp-gateway", VAULT_NAMESPACE, 8200),
+        # BACKOFFICE_ROADMAP.md P0#1 (2026-09) — per-operator webhook credentials.
+        ("operator-http-gateway", VAULT_NAMESPACE, 8200),
     }
     assert {(call.caller, call.namespace, call.port) for call in CROSS_NAMESPACE_CALLS} == expected
     for call in CROSS_NAMESPACE_CALLS:

@@ -48,7 +48,12 @@ SECRET_KEYS = {
     # здесь, а не отдельный опциональный ExternalSecret на время ротации.
     "backoffice-jwt-keypair": ["JWT_PUBLIC_KEY_PEM", "JWT_PRIVATE_KEY_PEM", "JWT_PREVIOUS_PUBLIC_KEYS_PEM"],
     "partner-oidc-verification": ["JWT_PUBLIC_KEY_PEM"],
-    "operator-webhook-auth": ["WEBHOOK_AUTH_TOKEN"],
+    # "operator-webhook-auth": удалён BACKOFFICE_ROADMAP.md P0#1 (2026-09) —
+    # один общий WEBHOOK_AUTH_TOKEN на всех операторов сразу заменён
+    # per-operator Vault-lookup (operator-http-gateway ходит в Vault по
+    # Kubernetes auth напрямую, не через ExternalSecret/k8s Secret — см.
+    # infra/terraform/vault-secrets.tf
+    # vault_kubernetes_auth_backend_role.operator_webhook_credential_readers).
 }
 
 # k8s Secret name -> Vault KV v2 путь (без /data/ префикса — ESO сам его подставляет для kv-v2).
@@ -60,7 +65,6 @@ VAULT_PATH = {
     "clickhouse-credentials": "clickhouse",
     "backoffice-jwt-keypair": "backoffice-jwt",
     "partner-oidc-verification": "partner-oidc-verification",
-    "operator-webhook-auth": "operator-webhook",
 }
 
 

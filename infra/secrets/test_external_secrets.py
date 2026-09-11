@@ -16,10 +16,8 @@ EXPECTED_RUNTIME_SECRETS = {
         "path": "partner-oidc-verification",
         "keys": {"JWT_PUBLIC_KEY_PEM"},
     },
-    "operator-webhook-auth": {
-        "path": "operator-webhook",
-        "keys": {"WEBHOOK_AUTH_TOKEN"},
-    },
+    # "operator-webhook-auth" removed — BACKOFFICE_ROADMAP.md P0#1 (2026-09):
+    # see generate_external_secrets.py SECRET_KEYS comment.
 }
 
 

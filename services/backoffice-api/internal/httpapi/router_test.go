@@ -151,6 +151,56 @@ type fakeIamServer struct {
 		externalID string
 	}
 	staffAccounts []*grpcv1.StaffAccount
+
+	// partnerPortalUsers — BACKOFFICE_ROADMAP.md Production Readiness
+	// Review P0#5 — тот же класс in-memory CRUD, что staffAccounts выше, но
+	// для iam.partner_portal_users (handleIamCreatePartnerPortalUser/
+	// handleIamListPartnerPortalUsers/handleIamDeactivatePartnerPortalUser,
+	// iam.go).
+	partnerPortalUsers []*grpcv1.PartnerPortalUser
+}
+
+func (f *fakeIamServer) CreatePartnerPortalUser(ctx context.Context, req *grpcv1.CreatePartnerPortalUserRequest) (*grpcv1.CreatePartnerPortalUserResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, u := range f.partnerPortalUsers {
+		if u.GetUsername() == req.GetUsername() {
+			return nil, status.Error(codes.AlreadyExists, "username уже занят")
+		}
+	}
+	u := &grpcv1.PartnerPortalUser{
+		ExternalId:  req.GetUsername(),
+		Username:    req.GetUsername(),
+		PartnerId:   req.GetPartnerId(),
+		DisplayName: req.GetDisplayName(),
+		Active:      true,
+	}
+	f.partnerPortalUsers = append(f.partnerPortalUsers, u)
+	return &grpcv1.CreatePartnerPortalUserResponse{User: u}, nil
+}
+
+func (f *fakeIamServer) ListPartnerPortalUsers(ctx context.Context, req *grpcv1.ListPartnerPortalUsersRequest) (*grpcv1.ListPartnerPortalUsersResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*grpcv1.PartnerPortalUser
+	for _, u := range f.partnerPortalUsers {
+		if req.GetPartnerId() == "" || u.GetPartnerId() == req.GetPartnerId() {
+			out = append(out, u)
+		}
+	}
+	return &grpcv1.ListPartnerPortalUsersResponse{Users: out}, nil
+}
+
+func (f *fakeIamServer) DeactivatePartnerPortalUser(ctx context.Context, req *grpcv1.DeactivatePartnerPortalUserRequest) (*grpcv1.DeactivatePartnerPortalUserResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, u := range f.partnerPortalUsers {
+		if u.GetExternalId() == req.GetExternalId() && u.GetActive() {
+			u.Active = false
+			return &grpcv1.DeactivatePartnerPortalUserResponse{Deactivated: true}, nil
+		}
+	}
+	return &grpcv1.DeactivatePartnerPortalUserResponse{Deactivated: false}, nil
 }
 
 func (f *fakeIamServer) setStaffCredentials(username, password, externalID string) {
@@ -1702,6 +1752,74 @@ func TestHandleStaffAccountsCreateListDeactivateRoundTrip(t *testing.T) {
 	}
 
 	deactivateReq, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/iam/staff-accounts/bob/deactivate", nil)
+	deactivateReq.Header.Set("Authorization", "Bearer "+token)
+	deactivateResp, err := http.DefaultClient.Do(deactivateReq)
+	if err != nil {
+		t.Fatalf("deactivate request failed: %v", err)
+	}
+	defer deactivateResp.Body.Close()
+	var deactivateOut struct {
+		Deactivated bool `json:"deactivated"`
+	}
+	if err := json.NewDecoder(deactivateResp.Body).Decode(&deactivateOut); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if !deactivateOut.Deactivated {
+		t.Fatalf("ожидали deactivated=true")
+	}
+}
+
+// TestHandlePartnerPortalUsersCreateListDeactivateRoundTrip —
+// BACKOFFICE_ROADMAP.md Production Readiness Review P0#5: PartnerUsersView.vue
+// раньше могло только назначать роль external_id, который предполагался уже
+// существующим — эти три маршрута реально ПРОИЗВОДЯТ логинящегося
+// партнёрского пользователя. Тот же паттерн, что
+// TestHandleStaffAccountsCreateListDeactivateRoundTrip выше.
+func TestHandlePartnerPortalUsersCreateListDeactivateRoundTrip(t *testing.T) {
+	deps, _, iamFake, _ := testDeps(t)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("генерация ключа failed: %v", err)
+	}
+	deps.Validator = auth.NewValidator(&key.PublicKey)
+	iamFake.allow("admin@mpp", "iam:manage")
+
+	router := NewRouter(deps)
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+	token := testToken(t, key, "admin@mpp")
+
+	createReq, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/iam/partner-portal-users",
+		strings.NewReader(`{"username":"acme-bob","password":"pw","partner_id":"acme","display_name":"Bob at Acme"}`))
+	createReq.Header.Set("Authorization", "Bearer "+token)
+	createReq.Header.Set("Content-Type", "application/json")
+	createResp, err := http.DefaultClient.Do(createReq)
+	if err != nil {
+		t.Fatalf("create request failed: %v", err)
+	}
+	defer createResp.Body.Close()
+	if createResp.StatusCode != http.StatusCreated {
+		t.Fatalf("ожидали 201, получили %d", createResp.StatusCode)
+	}
+
+	listReq, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/iam/partner-portal-users?partner_id=acme", nil)
+	listReq.Header.Set("Authorization", "Bearer "+token)
+	listResp, err := http.DefaultClient.Do(listReq)
+	if err != nil {
+		t.Fatalf("list request failed: %v", err)
+	}
+	defer listResp.Body.Close()
+	var listOut struct {
+		Users []iamPartnerPortalUserResponse `json:"users"`
+	}
+	if err := json.NewDecoder(listResp.Body).Decode(&listOut); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if len(listOut.Users) != 1 || listOut.Users[0].Username != "acme-bob" || listOut.Users[0].PartnerID != "acme" || !listOut.Users[0].Active {
+		t.Fatalf("неожиданный список: %+v", listOut.Users)
+	}
+
+	deactivateReq, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/iam/partner-portal-users/acme-bob/deactivate", nil)
 	deactivateReq.Header.Set("Authorization", "Bearer "+token)
 	deactivateResp, err := http.DefaultClient.Do(deactivateReq)
 	if err != nil {

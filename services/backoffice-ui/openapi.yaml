@@ -469,6 +469,41 @@ components:
       required: [account]
       properties:
         account: { $ref: "#/components/schemas/StaffAccount" }
+    PartnerPortalUser:
+      type: object
+      required: [external_id, username, partner_id, display_name, active, created_at]
+      properties:
+        external_id: { type: string }
+        username: { type: string }
+        partner_id: { type: string }
+        display_name: { type: string }
+        active: { type: boolean }
+        created_at: { type: string, format: date-time }
+    PartnerPortalUsersResponse:
+      type: object
+      required: [users]
+      properties:
+        users:
+          type: array
+          items: { $ref: "#/components/schemas/PartnerPortalUser" }
+    CreatePartnerPortalUserRequest:
+      type: object
+      required: [username, password, partner_id, display_name]
+      properties:
+        username: { type: string }
+        password: { type: string }
+        partner_id: { type: string }
+        display_name: { type: string }
+    CreatePartnerPortalUserResponse:
+      type: object
+      required: [user]
+      properties:
+        user: { $ref: "#/components/schemas/PartnerPortalUser" }
+    DeactivatePartnerPortalUserResponse:
+      type: object
+      required: [deactivated]
+      properties:
+        deactivated: { type: boolean }
     DeactivateStaffAccountResponse:
       type: object
       required: [deactivated]
@@ -1279,6 +1314,46 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/DeactivateStaffAccountResponse" }
+  /iam/partner-portal-users:
+    get:
+      operationId: listPartnerPortalUsers
+      parameters:
+        - name: partner_id
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PartnerPortalUsersResponse" }
+    post:
+      operationId: createPartnerPortalUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreatePartnerPortalUserRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatePartnerPortalUserResponse" }
+  /iam/partner-portal-users/{external_id}/deactivate:
+    post:
+      operationId: deactivatePartnerPortalUser
+      parameters:
+        - name: external_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeactivatePartnerPortalUserResponse" }
   /partners/{partner_id}/applications/{application_id}/credentials/rotate:
     post:
       operationId: rotatePartnerCredential

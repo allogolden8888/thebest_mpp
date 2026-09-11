@@ -13,7 +13,11 @@ EXPECTED_SECRET_REFS = {
     "partner-self-service-api": {"partner-oidc-verification"},
     "billing-self-service-api": {"postgresql", "partner-oidc-verification"},
     "compliance-api": {"redis-runtime", "partner-oidc-verification"},
-    "operator-http-gateway": {"redis-runtime", "redis-configuration", "operator-webhook-auth"},
+    # BACKOFFICE_ROADMAP.md P0#1 (2026-09): "operator-webhook-auth" removed —
+    # operator-http-gateway now reads per-operator webhook credentials from
+    # Vault via Kubernetes auth (no static k8s Secret involved), same as
+    # credential-issuer-service carries no Vault entry here either.
+    "operator-http-gateway": {"redis-runtime", "redis-configuration"},
 }
 
 

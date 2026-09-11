@@ -57,12 +57,6 @@ variable "partner_oidc_public_key_pem" {
   sensitive   = true
 }
 
-variable "operator_webhook_auth_token" {
-  description = "Bootstrap token входящего operator DLR webhook (TF_VAR_operator_webhook_auth_token); заменить per-operator config/Vault lookup"
-  type        = string
-  sensitive   = true
-}
-
 resource "vault_mount" "mpp" {
   path = "mpp"
   type = "kv-v2"
@@ -143,6 +137,43 @@ resource "vault_kubernetes_auth_backend_role" "partner_credential_readers" {
   token_ttl                        = 900
 }
 
+# BACKOFFICE_ROADMAP.md P0#1 (2026-09) — per-operator webhook credentials.
+# Replaces vault_kv_secret_v2.operator_webhook / variable
+# "operator_webhook_auth_token" below (removed): a single WEBHOOK_AUTH_TOKEN
+# bootstrap secret authenticated inbound DLR webhooks from EVERY operator —
+# one operator's leaked/rotated credential affected all others, with no way
+# to revoke access for just one. operator-http-gateway now reads a
+# per-operator secret at mpp/data/operators/<operator_id> (property name
+# depends on operator.schema.json's http_profile.webhook_auth.type —
+# webhook_bearer for BEARER_TOKEN, webhook_hmac for HMAC_SIGNATURE),
+# resolved via credential_ref (Configuration Redis) exactly like
+# read_partner_credentials/partner_credential_readers above resolve
+# partners/*.
+#
+# Honest caveat (same as credential-issuer-service's README "Что НЕ
+# реализовано"): this policy/role only grants READ. There is no
+# credential-issuer-service equivalent for operators yet (RotateCredential
+# only issues PARTNER credentials) — actually seeding
+# mpp/operators/<operator_id> with a real secret value is a manual
+# `vault kv put` ops action, not automated by this Terraform or any RPC.
+resource "vault_policy" "read_operator_webhook_credentials" {
+  name   = "mpp-read-operator-webhook-credentials"
+  policy = <<-EOT
+    path "mpp/data/operators/*" {
+      capabilities = ["read"]
+    }
+  EOT
+}
+
+resource "vault_kubernetes_auth_backend_role" "operator_webhook_credential_readers" {
+  backend                          = vault_auth_backend.kubernetes.path
+  role_name                        = "operator-webhook-credential-readers" # совпадает с VAULT_K8S_AUTH_ROLE default в services/operator-http-gateway/cmd/operator-http-gateway/main.go
+  bound_service_account_names      = ["operator-http-gateway"]
+  bound_service_account_namespaces = ["mpp"]
+  token_policies                   = [vault_policy.read_operator_webhook_credentials.name]
+  token_ttl                        = 900
+}
+
 resource "vault_kv_secret_v2" "postgresql" {
   mount = vault_mount.mpp.path
   name  = "postgresql"
@@ -202,10 +233,3 @@ resource "vault_kv_secret_v2" "partner_oidc_verification" {
   })
 }
 
-resource "vault_kv_secret_v2" "operator_webhook" {
-  mount = vault_mount.mpp.path
-  name  = "operator-webhook"
-  data_json = jsonencode({
-    WEBHOOK_AUTH_TOKEN = var.operator_webhook_auth_token
-  })
-}

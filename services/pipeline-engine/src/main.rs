@@ -1,5 +1,6 @@
 mod build_stage_execute;
 mod config_reload;
+mod execution_control;
 mod execution_state;
 mod health;
 mod kafka_io;
@@ -10,6 +11,7 @@ mod redis_cas;
 mod redis_url;
 
 use arc_swap::ArcSwap;
+use execution_control::ControlSnapshot;
 use health::HealthState;
 use pipeline_graph::{ConfigOverlay, PipelineDefinition};
 use redis_cas::RedisStateStore;
@@ -44,10 +46,20 @@ async fn main() {
     let overlay = Arc::new(ConfigOverlay::new(pipeline));
     let live_pipeline = Arc::new(ArcSwap::from_pointee(overlay.current()));
 
-    health_state.ready.store(true, Ordering::Relaxed);
-
     let bootstrap_servers = std::env::var("KAFKA_BOOTSTRAP_SERVERS").unwrap_or_else(|_| "kafka-bootstrap.mpp.svc:9092".to_string());
     let producer = kafka_io::build_producer(&bootstrap_servers);
+
+    // Pipeline не начинает читать data-plane до полного replay всех
+    // partition compacted execution.control и GLOBAL sentinel. Каждая
+    // реплика читает все partition самостоятельно; после bootstrap при
+    // потере Kafka продолжает действовать последний snapshot (fail-static).
+    let control_snapshot = Arc::new(ControlSnapshot::default());
+    tokio::spawn(execution_control::run_control_consumer(
+        vec![bootstrap_servers.clone()],
+        control_snapshot.clone(),
+    ));
+    control_snapshot.wait_until_ready().await;
+    health_state.ready.store(true, Ordering::Relaxed);
 
     // development_plan.md 4.2 — Runtime Redis CAS заменяет in-memory
     // Arc<Mutex<HashMap>>, снимает блокер "не работает с более чем одной
@@ -64,9 +76,27 @@ async fn main() {
     let config_consumer = config_reload::build_config_consumer(&bootstrap_servers, "pipeline-engine-config");
     tokio::spawn(config_reload::run_loop(config_consumer, overlay, live_pipeline.clone()));
 
-    let incoming_loop = kafka_io::run_incoming_loop(incoming_consumer, producer.clone(), live_pipeline.clone(), store.clone());
-    let completed_loop = kafka_io::run_completed_loop(completed_consumer, producer.clone(), live_pipeline.clone(), store.clone());
-    let retry_trigger_loop = kafka_io::run_retry_trigger_loop(retry_trigger_consumer, producer, live_pipeline, store);
+    let incoming_loop = kafka_io::run_incoming_loop(
+        incoming_consumer,
+        producer.clone(),
+        live_pipeline.clone(),
+        store.clone(),
+        control_snapshot.clone(),
+    );
+    let completed_loop = kafka_io::run_completed_loop(
+        completed_consumer,
+        producer.clone(),
+        live_pipeline.clone(),
+        store.clone(),
+        control_snapshot.clone(),
+    );
+    let retry_trigger_loop = kafka_io::run_retry_trigger_loop(
+        retry_trigger_consumer,
+        producer,
+        live_pipeline,
+        store,
+        control_snapshot,
+    );
 
     tokio::join!(incoming_loop, completed_loop, retry_trigger_loop);
 }

@@ -38,7 +38,28 @@ cargo test
 | `build_stage_execute` | `build_stage_execute.rs` | Строит нужный вариант `stage_extension` oneof по имени целевой стадии из накопленного `ExecutionState` |
 | `publish_stage_execute` / `handle_stage_completed` (Kafka) | `kafka_io::run_incoming_loop` / `run_completed_loop` | Два независимых консьюмера — `incoming.messages` запускает пайплайн, `stage.completed` продвигает |
 | `cas_transition_and_track_deadline` / `finalize_pipeline` | `redis_cas.rs`, `lua/cas_transition.lua`, `lua/finalize.lua` | Реальный атомарный Lua-скрипт в Runtime Redis, доказано против живого локального Redis — см. раздел ниже |
-| `check_admission`, `publish_hold_command` | — | **Не реализовано в этом срезе** — см. "Что НЕ реализовано" |
+| `check_admission`, `publish_hold_command` | `execution_control.rs`, `kafka_io::publish_dispatch` | Полный fail-closed bootstrap compacted `execution.control`; GLOBAL/STAGE/PARTNER/PARTNER_STAGE/OPERATOR_ROUTE проверяются перед первой стадией, каждым переходом и delayed retry. При PAUSED/нулевом admission rate публикуется подтверждённая Kafka hold-команда вместо `stage.*` |
+
+## Execution Control: bootstrap, dispatch и offset semantics
+
+`execution_control.rs` не использует обычную shared consumer group: каждой
+реплике Pipeline Engine нужен полный snapshot, поэтому она вручную назначает
+себе все partition `execution.control` с `Offset::Beginning`. Data-plane
+consumer'ы не создаются до EOF каждой partition и наличия обязательной GLOBAL
+записи. Офсеты snapshot намеренно не коммитятся; после reconnect compacted
+topic реплеится заново. После первого успешного replay разрыв с Kafka не
+очищает карту — действует последний подтверждённый snapshot (fail-static).
+
+`kafka_io::publish_dispatch` — единая точка отправки для всех трёх путей:
+первая стадия из `incoming.messages`, следующая стадия из `stage.completed` и
+отложенный DELIVERY retry. Для PAUSED или `admission_rate=0` она публикует
+`SchedulerHoldCommand` в `scheduler.standard.commands`, сохраняя
+`message_id`/`stage_execution_id`/`stage_name` и фактически заблокированный
+scope. Входной offset помечается обработанным только после Redis CAS и Kafka
+ack команды стадии либо hold-команды; ошибка snapshot/Redis/Kafka оставляет
+watermark на месте для at-least-once redelivery. Пока стадия находится в hold,
+в Redis используется общий `message_ttl`, а не обычный 30-секундный deadline,
+чтобы Critical Sweep не обошёл PAUSED преждевременным retry.
 
 ## Ключевой тест — правило, которое существует НЕЗАВИСИМО от графа
 
@@ -63,8 +84,9 @@ cargo test
 
 ## Что НЕ реализовано на этом шаге (честно, не спрятано)
 
-* **`check_admission`/`publish_hold_command` не реализованы** — Execution Control (Фаза 3.1, владелец Субагент 1) публикует `execution.control`, которое Pipeline Engine должен проверять перед каждой диспетчеризацией; здесь это отсутствует полностью, не заглушка "всегда Admit" (даже такой заглушки нет).
 * **Откат при неудачной публикации после успешного CAS в `run_completed_loop` не реализован** — см. раздел про Redis CAS выше, тот же класс пробела, что уже был в in-memory версии, не новый.
+* **Контракт controlled release остаётся неполным за пределами Pipeline Engine.** `SchedulerHoldCommand` несёт только координаты, а `scheduler-standard-lane::ReleaseCommandBuilder` собирает частичный `StageExecuteCommand` без stage extension/payload context и не переносит новый 30-секундный deadline обратно в Redis. Pipeline Engine теперь корректно создаёт hold, но полноценное возобновление требует исправления Standard Lane/контракта отдельной согласованной правкой.
+* **Один hold несёт только один non-global scope.** Если одновременно PAUSED несколько специфичных scope (например `PARTNER_STAGE` и `OPERATOR_ROUTE`), текущий `SchedulerHoldCommand` не может представить их все. GLOBAL/STAGE Standard Lane перепроверяет всегда; для прочих scope нужен расширенный контекст hold либо повторная полная проверка на release-стороне.
 * **`StageExecuteCommand.deadline`/`message_ttl` (wire-поля) по-прежнему не заполняются** (`build_stage_execute.rs`) — отдельный, не тронутый этой правкой пробел: внутренний `deadline_ms` в `ExecutionState`/Redis (для Critical Sweep) — самостоятельный механизм, не связан с этим wire-полем, которое видят downstream-стадии.
 * **Паники внутри `run_incoming_loop`/`run_completed_loop` не изолированы по сообщениям** — оба цикла запускаются через `tokio::join!`, не `tokio::spawn`+`JoinHandle` с перехватом паники на уровне задачи; сама бизнес-логика теперь не паникует на данных (см. выше), но общая изоляция "одно плохое сообщение не должно уронить весь процесс" не реализована как отдельный защитный слой.
 * **ОБНОВЛЕНО 2026-08-06:** `docker build` реально прогнан и провалидирован для этого сервиса (найдены и исправлены реальные баги по пути, где применимо — см. `development_plan.md` "Координация" п.5 и `infra/docker/README.md`). Формулировка ниже — из более раннего состояния сессии, оставлена для истории.

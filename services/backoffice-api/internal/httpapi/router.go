@@ -168,6 +168,18 @@ func NewRouter(d Deps) *chi.Mux {
 			r.Get("/partner-portal-assignments", handleIamListPartnerPortalAssignments(d.IamClient))
 			r.Post("/partner-portal-assignments", handleIamAssignPartnerPortalRole(d.IamClient))
 			r.Delete("/partner-portal-assignments/{external_id}/{role}", handleIamRevokePartnerPortalRole(d.IamClient))
+			// BACKOFFICE_ROADMAP.md Production Readiness Review P0#5 — до
+			// этого экрана "Partner Users" могло только назначать роль
+			// external_id, который предполагался уже существующим
+			// (комментарий в PartnerUsersView.vue ошибочно полагался на
+			// JIT-provisioning через Keycloak, которого никогда не было —
+			// см. platform-contracts/grpc/iam.proto package doc). Эти три
+			// маршрута — единственный способ реально ПРОИЗВЕСТИ логинящегося
+			// партнёрского пользователя со стороны бэкофиса, тот же
+			// iam:manage gate, что staff-accounts ниже.
+			r.Get("/partner-portal-users", handleIamListPartnerPortalUsers(d.IamClient))
+			r.Post("/partner-portal-users", handleIamCreatePartnerPortalUser(d.IamClient))
+			r.Post("/partner-portal-users/{external_id}/deactivate", handleIamDeactivatePartnerPortalUser(d.IamClient))
 			// BACKOFFICE_DESIGN_SPEC.md Экран 33 "Admin users" — управление
 			// локальными staff-аккаунтами (auth.go's handleLogin — сам
 			// логин, эти три — административный CRUD над учётками).
