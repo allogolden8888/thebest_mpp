@@ -1,6 +1,8 @@
 mod admission;
 mod auth;
 mod build_incoming;
+mod config_reload;
+mod config_source;
 mod health;
 mod http;
 mod idempotency;
@@ -17,6 +19,7 @@ mod segmentation;
 mod vault_auth;
 
 use admission::AlwaysAdmit;
+use arc_swap::ArcSwap;
 use auth::{AuthVerifier, EnvAuthVerifier};
 use health::HealthState;
 use partner_config::{Partner, PartnerSnapshot};
@@ -86,19 +89,58 @@ async fn main() {
         axum::serve(health_listener, health_router).await.expect("health-сервер упал");
     });
 
-    // В проде — снапшот из config.changes (entity_type=PARTNER); здесь заглушка
-    // на тот же формат, один тестовый партнёр (Фаза 2.2, тот же паттерн
-    // упрощения, что у Routing/Policy — см. README).
-    let partner_path = std::env::var("PARTNER_CONFIG_PATH")
-        .unwrap_or_else(|_| "../../config_schemas/examples/partner.valid.json".to_string());
-    let partner_json = std::fs::read_to_string(&partner_path)
-        .unwrap_or_else(|e| panic!("не удалось прочитать {partner_path}: {e}"));
-    let partner: Partner = serde_json::from_str(&partner_json).expect("partner.schema.json форма");
-    let partner_snapshot = PartnerSnapshot::from_partners(vec![partner]);
+    // BACKOFFICE_ROADMAP.md "Production Readiness Review" P0 #4: partner
+    // config used to load exactly once from PARTNER_CONFIG_PATH at startup
+    // and never again — a partner's self-service config change never
+    // reached live traffic without a restart. PARTNER_CONFIG_PATH set
+    // explicitly is now an opt-in fallback (static file, local dev without
+    // Configuration Redis, no config.changes subscription); the default
+    // path bootstraps from Configuration Redis (the same store
+    // config-cache-projector already projects into) and stays live via a
+    // config.changes consumer (config_reload.rs). Same design as the Go
+    // sibling, services/partner-notification-service/cmd/.../main.go.
+    let explicit_partner_path = std::env::var("PARTNER_CONFIG_PATH").ok().filter(|v| !v.is_empty());
+    let mut config_redis_conn: Option<redis::aio::MultiplexedConnection> = None;
+    let partner_snapshot = match &explicit_partner_path {
+        Some(partner_path) => {
+            tracing::warn!(
+                "PARTNER_CONFIG_PATH={partner_path} задан явно — партнёрский снапшот грузится один раз из статического файла (local dev без Configuration Redis), config.changes НЕ отслеживается"
+            );
+            let partner_json =
+                std::fs::read_to_string(partner_path).unwrap_or_else(|e| panic!("не удалось прочитать {partner_path}: {e}"));
+            let partner: Partner = serde_json::from_str(&partner_json).expect("partner.schema.json форма");
+            PartnerSnapshot::from_partners(vec![partner])
+        }
+        None => {
+            let redis_configuration_url = redis_url::build_redis_configuration_url();
+            let mut conn = redis::Client::open(redis_configuration_url.as_str())
+                .expect("невалидный REDIS_CONFIGURATION_URL")
+                .get_multiplexed_async_connection()
+                .await
+                .expect("не удалось подключиться к Configuration Redis при старте");
+            let snapshot = config_source::load_all(&mut conn)
+                .await
+                .unwrap_or_else(|e| panic!("bootstrap-загрузка партнёров из Configuration Redis: {e}"));
+            tracing::info!("bootstrap: партнёрский снапшот загружен из Configuration Redis ({} партнёров)", snapshot.len());
+            config_redis_conn = Some(conn);
+            snapshot
+        }
+    };
+    let live_partner_snapshot = Arc::new(ArcSwap::from_pointee(partner_snapshot));
 
     let bootstrap_servers = std::env::var("KAFKA_BOOTSTRAP_SERVERS")
         .unwrap_or_else(|_| "kafka-bootstrap.mpp.svc:9092".to_string());
     let producer = kafka_io::build_producer(&bootstrap_servers);
+
+    // Только когда bootstrap реально пришёл из Configuration Redis (не
+    // static-file fallback) — отдельная consumer group от любых будущих
+    // consumer'ов этого сервиса (сегодня их нет, этот процесс раньше был
+    // producer-only), сбой этого цикла не должен ничего останавливать
+    // кроме себя.
+    if let Some(conn) = config_redis_conn {
+        let config_consumer = config_reload::build_config_consumer(&bootstrap_servers, "partner-rest-receiver-config");
+        tokio::spawn(config_reload::run_loop(config_consumer, conn, live_partner_snapshot.clone()));
+    }
 
     let redis_runtime_url = redis_url::build_redis_runtime_url();
     // Один `MultiplexedConnection` на весь процесс — клонируется (дёшево, тот
@@ -120,7 +162,7 @@ async fn main() {
     let auth_verifier = build_auth_verifier(&health_state);
 
     let state = Arc::new(http::AppState {
-        partner_snapshot,
+        partner_snapshot: live_partner_snapshot,
         auth_verifier,
         admission_gate: Box::new(AlwaysAdmit),
         rate_limiter,
