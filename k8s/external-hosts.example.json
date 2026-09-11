@@ -1,0 +1,28 @@
+{
+  "_comment": "Placeholder-фикстура, НЕ реальные адреса. Тот же приём, что EXTERNAL_DOMAIN = 'mpp.example' в generate_manifests.py: FQDN оканчиваются на .example (IANA reserved, никогда не резолвится), IP взяты из RFC 5737 TEST-NET-1/2/3 (203.0.113.0/24, 198.51.100.0/24, 192.0.2.0/24 — зарезервированы под документацию, гарантированно не маршрутизируются в интернете). Реальный файл k8s/external-hosts.json production/staging производится infra/terraform/export_external_hosts.sh после terraform apply и НЕ коммитится (.gitignore). См. k8s/external_hosts.py.",
+  "postgresql": {
+    "fqdn": "rc1a-example-pg.mdb.yandexcloud.example",
+    "port": 5432,
+    "ips": ["192.0.2.10"]
+  },
+  "redis-runtime": {
+    "fqdn": "rc1a-example-redis-runtime.mdb.yandexcloud.example",
+    "port": 6379,
+    "ips": ["192.0.2.20"]
+  },
+  "redis-configuration": {
+    "fqdn": "rc1a-example-redis-configuration.mdb.yandexcloud.example",
+    "port": 6379,
+    "ips": ["192.0.2.21"]
+  },
+  "redis-billing": {
+    "fqdn": "rc1a-example-redis-billing.mdb.yandexcloud.example",
+    "port": 6379,
+    "ips": ["192.0.2.22"]
+  },
+  "clickhouse": {
+    "fqdn": "rc1a-example-ch.mdb.yandexcloud.example",
+    "port": 9000,
+    "ips": ["192.0.2.30"]
+  }
+}
