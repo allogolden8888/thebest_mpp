@@ -68,6 +68,10 @@ var (
 	// iam.partner_portal_users (FK на неё, в отличие от Staff*, где
 	// external_id — свободная строка).
 	ErrPartnerPortalUserNotFound = errors.New("партнёрский пользователь не найден")
+	// ErrPartnerPortalUsernameTaken — CreatePartnerPortalUser с уже занятым
+	// username (уникальный индекс partner_portal_users_username_idx,
+	// migrations/V035__partner_portal_credentials.sql).
+	ErrPartnerPortalUsernameTaken = errors.New("username уже занят")
 )
 
 type Postgres struct {
@@ -514,4 +518,187 @@ func (p *Postgres) VerifyStaffCredentials(ctx context.Context, username, passwor
 		return "", false, nil
 	}
 	return externalID, true, nil
+}
+
+// PartnerPortalUser — migrations/V035__partner_portal_credentials.sql, same
+// shape as StaffAccount plus PartnerID (partner_portal_users already had
+// this column since V025 — the login credential columns are new, the
+// partner scoping is not).
+type PartnerPortalUser struct {
+	ExternalID  string
+	Username    string
+	PartnerID   string
+	DisplayName string
+	Active      bool
+	CreatedAt   time.Time
+}
+
+// CreatePartnerPortalUser — external_id = username, same reasoning as
+// CreateStaffAccount (no real Keycloak sub to use instead). BACKOFFICE_
+// ROADMAP.md Production Readiness Review P0#5: this RPC is the genuinely
+// new admin-side step PartnerUsersView.vue's comment assumed wouldn't be
+// needed ("заводится при первом логине") — that assumption relied on a
+// Keycloak JIT-provisioning flow that was never built.
+func (p *Postgres) CreatePartnerPortalUser(ctx context.Context, username, password, partnerID, displayName, createdBy string) (PartnerPortalUser, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
+	if err != nil {
+		return PartnerPortalUser{}, fmt.Errorf("CreatePartnerPortalUser: hash password: %w", err)
+	}
+
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return PartnerPortalUser{}, fmt.Errorf("CreatePartnerPortalUser: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var u PartnerPortalUser
+	err = tx.QueryRow(ctx, `
+		INSERT INTO iam.partner_portal_users (external_id, username, partner_id, password_hash, display_name, created_by)
+		VALUES ($1, $1, $2, $3, $4, $5)
+		RETURNING external_id, username, partner_id, display_name, active, created_at`,
+		username, partnerID, string(hash), displayName, createdBy).
+		Scan(&u.ExternalID, &u.Username, &u.PartnerID, &u.DisplayName, &u.Active, &u.CreatedAt)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return PartnerPortalUser{}, ErrPartnerPortalUsernameTaken
+		}
+		return PartnerPortalUser{}, fmt.Errorf("CreatePartnerPortalUser: insert: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO iam.identity_audit (actor, action, target) VALUES ($1, 'PARTNER_PORTAL_USER_CREATED', $2)`,
+		createdBy, username); err != nil {
+		return PartnerPortalUser{}, fmt.Errorf("CreatePartnerPortalUser: audit: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return PartnerPortalUser{}, fmt.Errorf("CreatePartnerPortalUser: commit: %w", err)
+	}
+	return u, nil
+}
+
+// ListPartnerPortalUsers — partnerID == "" -> all users; otherwise filtered
+// to one partner (backoffice-ui "Partner Users" creates a user scoped to
+// one partner, but shows everyone for visibility).
+func (p *Postgres) ListPartnerPortalUsers(ctx context.Context, partnerID string) ([]PartnerPortalUser, error) {
+	rows, err := p.pool.Query(ctx, `
+		SELECT external_id, username, partner_id, display_name, active, created_at
+		FROM iam.partner_portal_users
+		WHERE ($1 = '' OR partner_id = $1)
+		ORDER BY username`, partnerID)
+	if err != nil {
+		return nil, fmt.Errorf("ListPartnerPortalUsers: %w", err)
+	}
+	defer rows.Close()
+
+	var out []PartnerPortalUser
+	for rows.Next() {
+		var u PartnerPortalUser
+		if err := rows.Scan(&u.ExternalID, &u.Username, &u.PartnerID, &u.DisplayName, &u.Active, &u.CreatedAt); err != nil {
+			return nil, fmt.Errorf("ListPartnerPortalUsers: scan: %w", err)
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// DeactivatePartnerPortalUser — deactivated=false if already inactive or
+// unknown — not an error, idempotent, same contract as
+// DeactivateStaffAccount.
+func (p *Postgres) DeactivatePartnerPortalUser(ctx context.Context, externalID, actor string) (bool, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("DeactivatePartnerPortalUser: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx, `
+		UPDATE iam.partner_portal_users SET active = false
+		WHERE external_id = $1 AND active = true`, externalID)
+	if err != nil {
+		return false, fmt.Errorf("DeactivatePartnerPortalUser: update: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return false, nil
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO iam.identity_audit (actor, action, target) VALUES ($1, 'PARTNER_PORTAL_USER_DEACTIVATED', $2)`,
+		actor, externalID); err != nil {
+		return false, fmt.Errorf("DeactivatePartnerPortalUser: audit: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("DeactivatePartnerPortalUser: commit: %w", err)
+	}
+	return true, nil
+}
+
+// VerifyPartnerPortalCredentials — same timing-safe bcrypt comparison
+// pattern as VerifyStaffCredentials (dummyHash on unknown username, always
+// runs CompareHashAndPassword at the same cost). Also returns partner_id —
+// unlike staff accounts, the caller (partner-self-service-api) needs it to
+// mint the partner_id JWT claim at login time.
+func (p *Postgres) VerifyPartnerPortalCredentials(ctx context.Context, username, password string) (externalID, partnerID string, ok bool, err error) {
+	var hash string
+	var active bool
+	dbErr := p.pool.QueryRow(ctx, `
+		SELECT external_id, partner_id, password_hash, active FROM iam.partner_portal_users WHERE username = $1`, username).
+		Scan(&externalID, &partnerID, &hash, &active)
+	if dbErr != nil {
+		if !errors.Is(dbErr, pgx.ErrNoRows) {
+			return "", "", false, fmt.Errorf("VerifyPartnerPortalCredentials: lookup: %w", dbErr)
+		}
+		_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(password))
+		return "", "", false, nil
+	}
+
+	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
+		return "", "", false, nil
+	}
+	if !active {
+		return "", "", false, nil
+	}
+	return externalID, partnerID, true, nil
+}
+
+// ResolvePartnerPortalAccess — the live per-request check that replaces
+// trusting the JWT's realm_access.roles claim (BACKOFFICE_ROADMAP.md
+// Production Readiness Review P0#5). active=false covers both "unknown
+// external_id" and "deactivated account" (iam.partner_portal_users.active)
+// without the caller being able to distinguish them, same principle as
+// CheckPermission's staff_accounts.active check. roles is only the
+// currently-active (revoked_at IS NULL) set from
+// iam.partner_portal_role_assignments — a revoked role disappears from this
+// result on the very next call, not on next login.
+func (p *Postgres) ResolvePartnerPortalAccess(ctx context.Context, externalID string) (active bool, partnerID string, roles []string, err error) {
+	rows, queryErr := p.pool.Query(ctx, `
+		SELECT ppu.partner_id, ppu.active, ppra.role
+		FROM iam.partner_portal_users ppu
+		LEFT JOIN iam.partner_portal_role_assignments ppra
+			ON ppra.external_id = ppu.external_id AND ppra.revoked_at IS NULL
+		WHERE ppu.external_id = $1`, externalID)
+	if queryErr != nil {
+		return false, "", nil, fmt.Errorf("ResolvePartnerPortalAccess: %w", queryErr)
+	}
+	defer rows.Close()
+
+	found := false
+	for rows.Next() {
+		var role *string
+		if scanErr := rows.Scan(&partnerID, &active, &role); scanErr != nil {
+			return false, "", nil, fmt.Errorf("ResolvePartnerPortalAccess: scan: %w", scanErr)
+		}
+		found = true
+		if role != nil {
+			roles = append(roles, *role)
+		}
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return false, "", nil, fmt.Errorf("ResolvePartnerPortalAccess: %w", rowsErr)
+	}
+	if !found || !active {
+		return false, "", nil, nil
+	}
+	return true, partnerID, roles, nil
 }

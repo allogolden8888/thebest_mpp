@@ -1503,6 +1503,618 @@ func (x *VerifyStaffCredentialsResponse) GetExternalId() string {
 	return ""
 }
 
+type PartnerPortalUser struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ExternalId    string                 `protobuf:"bytes,1,opt,name=external_id,json=externalId,proto3" json:"external_id,omitempty"` // = username, см. package doc CreatePartnerPortalUser выше.
+	Username      string                 `protobuf:"bytes,2,opt,name=username,proto3" json:"username,omitempty"`
+	PartnerId     string                 `protobuf:"bytes,3,opt,name=partner_id,json=partnerId,proto3" json:"partner_id,omitempty"`
+	DisplayName   string                 `protobuf:"bytes,4,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	Active        bool                   `protobuf:"varint,5,opt,name=active,proto3" json:"active,omitempty"`
+	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"` // Пароль/хеш никогда не покидают IamService — тот же принцип, что StaffAccount.
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PartnerPortalUser) Reset() {
+	*x = PartnerPortalUser{}
+	mi := &file_grpc_iam_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PartnerPortalUser) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PartnerPortalUser) ProtoMessage() {}
+
+func (x *PartnerPortalUser) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PartnerPortalUser.ProtoReflect.Descriptor instead.
+func (*PartnerPortalUser) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *PartnerPortalUser) GetExternalId() string {
+	if x != nil {
+		return x.ExternalId
+	}
+	return ""
+}
+
+func (x *PartnerPortalUser) GetUsername() string {
+	if x != nil {
+		return x.Username
+	}
+	return ""
+}
+
+func (x *PartnerPortalUser) GetPartnerId() string {
+	if x != nil {
+		return x.PartnerId
+	}
+	return ""
+}
+
+func (x *PartnerPortalUser) GetDisplayName() string {
+	if x != nil {
+		return x.DisplayName
+	}
+	return ""
+}
+
+func (x *PartnerPortalUser) GetActive() bool {
+	if x != nil {
+		return x.Active
+	}
+	return false
+}
+
+func (x *PartnerPortalUser) GetCreatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return nil
+}
+
+type CreatePartnerPortalUserRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Username      string                 `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"`
+	Password      string                 `protobuf:"bytes,2,opt,name=password,proto3" json:"password,omitempty"` // plaintext на этом единственном hop'е (gRPC internal, mTLS-периметр), хешируется внутри IamService, никогда не логируется.
+	PartnerId     string                 `protobuf:"bytes,3,opt,name=partner_id,json=partnerId,proto3" json:"partner_id,omitempty"`
+	DisplayName   string                 `protobuf:"bytes,4,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	CreatedBy     string                 `protobuf:"bytes,5,opt,name=created_by,json=createdBy,proto3" json:"created_by,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreatePartnerPortalUserRequest) Reset() {
+	*x = CreatePartnerPortalUserRequest{}
+	mi := &file_grpc_iam_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreatePartnerPortalUserRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreatePartnerPortalUserRequest) ProtoMessage() {}
+
+func (x *CreatePartnerPortalUserRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreatePartnerPortalUserRequest.ProtoReflect.Descriptor instead.
+func (*CreatePartnerPortalUserRequest) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *CreatePartnerPortalUserRequest) GetUsername() string {
+	if x != nil {
+		return x.Username
+	}
+	return ""
+}
+
+func (x *CreatePartnerPortalUserRequest) GetPassword() string {
+	if x != nil {
+		return x.Password
+	}
+	return ""
+}
+
+func (x *CreatePartnerPortalUserRequest) GetPartnerId() string {
+	if x != nil {
+		return x.PartnerId
+	}
+	return ""
+}
+
+func (x *CreatePartnerPortalUserRequest) GetDisplayName() string {
+	if x != nil {
+		return x.DisplayName
+	}
+	return ""
+}
+
+func (x *CreatePartnerPortalUserRequest) GetCreatedBy() string {
+	if x != nil {
+		return x.CreatedBy
+	}
+	return ""
+}
+
+type CreatePartnerPortalUserResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	User          *PartnerPortalUser     `protobuf:"bytes,1,opt,name=user,proto3" json:"user,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreatePartnerPortalUserResponse) Reset() {
+	*x = CreatePartnerPortalUserResponse{}
+	mi := &file_grpc_iam_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreatePartnerPortalUserResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreatePartnerPortalUserResponse) ProtoMessage() {}
+
+func (x *CreatePartnerPortalUserResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreatePartnerPortalUserResponse.ProtoReflect.Descriptor instead.
+func (*CreatePartnerPortalUserResponse) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *CreatePartnerPortalUserResponse) GetUser() *PartnerPortalUser {
+	if x != nil {
+		return x.User
+	}
+	return nil
+}
+
+type ListPartnerPortalUsersRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Пусто — все пользователи; заполнено — фильтр по конкретному партнёру
+	// (backoffice-ui "Partner Users" создаёт пользователя ровно под одного
+	// партнёра, но список показывает всех для видимости).
+	PartnerId     string `protobuf:"bytes,1,opt,name=partner_id,json=partnerId,proto3" json:"partner_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListPartnerPortalUsersRequest) Reset() {
+	*x = ListPartnerPortalUsersRequest{}
+	mi := &file_grpc_iam_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListPartnerPortalUsersRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListPartnerPortalUsersRequest) ProtoMessage() {}
+
+func (x *ListPartnerPortalUsersRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListPartnerPortalUsersRequest.ProtoReflect.Descriptor instead.
+func (*ListPartnerPortalUsersRequest) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *ListPartnerPortalUsersRequest) GetPartnerId() string {
+	if x != nil {
+		return x.PartnerId
+	}
+	return ""
+}
+
+type ListPartnerPortalUsersResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Users         []*PartnerPortalUser   `protobuf:"bytes,1,rep,name=users,proto3" json:"users,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListPartnerPortalUsersResponse) Reset() {
+	*x = ListPartnerPortalUsersResponse{}
+	mi := &file_grpc_iam_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListPartnerPortalUsersResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListPartnerPortalUsersResponse) ProtoMessage() {}
+
+func (x *ListPartnerPortalUsersResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListPartnerPortalUsersResponse.ProtoReflect.Descriptor instead.
+func (*ListPartnerPortalUsersResponse) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *ListPartnerPortalUsersResponse) GetUsers() []*PartnerPortalUser {
+	if x != nil {
+		return x.Users
+	}
+	return nil
+}
+
+type DeactivatePartnerPortalUserRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ExternalId    string                 `protobuf:"bytes,1,opt,name=external_id,json=externalId,proto3" json:"external_id,omitempty"`
+	Actor         string                 `protobuf:"bytes,2,opt,name=actor,proto3" json:"actor,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeactivatePartnerPortalUserRequest) Reset() {
+	*x = DeactivatePartnerPortalUserRequest{}
+	mi := &file_grpc_iam_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeactivatePartnerPortalUserRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeactivatePartnerPortalUserRequest) ProtoMessage() {}
+
+func (x *DeactivatePartnerPortalUserRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeactivatePartnerPortalUserRequest.ProtoReflect.Descriptor instead.
+func (*DeactivatePartnerPortalUserRequest) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *DeactivatePartnerPortalUserRequest) GetExternalId() string {
+	if x != nil {
+		return x.ExternalId
+	}
+	return ""
+}
+
+func (x *DeactivatePartnerPortalUserRequest) GetActor() string {
+	if x != nil {
+		return x.Actor
+	}
+	return ""
+}
+
+type DeactivatePartnerPortalUserResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Deactivated   bool                   `protobuf:"varint,1,opt,name=deactivated,proto3" json:"deactivated,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeactivatePartnerPortalUserResponse) Reset() {
+	*x = DeactivatePartnerPortalUserResponse{}
+	mi := &file_grpc_iam_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeactivatePartnerPortalUserResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeactivatePartnerPortalUserResponse) ProtoMessage() {}
+
+func (x *DeactivatePartnerPortalUserResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeactivatePartnerPortalUserResponse.ProtoReflect.Descriptor instead.
+func (*DeactivatePartnerPortalUserResponse) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *DeactivatePartnerPortalUserResponse) GetDeactivated() bool {
+	if x != nil {
+		return x.Deactivated
+	}
+	return false
+}
+
+type VerifyPartnerPortalCredentialsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Username      string                 `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"`
+	Password      string                 `protobuf:"bytes,2,opt,name=password,proto3" json:"password,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VerifyPartnerPortalCredentialsRequest) Reset() {
+	*x = VerifyPartnerPortalCredentialsRequest{}
+	mi := &file_grpc_iam_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VerifyPartnerPortalCredentialsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VerifyPartnerPortalCredentialsRequest) ProtoMessage() {}
+
+func (x *VerifyPartnerPortalCredentialsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VerifyPartnerPortalCredentialsRequest.ProtoReflect.Descriptor instead.
+func (*VerifyPartnerPortalCredentialsRequest) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *VerifyPartnerPortalCredentialsRequest) GetUsername() string {
+	if x != nil {
+		return x.Username
+	}
+	return ""
+}
+
+func (x *VerifyPartnerPortalCredentialsRequest) GetPassword() string {
+	if x != nil {
+		return x.Password
+	}
+	return ""
+}
+
+type VerifyPartnerPortalCredentialsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ok            bool                   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	ExternalId    string                 `protobuf:"bytes,2,opt,name=external_id,json=externalId,proto3" json:"external_id,omitempty"` // пусто, если ok=false
+	PartnerId     string                 `protobuf:"bytes,3,opt,name=partner_id,json=partnerId,proto3" json:"partner_id,omitempty"`    // пусто, если ok=false
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VerifyPartnerPortalCredentialsResponse) Reset() {
+	*x = VerifyPartnerPortalCredentialsResponse{}
+	mi := &file_grpc_iam_proto_msgTypes[36]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VerifyPartnerPortalCredentialsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VerifyPartnerPortalCredentialsResponse) ProtoMessage() {}
+
+func (x *VerifyPartnerPortalCredentialsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[36]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VerifyPartnerPortalCredentialsResponse.ProtoReflect.Descriptor instead.
+func (*VerifyPartnerPortalCredentialsResponse) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{36}
+}
+
+func (x *VerifyPartnerPortalCredentialsResponse) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *VerifyPartnerPortalCredentialsResponse) GetExternalId() string {
+	if x != nil {
+		return x.ExternalId
+	}
+	return ""
+}
+
+func (x *VerifyPartnerPortalCredentialsResponse) GetPartnerId() string {
+	if x != nil {
+		return x.PartnerId
+	}
+	return ""
+}
+
+type ResolvePartnerPortalAccessRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ExternalId    string                 `protobuf:"bytes,1,opt,name=external_id,json=externalId,proto3" json:"external_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolvePartnerPortalAccessRequest) Reset() {
+	*x = ResolvePartnerPortalAccessRequest{}
+	mi := &file_grpc_iam_proto_msgTypes[37]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolvePartnerPortalAccessRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolvePartnerPortalAccessRequest) ProtoMessage() {}
+
+func (x *ResolvePartnerPortalAccessRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[37]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolvePartnerPortalAccessRequest.ProtoReflect.Descriptor instead.
+func (*ResolvePartnerPortalAccessRequest) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{37}
+}
+
+func (x *ResolvePartnerPortalAccessRequest) GetExternalId() string {
+	if x != nil {
+		return x.ExternalId
+	}
+	return ""
+}
+
+type ResolvePartnerPortalAccessResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// false и если external_id неизвестен, и если iam.partner_portal_users.active=false
+	// — вызывающий не должен различать эти два случая (не раскрываем
+	// существование аккаунта), тот же принцип, что VerifyStaffCredentials.
+	Active    bool   `protobuf:"varint,1,opt,name=active,proto3" json:"active,omitempty"`
+	PartnerId string `protobuf:"bytes,2,opt,name=partner_id,json=partnerId,proto3" json:"partner_id,omitempty"` // пусто, если active=false
+	// Активные (revoked_at IS NULL) роли из iam.partner_portal_role_assignments
+	// — пусто, если active=false или ролей не назначено.
+	Roles         []string `protobuf:"bytes,3,rep,name=roles,proto3" json:"roles,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolvePartnerPortalAccessResponse) Reset() {
+	*x = ResolvePartnerPortalAccessResponse{}
+	mi := &file_grpc_iam_proto_msgTypes[38]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolvePartnerPortalAccessResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolvePartnerPortalAccessResponse) ProtoMessage() {}
+
+func (x *ResolvePartnerPortalAccessResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_grpc_iam_proto_msgTypes[38]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolvePartnerPortalAccessResponse.ProtoReflect.Descriptor instead.
+func (*ResolvePartnerPortalAccessResponse) Descriptor() ([]byte, []int) {
+	return file_grpc_iam_proto_rawDescGZIP(), []int{38}
+}
+
+func (x *ResolvePartnerPortalAccessResponse) GetActive() bool {
+	if x != nil {
+		return x.Active
+	}
+	return false
+}
+
+func (x *ResolvePartnerPortalAccessResponse) GetPartnerId() string {
+	if x != nil {
+		return x.PartnerId
+	}
+	return ""
+}
+
+func (x *ResolvePartnerPortalAccessResponse) GetRoles() []string {
+	if x != nil {
+		return x.Roles
+	}
+	return nil
+}
+
 var File_grpc_iam_proto protoreflect.FileDescriptor
 
 const file_grpc_iam_proto_rawDesc = "" +
@@ -1622,8 +2234,55 @@ const file_grpc_iam_proto_rawDesc = "" +
 	"\x1eVerifyStaffCredentialsResponse\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x1f\n" +
 	"\vexternal_id\x18\x02 \x01(\tR\n" +
-	"externalId2\x82\n" +
+	"externalId\"\xe5\x01\n" +
+	"\x11PartnerPortalUser\x12\x1f\n" +
+	"\vexternal_id\x18\x01 \x01(\tR\n" +
+	"externalId\x12\x1a\n" +
+	"\busername\x18\x02 \x01(\tR\busername\x12\x1d\n" +
 	"\n" +
+	"partner_id\x18\x03 \x01(\tR\tpartnerId\x12!\n" +
+	"\fdisplay_name\x18\x04 \x01(\tR\vdisplayName\x12\x16\n" +
+	"\x06active\x18\x05 \x01(\bR\x06active\x129\n" +
+	"\n" +
+	"created_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\xb9\x01\n" +
+	"\x1eCreatePartnerPortalUserRequest\x12\x1a\n" +
+	"\busername\x18\x01 \x01(\tR\busername\x12\x1a\n" +
+	"\bpassword\x18\x02 \x01(\tR\bpassword\x12\x1d\n" +
+	"\n" +
+	"partner_id\x18\x03 \x01(\tR\tpartnerId\x12!\n" +
+	"\fdisplay_name\x18\x04 \x01(\tR\vdisplayName\x12\x1d\n" +
+	"\n" +
+	"created_by\x18\x05 \x01(\tR\tcreatedBy\"U\n" +
+	"\x1fCreatePartnerPortalUserResponse\x122\n" +
+	"\x04user\x18\x01 \x01(\v2\x1e.mpp.grpc.v1.PartnerPortalUserR\x04user\">\n" +
+	"\x1dListPartnerPortalUsersRequest\x12\x1d\n" +
+	"\n" +
+	"partner_id\x18\x01 \x01(\tR\tpartnerId\"V\n" +
+	"\x1eListPartnerPortalUsersResponse\x124\n" +
+	"\x05users\x18\x01 \x03(\v2\x1e.mpp.grpc.v1.PartnerPortalUserR\x05users\"[\n" +
+	"\"DeactivatePartnerPortalUserRequest\x12\x1f\n" +
+	"\vexternal_id\x18\x01 \x01(\tR\n" +
+	"externalId\x12\x14\n" +
+	"\x05actor\x18\x02 \x01(\tR\x05actor\"G\n" +
+	"#DeactivatePartnerPortalUserResponse\x12 \n" +
+	"\vdeactivated\x18\x01 \x01(\bR\vdeactivated\"_\n" +
+	"%VerifyPartnerPortalCredentialsRequest\x12\x1a\n" +
+	"\busername\x18\x01 \x01(\tR\busername\x12\x1a\n" +
+	"\bpassword\x18\x02 \x01(\tR\bpassword\"x\n" +
+	"&VerifyPartnerPortalCredentialsResponse\x12\x0e\n" +
+	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x1f\n" +
+	"\vexternal_id\x18\x02 \x01(\tR\n" +
+	"externalId\x12\x1d\n" +
+	"\n" +
+	"partner_id\x18\x03 \x01(\tR\tpartnerId\"D\n" +
+	"!ResolvePartnerPortalAccessRequest\x12\x1f\n" +
+	"\vexternal_id\x18\x01 \x01(\tR\n" +
+	"externalId\"q\n" +
+	"\"ResolvePartnerPortalAccessResponse\x12\x16\n" +
+	"\x06active\x18\x01 \x01(\bR\x06active\x12\x1d\n" +
+	"\n" +
+	"partner_id\x18\x02 \x01(\tR\tpartnerId\x12\x14\n" +
+	"\x05roles\x18\x03 \x03(\tR\x05roles2\xf9\x0e\n" +
 	"\n" +
 	"IamService\x12\\\n" +
 	"\x0fCheckPermission\x12#.mpp.grpc.v1.CheckPermissionRequest\x1a$.mpp.grpc.v1.CheckPermissionResponse\x12J\n" +
@@ -1637,7 +2296,12 @@ const file_grpc_iam_proto_rawDesc = "" +
 	"\x12CreateStaffAccount\x12&.mpp.grpc.v1.CreateStaffAccountRequest\x1a'.mpp.grpc.v1.CreateStaffAccountResponse\x12b\n" +
 	"\x11ListStaffAccounts\x12%.mpp.grpc.v1.ListStaffAccountsRequest\x1a&.mpp.grpc.v1.ListStaffAccountsResponse\x12q\n" +
 	"\x16DeactivateStaffAccount\x12*.mpp.grpc.v1.DeactivateStaffAccountRequest\x1a+.mpp.grpc.v1.DeactivateStaffAccountResponse\x12q\n" +
-	"\x16VerifyStaffCredentials\x12*.mpp.grpc.v1.VerifyStaffCredentialsRequest\x1a+.mpp.grpc.v1.VerifyStaffCredentialsResponseBJ\n" +
+	"\x16VerifyStaffCredentials\x12*.mpp.grpc.v1.VerifyStaffCredentialsRequest\x1a+.mpp.grpc.v1.VerifyStaffCredentialsResponse\x12t\n" +
+	"\x17CreatePartnerPortalUser\x12+.mpp.grpc.v1.CreatePartnerPortalUserRequest\x1a,.mpp.grpc.v1.CreatePartnerPortalUserResponse\x12q\n" +
+	"\x16ListPartnerPortalUsers\x12*.mpp.grpc.v1.ListPartnerPortalUsersRequest\x1a+.mpp.grpc.v1.ListPartnerPortalUsersResponse\x12\x80\x01\n" +
+	"\x1bDeactivatePartnerPortalUser\x12/.mpp.grpc.v1.DeactivatePartnerPortalUserRequest\x1a0.mpp.grpc.v1.DeactivatePartnerPortalUserResponse\x12\x89\x01\n" +
+	"\x1eVerifyPartnerPortalCredentials\x122.mpp.grpc.v1.VerifyPartnerPortalCredentialsRequest\x1a3.mpp.grpc.v1.VerifyPartnerPortalCredentialsResponse\x12}\n" +
+	"\x1aResolvePartnerPortalAccess\x12..mpp.grpc.v1.ResolvePartnerPortalAccessRequest\x1a/.mpp.grpc.v1.ResolvePartnerPortalAccessResponseBJ\n" +
 	" uz.mpp.platformcontracts.grpc.v1P\x01Z$mpp/platformcontracts/grpc/v1;grpcv1b\x06proto3"
 
 var (
@@ -1652,78 +2316,102 @@ func file_grpc_iam_proto_rawDescGZIP() []byte {
 	return file_grpc_iam_proto_rawDescData
 }
 
-var file_grpc_iam_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
+var file_grpc_iam_proto_msgTypes = make([]protoimpl.MessageInfo, 39)
 var file_grpc_iam_proto_goTypes = []any{
-	(*CheckPermissionRequest)(nil),               // 0: mpp.grpc.v1.CheckPermissionRequest
-	(*CheckPermissionResponse)(nil),              // 1: mpp.grpc.v1.CheckPermissionResponse
-	(*Role)(nil),                                 // 2: mpp.grpc.v1.Role
-	(*ListRolesRequest)(nil),                     // 3: mpp.grpc.v1.ListRolesRequest
-	(*ListRolesResponse)(nil),                    // 4: mpp.grpc.v1.ListRolesResponse
-	(*StaffAssignment)(nil),                      // 5: mpp.grpc.v1.StaffAssignment
-	(*ListStaffAssignmentsRequest)(nil),          // 6: mpp.grpc.v1.ListStaffAssignmentsRequest
-	(*ListStaffAssignmentsResponse)(nil),         // 7: mpp.grpc.v1.ListStaffAssignmentsResponse
-	(*AssignStaffRoleRequest)(nil),               // 8: mpp.grpc.v1.AssignStaffRoleRequest
-	(*AssignStaffRoleResponse)(nil),              // 9: mpp.grpc.v1.AssignStaffRoleResponse
-	(*RevokeStaffRoleRequest)(nil),               // 10: mpp.grpc.v1.RevokeStaffRoleRequest
-	(*RevokeStaffRoleResponse)(nil),              // 11: mpp.grpc.v1.RevokeStaffRoleResponse
-	(*PartnerPortalAssignment)(nil),              // 12: mpp.grpc.v1.PartnerPortalAssignment
-	(*ListPartnerPortalAssignmentsRequest)(nil),  // 13: mpp.grpc.v1.ListPartnerPortalAssignmentsRequest
-	(*ListPartnerPortalAssignmentsResponse)(nil), // 14: mpp.grpc.v1.ListPartnerPortalAssignmentsResponse
-	(*AssignPartnerPortalRoleRequest)(nil),       // 15: mpp.grpc.v1.AssignPartnerPortalRoleRequest
-	(*AssignPartnerPortalRoleResponse)(nil),      // 16: mpp.grpc.v1.AssignPartnerPortalRoleResponse
-	(*RevokePartnerPortalRoleRequest)(nil),       // 17: mpp.grpc.v1.RevokePartnerPortalRoleRequest
-	(*RevokePartnerPortalRoleResponse)(nil),      // 18: mpp.grpc.v1.RevokePartnerPortalRoleResponse
-	(*StaffAccount)(nil),                         // 19: mpp.grpc.v1.StaffAccount
-	(*CreateStaffAccountRequest)(nil),            // 20: mpp.grpc.v1.CreateStaffAccountRequest
-	(*CreateStaffAccountResponse)(nil),           // 21: mpp.grpc.v1.CreateStaffAccountResponse
-	(*ListStaffAccountsRequest)(nil),             // 22: mpp.grpc.v1.ListStaffAccountsRequest
-	(*ListStaffAccountsResponse)(nil),            // 23: mpp.grpc.v1.ListStaffAccountsResponse
-	(*DeactivateStaffAccountRequest)(nil),        // 24: mpp.grpc.v1.DeactivateStaffAccountRequest
-	(*DeactivateStaffAccountResponse)(nil),       // 25: mpp.grpc.v1.DeactivateStaffAccountResponse
-	(*VerifyStaffCredentialsRequest)(nil),        // 26: mpp.grpc.v1.VerifyStaffCredentialsRequest
-	(*VerifyStaffCredentialsResponse)(nil),       // 27: mpp.grpc.v1.VerifyStaffCredentialsResponse
-	(*timestamppb.Timestamp)(nil),                // 28: google.protobuf.Timestamp
+	(*CheckPermissionRequest)(nil),                 // 0: mpp.grpc.v1.CheckPermissionRequest
+	(*CheckPermissionResponse)(nil),                // 1: mpp.grpc.v1.CheckPermissionResponse
+	(*Role)(nil),                                   // 2: mpp.grpc.v1.Role
+	(*ListRolesRequest)(nil),                       // 3: mpp.grpc.v1.ListRolesRequest
+	(*ListRolesResponse)(nil),                      // 4: mpp.grpc.v1.ListRolesResponse
+	(*StaffAssignment)(nil),                        // 5: mpp.grpc.v1.StaffAssignment
+	(*ListStaffAssignmentsRequest)(nil),            // 6: mpp.grpc.v1.ListStaffAssignmentsRequest
+	(*ListStaffAssignmentsResponse)(nil),           // 7: mpp.grpc.v1.ListStaffAssignmentsResponse
+	(*AssignStaffRoleRequest)(nil),                 // 8: mpp.grpc.v1.AssignStaffRoleRequest
+	(*AssignStaffRoleResponse)(nil),                // 9: mpp.grpc.v1.AssignStaffRoleResponse
+	(*RevokeStaffRoleRequest)(nil),                 // 10: mpp.grpc.v1.RevokeStaffRoleRequest
+	(*RevokeStaffRoleResponse)(nil),                // 11: mpp.grpc.v1.RevokeStaffRoleResponse
+	(*PartnerPortalAssignment)(nil),                // 12: mpp.grpc.v1.PartnerPortalAssignment
+	(*ListPartnerPortalAssignmentsRequest)(nil),    // 13: mpp.grpc.v1.ListPartnerPortalAssignmentsRequest
+	(*ListPartnerPortalAssignmentsResponse)(nil),   // 14: mpp.grpc.v1.ListPartnerPortalAssignmentsResponse
+	(*AssignPartnerPortalRoleRequest)(nil),         // 15: mpp.grpc.v1.AssignPartnerPortalRoleRequest
+	(*AssignPartnerPortalRoleResponse)(nil),        // 16: mpp.grpc.v1.AssignPartnerPortalRoleResponse
+	(*RevokePartnerPortalRoleRequest)(nil),         // 17: mpp.grpc.v1.RevokePartnerPortalRoleRequest
+	(*RevokePartnerPortalRoleResponse)(nil),        // 18: mpp.grpc.v1.RevokePartnerPortalRoleResponse
+	(*StaffAccount)(nil),                           // 19: mpp.grpc.v1.StaffAccount
+	(*CreateStaffAccountRequest)(nil),              // 20: mpp.grpc.v1.CreateStaffAccountRequest
+	(*CreateStaffAccountResponse)(nil),             // 21: mpp.grpc.v1.CreateStaffAccountResponse
+	(*ListStaffAccountsRequest)(nil),               // 22: mpp.grpc.v1.ListStaffAccountsRequest
+	(*ListStaffAccountsResponse)(nil),              // 23: mpp.grpc.v1.ListStaffAccountsResponse
+	(*DeactivateStaffAccountRequest)(nil),          // 24: mpp.grpc.v1.DeactivateStaffAccountRequest
+	(*DeactivateStaffAccountResponse)(nil),         // 25: mpp.grpc.v1.DeactivateStaffAccountResponse
+	(*VerifyStaffCredentialsRequest)(nil),          // 26: mpp.grpc.v1.VerifyStaffCredentialsRequest
+	(*VerifyStaffCredentialsResponse)(nil),         // 27: mpp.grpc.v1.VerifyStaffCredentialsResponse
+	(*PartnerPortalUser)(nil),                      // 28: mpp.grpc.v1.PartnerPortalUser
+	(*CreatePartnerPortalUserRequest)(nil),         // 29: mpp.grpc.v1.CreatePartnerPortalUserRequest
+	(*CreatePartnerPortalUserResponse)(nil),        // 30: mpp.grpc.v1.CreatePartnerPortalUserResponse
+	(*ListPartnerPortalUsersRequest)(nil),          // 31: mpp.grpc.v1.ListPartnerPortalUsersRequest
+	(*ListPartnerPortalUsersResponse)(nil),         // 32: mpp.grpc.v1.ListPartnerPortalUsersResponse
+	(*DeactivatePartnerPortalUserRequest)(nil),     // 33: mpp.grpc.v1.DeactivatePartnerPortalUserRequest
+	(*DeactivatePartnerPortalUserResponse)(nil),    // 34: mpp.grpc.v1.DeactivatePartnerPortalUserResponse
+	(*VerifyPartnerPortalCredentialsRequest)(nil),  // 35: mpp.grpc.v1.VerifyPartnerPortalCredentialsRequest
+	(*VerifyPartnerPortalCredentialsResponse)(nil), // 36: mpp.grpc.v1.VerifyPartnerPortalCredentialsResponse
+	(*ResolvePartnerPortalAccessRequest)(nil),      // 37: mpp.grpc.v1.ResolvePartnerPortalAccessRequest
+	(*ResolvePartnerPortalAccessResponse)(nil),     // 38: mpp.grpc.v1.ResolvePartnerPortalAccessResponse
+	(*timestamppb.Timestamp)(nil),                  // 39: google.protobuf.Timestamp
 }
 var file_grpc_iam_proto_depIdxs = []int32{
 	2,  // 0: mpp.grpc.v1.ListRolesResponse.roles:type_name -> mpp.grpc.v1.Role
-	28, // 1: mpp.grpc.v1.StaffAssignment.granted_at:type_name -> google.protobuf.Timestamp
+	39, // 1: mpp.grpc.v1.StaffAssignment.granted_at:type_name -> google.protobuf.Timestamp
 	5,  // 2: mpp.grpc.v1.ListStaffAssignmentsResponse.assignments:type_name -> mpp.grpc.v1.StaffAssignment
 	5,  // 3: mpp.grpc.v1.AssignStaffRoleResponse.assignment:type_name -> mpp.grpc.v1.StaffAssignment
-	28, // 4: mpp.grpc.v1.PartnerPortalAssignment.granted_at:type_name -> google.protobuf.Timestamp
+	39, // 4: mpp.grpc.v1.PartnerPortalAssignment.granted_at:type_name -> google.protobuf.Timestamp
 	12, // 5: mpp.grpc.v1.ListPartnerPortalAssignmentsResponse.assignments:type_name -> mpp.grpc.v1.PartnerPortalAssignment
 	12, // 6: mpp.grpc.v1.AssignPartnerPortalRoleResponse.assignment:type_name -> mpp.grpc.v1.PartnerPortalAssignment
-	28, // 7: mpp.grpc.v1.StaffAccount.created_at:type_name -> google.protobuf.Timestamp
+	39, // 7: mpp.grpc.v1.StaffAccount.created_at:type_name -> google.protobuf.Timestamp
 	19, // 8: mpp.grpc.v1.CreateStaffAccountResponse.account:type_name -> mpp.grpc.v1.StaffAccount
 	19, // 9: mpp.grpc.v1.ListStaffAccountsResponse.accounts:type_name -> mpp.grpc.v1.StaffAccount
-	0,  // 10: mpp.grpc.v1.IamService.CheckPermission:input_type -> mpp.grpc.v1.CheckPermissionRequest
-	3,  // 11: mpp.grpc.v1.IamService.ListRoles:input_type -> mpp.grpc.v1.ListRolesRequest
-	6,  // 12: mpp.grpc.v1.IamService.ListStaffAssignments:input_type -> mpp.grpc.v1.ListStaffAssignmentsRequest
-	8,  // 13: mpp.grpc.v1.IamService.AssignStaffRole:input_type -> mpp.grpc.v1.AssignStaffRoleRequest
-	10, // 14: mpp.grpc.v1.IamService.RevokeStaffRole:input_type -> mpp.grpc.v1.RevokeStaffRoleRequest
-	13, // 15: mpp.grpc.v1.IamService.ListPartnerPortalAssignments:input_type -> mpp.grpc.v1.ListPartnerPortalAssignmentsRequest
-	15, // 16: mpp.grpc.v1.IamService.AssignPartnerPortalRole:input_type -> mpp.grpc.v1.AssignPartnerPortalRoleRequest
-	17, // 17: mpp.grpc.v1.IamService.RevokePartnerPortalRole:input_type -> mpp.grpc.v1.RevokePartnerPortalRoleRequest
-	20, // 18: mpp.grpc.v1.IamService.CreateStaffAccount:input_type -> mpp.grpc.v1.CreateStaffAccountRequest
-	22, // 19: mpp.grpc.v1.IamService.ListStaffAccounts:input_type -> mpp.grpc.v1.ListStaffAccountsRequest
-	24, // 20: mpp.grpc.v1.IamService.DeactivateStaffAccount:input_type -> mpp.grpc.v1.DeactivateStaffAccountRequest
-	26, // 21: mpp.grpc.v1.IamService.VerifyStaffCredentials:input_type -> mpp.grpc.v1.VerifyStaffCredentialsRequest
-	1,  // 22: mpp.grpc.v1.IamService.CheckPermission:output_type -> mpp.grpc.v1.CheckPermissionResponse
-	4,  // 23: mpp.grpc.v1.IamService.ListRoles:output_type -> mpp.grpc.v1.ListRolesResponse
-	7,  // 24: mpp.grpc.v1.IamService.ListStaffAssignments:output_type -> mpp.grpc.v1.ListStaffAssignmentsResponse
-	9,  // 25: mpp.grpc.v1.IamService.AssignStaffRole:output_type -> mpp.grpc.v1.AssignStaffRoleResponse
-	11, // 26: mpp.grpc.v1.IamService.RevokeStaffRole:output_type -> mpp.grpc.v1.RevokeStaffRoleResponse
-	14, // 27: mpp.grpc.v1.IamService.ListPartnerPortalAssignments:output_type -> mpp.grpc.v1.ListPartnerPortalAssignmentsResponse
-	16, // 28: mpp.grpc.v1.IamService.AssignPartnerPortalRole:output_type -> mpp.grpc.v1.AssignPartnerPortalRoleResponse
-	18, // 29: mpp.grpc.v1.IamService.RevokePartnerPortalRole:output_type -> mpp.grpc.v1.RevokePartnerPortalRoleResponse
-	21, // 30: mpp.grpc.v1.IamService.CreateStaffAccount:output_type -> mpp.grpc.v1.CreateStaffAccountResponse
-	23, // 31: mpp.grpc.v1.IamService.ListStaffAccounts:output_type -> mpp.grpc.v1.ListStaffAccountsResponse
-	25, // 32: mpp.grpc.v1.IamService.DeactivateStaffAccount:output_type -> mpp.grpc.v1.DeactivateStaffAccountResponse
-	27, // 33: mpp.grpc.v1.IamService.VerifyStaffCredentials:output_type -> mpp.grpc.v1.VerifyStaffCredentialsResponse
-	22, // [22:34] is the sub-list for method output_type
-	10, // [10:22] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	39, // 10: mpp.grpc.v1.PartnerPortalUser.created_at:type_name -> google.protobuf.Timestamp
+	28, // 11: mpp.grpc.v1.CreatePartnerPortalUserResponse.user:type_name -> mpp.grpc.v1.PartnerPortalUser
+	28, // 12: mpp.grpc.v1.ListPartnerPortalUsersResponse.users:type_name -> mpp.grpc.v1.PartnerPortalUser
+	0,  // 13: mpp.grpc.v1.IamService.CheckPermission:input_type -> mpp.grpc.v1.CheckPermissionRequest
+	3,  // 14: mpp.grpc.v1.IamService.ListRoles:input_type -> mpp.grpc.v1.ListRolesRequest
+	6,  // 15: mpp.grpc.v1.IamService.ListStaffAssignments:input_type -> mpp.grpc.v1.ListStaffAssignmentsRequest
+	8,  // 16: mpp.grpc.v1.IamService.AssignStaffRole:input_type -> mpp.grpc.v1.AssignStaffRoleRequest
+	10, // 17: mpp.grpc.v1.IamService.RevokeStaffRole:input_type -> mpp.grpc.v1.RevokeStaffRoleRequest
+	13, // 18: mpp.grpc.v1.IamService.ListPartnerPortalAssignments:input_type -> mpp.grpc.v1.ListPartnerPortalAssignmentsRequest
+	15, // 19: mpp.grpc.v1.IamService.AssignPartnerPortalRole:input_type -> mpp.grpc.v1.AssignPartnerPortalRoleRequest
+	17, // 20: mpp.grpc.v1.IamService.RevokePartnerPortalRole:input_type -> mpp.grpc.v1.RevokePartnerPortalRoleRequest
+	20, // 21: mpp.grpc.v1.IamService.CreateStaffAccount:input_type -> mpp.grpc.v1.CreateStaffAccountRequest
+	22, // 22: mpp.grpc.v1.IamService.ListStaffAccounts:input_type -> mpp.grpc.v1.ListStaffAccountsRequest
+	24, // 23: mpp.grpc.v1.IamService.DeactivateStaffAccount:input_type -> mpp.grpc.v1.DeactivateStaffAccountRequest
+	26, // 24: mpp.grpc.v1.IamService.VerifyStaffCredentials:input_type -> mpp.grpc.v1.VerifyStaffCredentialsRequest
+	29, // 25: mpp.grpc.v1.IamService.CreatePartnerPortalUser:input_type -> mpp.grpc.v1.CreatePartnerPortalUserRequest
+	31, // 26: mpp.grpc.v1.IamService.ListPartnerPortalUsers:input_type -> mpp.grpc.v1.ListPartnerPortalUsersRequest
+	33, // 27: mpp.grpc.v1.IamService.DeactivatePartnerPortalUser:input_type -> mpp.grpc.v1.DeactivatePartnerPortalUserRequest
+	35, // 28: mpp.grpc.v1.IamService.VerifyPartnerPortalCredentials:input_type -> mpp.grpc.v1.VerifyPartnerPortalCredentialsRequest
+	37, // 29: mpp.grpc.v1.IamService.ResolvePartnerPortalAccess:input_type -> mpp.grpc.v1.ResolvePartnerPortalAccessRequest
+	1,  // 30: mpp.grpc.v1.IamService.CheckPermission:output_type -> mpp.grpc.v1.CheckPermissionResponse
+	4,  // 31: mpp.grpc.v1.IamService.ListRoles:output_type -> mpp.grpc.v1.ListRolesResponse
+	7,  // 32: mpp.grpc.v1.IamService.ListStaffAssignments:output_type -> mpp.grpc.v1.ListStaffAssignmentsResponse
+	9,  // 33: mpp.grpc.v1.IamService.AssignStaffRole:output_type -> mpp.grpc.v1.AssignStaffRoleResponse
+	11, // 34: mpp.grpc.v1.IamService.RevokeStaffRole:output_type -> mpp.grpc.v1.RevokeStaffRoleResponse
+	14, // 35: mpp.grpc.v1.IamService.ListPartnerPortalAssignments:output_type -> mpp.grpc.v1.ListPartnerPortalAssignmentsResponse
+	16, // 36: mpp.grpc.v1.IamService.AssignPartnerPortalRole:output_type -> mpp.grpc.v1.AssignPartnerPortalRoleResponse
+	18, // 37: mpp.grpc.v1.IamService.RevokePartnerPortalRole:output_type -> mpp.grpc.v1.RevokePartnerPortalRoleResponse
+	21, // 38: mpp.grpc.v1.IamService.CreateStaffAccount:output_type -> mpp.grpc.v1.CreateStaffAccountResponse
+	23, // 39: mpp.grpc.v1.IamService.ListStaffAccounts:output_type -> mpp.grpc.v1.ListStaffAccountsResponse
+	25, // 40: mpp.grpc.v1.IamService.DeactivateStaffAccount:output_type -> mpp.grpc.v1.DeactivateStaffAccountResponse
+	27, // 41: mpp.grpc.v1.IamService.VerifyStaffCredentials:output_type -> mpp.grpc.v1.VerifyStaffCredentialsResponse
+	30, // 42: mpp.grpc.v1.IamService.CreatePartnerPortalUser:output_type -> mpp.grpc.v1.CreatePartnerPortalUserResponse
+	32, // 43: mpp.grpc.v1.IamService.ListPartnerPortalUsers:output_type -> mpp.grpc.v1.ListPartnerPortalUsersResponse
+	34, // 44: mpp.grpc.v1.IamService.DeactivatePartnerPortalUser:output_type -> mpp.grpc.v1.DeactivatePartnerPortalUserResponse
+	36, // 45: mpp.grpc.v1.IamService.VerifyPartnerPortalCredentials:output_type -> mpp.grpc.v1.VerifyPartnerPortalCredentialsResponse
+	38, // 46: mpp.grpc.v1.IamService.ResolvePartnerPortalAccess:output_type -> mpp.grpc.v1.ResolvePartnerPortalAccessResponse
+	30, // [30:47] is the sub-list for method output_type
+	13, // [13:30] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_grpc_iam_proto_init() }
@@ -1737,7 +2425,7 @@ func file_grpc_iam_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_grpc_iam_proto_rawDesc), len(file_grpc_iam_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   28,
+			NumMessages:   39,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

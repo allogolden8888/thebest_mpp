@@ -58,6 +58,38 @@ service IamService {
   rpc ListStaffAccounts(ListStaffAccountsRequest) returns (ListStaffAccountsResponse);
   rpc DeactivateStaffAccount(DeactivateStaffAccountRequest) returns (DeactivateStaffAccountResponse);
   rpc VerifyStaffCredentials(VerifyStaffCredentialsRequest) returns (VerifyStaffCredentialsResponse);
+
+  // BACKOFFICE_ROADMAP.md Production Readiness Review P0#5 ("Identity-контур
+  // не production-класса") — partner-portal side of the same gap already
+  // closed for staff above. Two independent findings closed by these five
+  // RPCs + ResolvePartnerPortalAccess below:
+  //
+  // 1. partner-portal-ui's LoginView.vue accepted a pasted JWT in a
+  //    textarea — no real login form, no issuing backend, and (verified —
+  //    grep for INSERT into iam.partner_portal_users found zero) no
+  //    credentials ever existed for this table's rows in the first place.
+  //    CreatePartnerPortalUser/ListPartnerPortalUsers/
+  //    DeactivatePartnerPortalUser/VerifyPartnerPortalCredentials mirror the
+  //    Staff* shape above exactly (bcrypt inside IamService, hash never
+  //    crosses the gRPC boundary, migrations/V035__partner_portal_credentials.sql).
+  // 2. partner-self-service-api trusted the role embedded in the JWT itself
+  //    (realm_access.roles) instead of iam.partner_portal_role_assignments —
+  //    a stale or revoked role kept working until the 8h token expired.
+  rpc CreatePartnerPortalUser(CreatePartnerPortalUserRequest) returns (CreatePartnerPortalUserResponse);
+  rpc ListPartnerPortalUsers(ListPartnerPortalUsersRequest) returns (ListPartnerPortalUsersResponse);
+  rpc DeactivatePartnerPortalUser(DeactivatePartnerPortalUserRequest) returns (DeactivatePartnerPortalUserResponse);
+  rpc VerifyPartnerPortalCredentials(VerifyPartnerPortalCredentialsRequest) returns (VerifyPartnerPortalCredentialsResponse);
+
+  // ResolvePartnerPortalAccess — called by partner-self-service-api's
+  // middleware on every request that needs to know the caller's role (the
+  // same "no caching, synchronous gRPC call, fail-closed on transport
+  // error" contract as CheckPermission above, not the JWT claim). active=
+  // false covers BOTH an unknown external_id and a deactivated account
+  // (iam.partner_portal_users.active), same reasoning as the
+  // staff_accounts.active check baked into CheckPermission — a deactivated
+  // partner user must lose access immediately, not when their token
+  // happens to expire.
+  rpc ResolvePartnerPortalAccess(ResolvePartnerPortalAccessRequest) returns (ResolvePartnerPortalAccessResponse);
 }
 
 message CheckPermissionRequest {
@@ -210,4 +242,72 @@ message VerifyStaffCredentialsRequest {
 message VerifyStaffCredentialsResponse {
   bool ok = 1;
   string external_id = 2; // пусто, если ok=false
+}
+
+message PartnerPortalUser {
+  string external_id = 1; // = username, см. package doc CreatePartnerPortalUser выше.
+  string username = 2;
+  string partner_id = 3;
+  string display_name = 4;
+  bool active = 5;
+  google.protobuf.Timestamp created_at = 6;
+  // Пароль/хеш никогда не покидают IamService — тот же принцип, что StaffAccount.
+}
+
+message CreatePartnerPortalUserRequest {
+  string username = 1;
+  string password = 2; // plaintext на этом единственном hop'е (gRPC internal, mTLS-периметр), хешируется внутри IamService, никогда не логируется.
+  string partner_id = 3;
+  string display_name = 4;
+  string created_by = 5;
+}
+
+message CreatePartnerPortalUserResponse {
+  PartnerPortalUser user = 1;
+}
+
+message ListPartnerPortalUsersRequest {
+  // Пусто — все пользователи; заполнено — фильтр по конкретному партнёру
+  // (backoffice-ui "Partner Users" создаёт пользователя ровно под одного
+  // партнёра, но список показывает всех для видимости).
+  string partner_id = 1;
+}
+
+message ListPartnerPortalUsersResponse {
+  repeated PartnerPortalUser users = 1;
+}
+
+message DeactivatePartnerPortalUserRequest {
+  string external_id = 1;
+  string actor = 2;
+}
+
+message DeactivatePartnerPortalUserResponse {
+  bool deactivated = 1;
+}
+
+message VerifyPartnerPortalCredentialsRequest {
+  string username = 1;
+  string password = 2;
+}
+
+message VerifyPartnerPortalCredentialsResponse {
+  bool ok = 1;
+  string external_id = 2; // пусто, если ok=false
+  string partner_id = 3;  // пусто, если ok=false
+}
+
+message ResolvePartnerPortalAccessRequest {
+  string external_id = 1;
+}
+
+message ResolvePartnerPortalAccessResponse {
+  // false и если external_id неизвестен, и если iam.partner_portal_users.active=false
+  // — вызывающий не должен различать эти два случая (не раскрываем
+  // существование аккаунта), тот же принцип, что VerifyStaffCredentials.
+  bool active = 1;
+  string partner_id = 2; // пусто, если active=false
+  // Активные (revoked_at IS NULL) роли из iam.partner_portal_role_assignments
+  // — пусто, если active=false или ролей не назначено.
+  repeated string roles = 3;
 }

@@ -50,6 +50,27 @@ type fakeStore struct {
 	lastCreatedPassword  string
 	lastCreatedDisplay   string
 	lastCreatedCreatedBy string
+
+	partnerPortalUsers     []store.PartnerPortalUser
+	createPPUserErr        error
+	ppDeactivateResult     bool
+	ppDeactivateErr        error
+	ppVerifyExternalID     string
+	ppVerifyPartnerID      string
+	ppVerifyOK             bool
+	ppVerifyErr            error
+	lastPPVerifyUsername   string
+	lastPPVerifyPassword   string
+	lastPPCreatedUsername  string
+	lastPPCreatedPassword  string
+	lastPPCreatedPartnerID string
+	lastPPCreatedDisplay   string
+	lastPPCreatedCreatedBy string
+	resolveAccessActive    bool
+	resolveAccessPartnerID string
+	resolveAccessRoles     []string
+	resolveAccessErr       error
+	lastResolveAccessExtID string
 }
 
 func (f *fakeStore) CheckPermission(_ context.Context, _, _ string) (bool, []string, error) {
@@ -122,6 +143,42 @@ func (f *fakeStore) VerifyStaffCredentials(_ context.Context, username, password
 	return f.verifyExternalID, f.verifyOK, f.verifyErr
 }
 
+func (f *fakeStore) CreatePartnerPortalUser(_ context.Context, username, password, partnerID, displayName, createdBy string) (store.PartnerPortalUser, error) {
+	f.lastPPCreatedUsername, f.lastPPCreatedPassword, f.lastPPCreatedPartnerID, f.lastPPCreatedDisplay, f.lastPPCreatedCreatedBy =
+		username, password, partnerID, displayName, createdBy
+	if f.createPPUserErr != nil {
+		return store.PartnerPortalUser{}, f.createPPUserErr
+	}
+	return store.PartnerPortalUser{ExternalID: username, Username: username, PartnerID: partnerID, DisplayName: displayName, Active: true, CreatedAt: time.Unix(0, 0)}, nil
+}
+
+func (f *fakeStore) ListPartnerPortalUsers(_ context.Context, partnerID string) ([]store.PartnerPortalUser, error) {
+	if partnerID == "" {
+		return f.partnerPortalUsers, nil
+	}
+	var out []store.PartnerPortalUser
+	for _, u := range f.partnerPortalUsers {
+		if u.PartnerID == partnerID {
+			out = append(out, u)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) DeactivatePartnerPortalUser(_ context.Context, _, _ string) (bool, error) {
+	return f.ppDeactivateResult, f.ppDeactivateErr
+}
+
+func (f *fakeStore) VerifyPartnerPortalCredentials(_ context.Context, username, password string) (string, string, bool, error) {
+	f.lastPPVerifyUsername, f.lastPPVerifyPassword = username, password
+	return f.ppVerifyExternalID, f.ppVerifyPartnerID, f.ppVerifyOK, f.ppVerifyErr
+}
+
+func (f *fakeStore) ResolvePartnerPortalAccess(_ context.Context, externalID string) (bool, string, []string, error) {
+	f.lastResolveAccessExtID = externalID
+	return f.resolveAccessActive, f.resolveAccessPartnerID, f.resolveAccessRoles, f.resolveAccessErr
+}
+
 func grpcCode(t *testing.T, err error) codes.Code {
 	t.Helper()
 	st, ok := status.FromError(err)
@@ -171,9 +228,9 @@ func TestAssignStaffRoleValidatesRequiredFields(t *testing.T) {
 
 func TestAssignStaffRoleMapsStoreErrorsToGrpcCodes(t *testing.T) {
 	cases := []struct {
-		name    string
+		name     string
 		storeErr error
-		want    codes.Code
+		want     codes.Code
 	}{
 		{"unknown role", store.ErrRoleNotFound, codes.NotFound},
 		{"already assigned", store.ErrAlreadyAssigned, codes.AlreadyExists},

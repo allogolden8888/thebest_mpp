@@ -19,18 +19,23 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	IamService_CheckPermission_FullMethodName              = "/mpp.grpc.v1.IamService/CheckPermission"
-	IamService_ListRoles_FullMethodName                    = "/mpp.grpc.v1.IamService/ListRoles"
-	IamService_ListStaffAssignments_FullMethodName         = "/mpp.grpc.v1.IamService/ListStaffAssignments"
-	IamService_AssignStaffRole_FullMethodName              = "/mpp.grpc.v1.IamService/AssignStaffRole"
-	IamService_RevokeStaffRole_FullMethodName              = "/mpp.grpc.v1.IamService/RevokeStaffRole"
-	IamService_ListPartnerPortalAssignments_FullMethodName = "/mpp.grpc.v1.IamService/ListPartnerPortalAssignments"
-	IamService_AssignPartnerPortalRole_FullMethodName      = "/mpp.grpc.v1.IamService/AssignPartnerPortalRole"
-	IamService_RevokePartnerPortalRole_FullMethodName      = "/mpp.grpc.v1.IamService/RevokePartnerPortalRole"
-	IamService_CreateStaffAccount_FullMethodName           = "/mpp.grpc.v1.IamService/CreateStaffAccount"
-	IamService_ListStaffAccounts_FullMethodName            = "/mpp.grpc.v1.IamService/ListStaffAccounts"
-	IamService_DeactivateStaffAccount_FullMethodName       = "/mpp.grpc.v1.IamService/DeactivateStaffAccount"
-	IamService_VerifyStaffCredentials_FullMethodName       = "/mpp.grpc.v1.IamService/VerifyStaffCredentials"
+	IamService_CheckPermission_FullMethodName                = "/mpp.grpc.v1.IamService/CheckPermission"
+	IamService_ListRoles_FullMethodName                      = "/mpp.grpc.v1.IamService/ListRoles"
+	IamService_ListStaffAssignments_FullMethodName           = "/mpp.grpc.v1.IamService/ListStaffAssignments"
+	IamService_AssignStaffRole_FullMethodName                = "/mpp.grpc.v1.IamService/AssignStaffRole"
+	IamService_RevokeStaffRole_FullMethodName                = "/mpp.grpc.v1.IamService/RevokeStaffRole"
+	IamService_ListPartnerPortalAssignments_FullMethodName   = "/mpp.grpc.v1.IamService/ListPartnerPortalAssignments"
+	IamService_AssignPartnerPortalRole_FullMethodName        = "/mpp.grpc.v1.IamService/AssignPartnerPortalRole"
+	IamService_RevokePartnerPortalRole_FullMethodName        = "/mpp.grpc.v1.IamService/RevokePartnerPortalRole"
+	IamService_CreateStaffAccount_FullMethodName             = "/mpp.grpc.v1.IamService/CreateStaffAccount"
+	IamService_ListStaffAccounts_FullMethodName              = "/mpp.grpc.v1.IamService/ListStaffAccounts"
+	IamService_DeactivateStaffAccount_FullMethodName         = "/mpp.grpc.v1.IamService/DeactivateStaffAccount"
+	IamService_VerifyStaffCredentials_FullMethodName         = "/mpp.grpc.v1.IamService/VerifyStaffCredentials"
+	IamService_CreatePartnerPortalUser_FullMethodName        = "/mpp.grpc.v1.IamService/CreatePartnerPortalUser"
+	IamService_ListPartnerPortalUsers_FullMethodName         = "/mpp.grpc.v1.IamService/ListPartnerPortalUsers"
+	IamService_DeactivatePartnerPortalUser_FullMethodName    = "/mpp.grpc.v1.IamService/DeactivatePartnerPortalUser"
+	IamService_VerifyPartnerPortalCredentials_FullMethodName = "/mpp.grpc.v1.IamService/VerifyPartnerPortalCredentials"
+	IamService_ResolvePartnerPortalAccess_FullMethodName     = "/mpp.grpc.v1.IamService/ResolvePartnerPortalAccess"
 )
 
 // IamServiceClient is the client API for IamService service.
@@ -84,6 +89,36 @@ type IamServiceClient interface {
 	ListStaffAccounts(ctx context.Context, in *ListStaffAccountsRequest, opts ...grpc.CallOption) (*ListStaffAccountsResponse, error)
 	DeactivateStaffAccount(ctx context.Context, in *DeactivateStaffAccountRequest, opts ...grpc.CallOption) (*DeactivateStaffAccountResponse, error)
 	VerifyStaffCredentials(ctx context.Context, in *VerifyStaffCredentialsRequest, opts ...grpc.CallOption) (*VerifyStaffCredentialsResponse, error)
+	// BACKOFFICE_ROADMAP.md Production Readiness Review P0#5 ("Identity-контур
+	// не production-класса") — partner-portal side of the same gap already
+	// closed for staff above. Two independent findings closed by these five
+	// RPCs + ResolvePartnerPortalAccess below:
+	//
+	//  1. partner-portal-ui's LoginView.vue accepted a pasted JWT in a
+	//     textarea — no real login form, no issuing backend, and (verified —
+	//     grep for INSERT into iam.partner_portal_users found zero) no
+	//     credentials ever existed for this table's rows in the first place.
+	//     CreatePartnerPortalUser/ListPartnerPortalUsers/
+	//     DeactivatePartnerPortalUser/VerifyPartnerPortalCredentials mirror the
+	//     Staff* shape above exactly (bcrypt inside IamService, hash never
+	//     crosses the gRPC boundary, migrations/V035__partner_portal_credentials.sql).
+	//  2. partner-self-service-api trusted the role embedded in the JWT itself
+	//     (realm_access.roles) instead of iam.partner_portal_role_assignments —
+	//     a stale or revoked role kept working until the 8h token expired.
+	CreatePartnerPortalUser(ctx context.Context, in *CreatePartnerPortalUserRequest, opts ...grpc.CallOption) (*CreatePartnerPortalUserResponse, error)
+	ListPartnerPortalUsers(ctx context.Context, in *ListPartnerPortalUsersRequest, opts ...grpc.CallOption) (*ListPartnerPortalUsersResponse, error)
+	DeactivatePartnerPortalUser(ctx context.Context, in *DeactivatePartnerPortalUserRequest, opts ...grpc.CallOption) (*DeactivatePartnerPortalUserResponse, error)
+	VerifyPartnerPortalCredentials(ctx context.Context, in *VerifyPartnerPortalCredentialsRequest, opts ...grpc.CallOption) (*VerifyPartnerPortalCredentialsResponse, error)
+	// ResolvePartnerPortalAccess — called by partner-self-service-api's
+	// middleware on every request that needs to know the caller's role (the
+	// same "no caching, synchronous gRPC call, fail-closed on transport
+	// error" contract as CheckPermission above, not the JWT claim). active=
+	// false covers BOTH an unknown external_id and a deactivated account
+	// (iam.partner_portal_users.active), same reasoning as the
+	// staff_accounts.active check baked into CheckPermission — a deactivated
+	// partner user must lose access immediately, not when their token
+	// happens to expire.
+	ResolvePartnerPortalAccess(ctx context.Context, in *ResolvePartnerPortalAccessRequest, opts ...grpc.CallOption) (*ResolvePartnerPortalAccessResponse, error)
 }
 
 type iamServiceClient struct {
@@ -214,6 +249,56 @@ func (c *iamServiceClient) VerifyStaffCredentials(ctx context.Context, in *Verif
 	return out, nil
 }
 
+func (c *iamServiceClient) CreatePartnerPortalUser(ctx context.Context, in *CreatePartnerPortalUserRequest, opts ...grpc.CallOption) (*CreatePartnerPortalUserResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreatePartnerPortalUserResponse)
+	err := c.cc.Invoke(ctx, IamService_CreatePartnerPortalUser_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *iamServiceClient) ListPartnerPortalUsers(ctx context.Context, in *ListPartnerPortalUsersRequest, opts ...grpc.CallOption) (*ListPartnerPortalUsersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListPartnerPortalUsersResponse)
+	err := c.cc.Invoke(ctx, IamService_ListPartnerPortalUsers_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *iamServiceClient) DeactivatePartnerPortalUser(ctx context.Context, in *DeactivatePartnerPortalUserRequest, opts ...grpc.CallOption) (*DeactivatePartnerPortalUserResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeactivatePartnerPortalUserResponse)
+	err := c.cc.Invoke(ctx, IamService_DeactivatePartnerPortalUser_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *iamServiceClient) VerifyPartnerPortalCredentials(ctx context.Context, in *VerifyPartnerPortalCredentialsRequest, opts ...grpc.CallOption) (*VerifyPartnerPortalCredentialsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VerifyPartnerPortalCredentialsResponse)
+	err := c.cc.Invoke(ctx, IamService_VerifyPartnerPortalCredentials_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *iamServiceClient) ResolvePartnerPortalAccess(ctx context.Context, in *ResolvePartnerPortalAccessRequest, opts ...grpc.CallOption) (*ResolvePartnerPortalAccessResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolvePartnerPortalAccessResponse)
+	err := c.cc.Invoke(ctx, IamService_ResolvePartnerPortalAccess_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // IamServiceServer is the server API for IamService service.
 // All implementations must embed UnimplementedIamServiceServer
 // for forward compatibility.
@@ -265,6 +350,36 @@ type IamServiceServer interface {
 	ListStaffAccounts(context.Context, *ListStaffAccountsRequest) (*ListStaffAccountsResponse, error)
 	DeactivateStaffAccount(context.Context, *DeactivateStaffAccountRequest) (*DeactivateStaffAccountResponse, error)
 	VerifyStaffCredentials(context.Context, *VerifyStaffCredentialsRequest) (*VerifyStaffCredentialsResponse, error)
+	// BACKOFFICE_ROADMAP.md Production Readiness Review P0#5 ("Identity-контур
+	// не production-класса") — partner-portal side of the same gap already
+	// closed for staff above. Two independent findings closed by these five
+	// RPCs + ResolvePartnerPortalAccess below:
+	//
+	//  1. partner-portal-ui's LoginView.vue accepted a pasted JWT in a
+	//     textarea — no real login form, no issuing backend, and (verified —
+	//     grep for INSERT into iam.partner_portal_users found zero) no
+	//     credentials ever existed for this table's rows in the first place.
+	//     CreatePartnerPortalUser/ListPartnerPortalUsers/
+	//     DeactivatePartnerPortalUser/VerifyPartnerPortalCredentials mirror the
+	//     Staff* shape above exactly (bcrypt inside IamService, hash never
+	//     crosses the gRPC boundary, migrations/V035__partner_portal_credentials.sql).
+	//  2. partner-self-service-api trusted the role embedded in the JWT itself
+	//     (realm_access.roles) instead of iam.partner_portal_role_assignments —
+	//     a stale or revoked role kept working until the 8h token expired.
+	CreatePartnerPortalUser(context.Context, *CreatePartnerPortalUserRequest) (*CreatePartnerPortalUserResponse, error)
+	ListPartnerPortalUsers(context.Context, *ListPartnerPortalUsersRequest) (*ListPartnerPortalUsersResponse, error)
+	DeactivatePartnerPortalUser(context.Context, *DeactivatePartnerPortalUserRequest) (*DeactivatePartnerPortalUserResponse, error)
+	VerifyPartnerPortalCredentials(context.Context, *VerifyPartnerPortalCredentialsRequest) (*VerifyPartnerPortalCredentialsResponse, error)
+	// ResolvePartnerPortalAccess — called by partner-self-service-api's
+	// middleware on every request that needs to know the caller's role (the
+	// same "no caching, synchronous gRPC call, fail-closed on transport
+	// error" contract as CheckPermission above, not the JWT claim). active=
+	// false covers BOTH an unknown external_id and a deactivated account
+	// (iam.partner_portal_users.active), same reasoning as the
+	// staff_accounts.active check baked into CheckPermission — a deactivated
+	// partner user must lose access immediately, not when their token
+	// happens to expire.
+	ResolvePartnerPortalAccess(context.Context, *ResolvePartnerPortalAccessRequest) (*ResolvePartnerPortalAccessResponse, error)
 	mustEmbedUnimplementedIamServiceServer()
 }
 
@@ -310,6 +425,21 @@ func (UnimplementedIamServiceServer) DeactivateStaffAccount(context.Context, *De
 }
 func (UnimplementedIamServiceServer) VerifyStaffCredentials(context.Context, *VerifyStaffCredentialsRequest) (*VerifyStaffCredentialsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method VerifyStaffCredentials not implemented")
+}
+func (UnimplementedIamServiceServer) CreatePartnerPortalUser(context.Context, *CreatePartnerPortalUserRequest) (*CreatePartnerPortalUserResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreatePartnerPortalUser not implemented")
+}
+func (UnimplementedIamServiceServer) ListPartnerPortalUsers(context.Context, *ListPartnerPortalUsersRequest) (*ListPartnerPortalUsersResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListPartnerPortalUsers not implemented")
+}
+func (UnimplementedIamServiceServer) DeactivatePartnerPortalUser(context.Context, *DeactivatePartnerPortalUserRequest) (*DeactivatePartnerPortalUserResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeactivatePartnerPortalUser not implemented")
+}
+func (UnimplementedIamServiceServer) VerifyPartnerPortalCredentials(context.Context, *VerifyPartnerPortalCredentialsRequest) (*VerifyPartnerPortalCredentialsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method VerifyPartnerPortalCredentials not implemented")
+}
+func (UnimplementedIamServiceServer) ResolvePartnerPortalAccess(context.Context, *ResolvePartnerPortalAccessRequest) (*ResolvePartnerPortalAccessResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResolvePartnerPortalAccess not implemented")
 }
 func (UnimplementedIamServiceServer) mustEmbedUnimplementedIamServiceServer() {}
 func (UnimplementedIamServiceServer) testEmbeddedByValue()                    {}
@@ -548,6 +678,96 @@ func _IamService_VerifyStaffCredentials_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _IamService_CreatePartnerPortalUser_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreatePartnerPortalUserRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IamServiceServer).CreatePartnerPortalUser(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IamService_CreatePartnerPortalUser_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IamServiceServer).CreatePartnerPortalUser(ctx, req.(*CreatePartnerPortalUserRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IamService_ListPartnerPortalUsers_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListPartnerPortalUsersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IamServiceServer).ListPartnerPortalUsers(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IamService_ListPartnerPortalUsers_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IamServiceServer).ListPartnerPortalUsers(ctx, req.(*ListPartnerPortalUsersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IamService_DeactivatePartnerPortalUser_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeactivatePartnerPortalUserRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IamServiceServer).DeactivatePartnerPortalUser(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IamService_DeactivatePartnerPortalUser_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IamServiceServer).DeactivatePartnerPortalUser(ctx, req.(*DeactivatePartnerPortalUserRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IamService_VerifyPartnerPortalCredentials_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VerifyPartnerPortalCredentialsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IamServiceServer).VerifyPartnerPortalCredentials(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IamService_VerifyPartnerPortalCredentials_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IamServiceServer).VerifyPartnerPortalCredentials(ctx, req.(*VerifyPartnerPortalCredentialsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IamService_ResolvePartnerPortalAccess_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolvePartnerPortalAccessRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IamServiceServer).ResolvePartnerPortalAccess(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IamService_ResolvePartnerPortalAccess_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IamServiceServer).ResolvePartnerPortalAccess(ctx, req.(*ResolvePartnerPortalAccessRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // IamService_ServiceDesc is the grpc.ServiceDesc for IamService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -602,6 +822,26 @@ var IamService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "VerifyStaffCredentials",
 			Handler:    _IamService_VerifyStaffCredentials_Handler,
+		},
+		{
+			MethodName: "CreatePartnerPortalUser",
+			Handler:    _IamService_CreatePartnerPortalUser_Handler,
+		},
+		{
+			MethodName: "ListPartnerPortalUsers",
+			Handler:    _IamService_ListPartnerPortalUsers_Handler,
+		},
+		{
+			MethodName: "DeactivatePartnerPortalUser",
+			Handler:    _IamService_DeactivatePartnerPortalUser_Handler,
+		},
+		{
+			MethodName: "VerifyPartnerPortalCredentials",
+			Handler:    _IamService_VerifyPartnerPortalCredentials_Handler,
+		},
+		{
+			MethodName: "ResolvePartnerPortalAccess",
+			Handler:    _IamService_ResolvePartnerPortalAccess_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

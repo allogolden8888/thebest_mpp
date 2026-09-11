@@ -33,6 +33,11 @@ type Store interface {
 	ListStaffAccounts(ctx context.Context, activeOnly bool) ([]store.StaffAccount, error)
 	DeactivateStaffAccount(ctx context.Context, externalID, actor string) (bool, error)
 	VerifyStaffCredentials(ctx context.Context, username, password string) (string, bool, error)
+	CreatePartnerPortalUser(ctx context.Context, username, password, partnerID, displayName, createdBy string) (store.PartnerPortalUser, error)
+	ListPartnerPortalUsers(ctx context.Context, partnerID string) ([]store.PartnerPortalUser, error)
+	DeactivatePartnerPortalUser(ctx context.Context, externalID, actor string) (bool, error)
+	VerifyPartnerPortalCredentials(ctx context.Context, username, password string) (externalID, partnerID string, ok bool, err error)
+	ResolvePartnerPortalAccess(ctx context.Context, externalID string) (active bool, partnerID string, roles []string, err error)
 }
 
 type Server struct {
@@ -281,5 +286,102 @@ func toProtoStaffAccount(a store.StaffAccount) *grpcv1.StaffAccount {
 		DisplayName: a.DisplayName,
 		Active:      a.Active,
 		CreatedAt:   timestamppb.New(a.CreatedAt),
+	}
+}
+
+// CreatePartnerPortalUser — BACKOFFICE_ROADMAP.md Production Readiness
+// Review P0#5. Mirrors CreateStaffAccount validation exactly.
+func (s *Server) CreatePartnerPortalUser(ctx context.Context, req *grpcv1.CreatePartnerPortalUserRequest) (*grpcv1.CreatePartnerPortalUserResponse, error) {
+	if req.GetUsername() == "" {
+		return nil, status.Error(codes.InvalidArgument, "username обязателен")
+	}
+	if req.GetPassword() == "" {
+		return nil, status.Error(codes.InvalidArgument, "password обязателен")
+	}
+	if req.GetPartnerId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "partner_id обязателен")
+	}
+	if req.GetDisplayName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "display_name обязателен")
+	}
+	if req.GetCreatedBy() == "" {
+		return nil, status.Error(codes.InvalidArgument, "created_by обязателен для аудита")
+	}
+
+	u, err := s.store.CreatePartnerPortalUser(ctx, req.GetUsername(), req.GetPassword(), req.GetPartnerId(), req.GetDisplayName(), req.GetCreatedBy())
+	if err != nil {
+		if errors.Is(err, store.ErrPartnerPortalUsernameTaken) {
+			return nil, status.Error(codes.AlreadyExists, err.Error())
+		}
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &grpcv1.CreatePartnerPortalUserResponse{User: toProtoPartnerPortalUser(u)}, nil
+}
+
+func (s *Server) ListPartnerPortalUsers(ctx context.Context, req *grpcv1.ListPartnerPortalUsersRequest) (*grpcv1.ListPartnerPortalUsersResponse, error) {
+	users, err := s.store.ListPartnerPortalUsers(ctx, req.GetPartnerId())
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	resp := &grpcv1.ListPartnerPortalUsersResponse{Users: make([]*grpcv1.PartnerPortalUser, 0, len(users))}
+	for _, u := range users {
+		resp.Users = append(resp.Users, toProtoPartnerPortalUser(u))
+	}
+	return resp, nil
+}
+
+func (s *Server) DeactivatePartnerPortalUser(ctx context.Context, req *grpcv1.DeactivatePartnerPortalUserRequest) (*grpcv1.DeactivatePartnerPortalUserResponse, error) {
+	if req.GetExternalId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "external_id обязателен")
+	}
+	if req.GetActor() == "" {
+		return nil, status.Error(codes.InvalidArgument, "actor обязателен для аудита")
+	}
+
+	deactivated, err := s.store.DeactivatePartnerPortalUser(ctx, req.GetExternalId(), req.GetActor())
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &grpcv1.DeactivatePartnerPortalUserResponse{Deactivated: deactivated}, nil
+}
+
+// VerifyPartnerPortalCredentials — не codes.NotFound/Unauthenticated на
+// неверные креды, тот же класс решения, что VerifyStaffCredentials.
+func (s *Server) VerifyPartnerPortalCredentials(ctx context.Context, req *grpcv1.VerifyPartnerPortalCredentialsRequest) (*grpcv1.VerifyPartnerPortalCredentialsResponse, error) {
+	if req.GetUsername() == "" || req.GetPassword() == "" {
+		return &grpcv1.VerifyPartnerPortalCredentialsResponse{Ok: false}, nil
+	}
+
+	externalID, partnerID, ok, err := s.store.VerifyPartnerPortalCredentials(ctx, req.GetUsername(), req.GetPassword())
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &grpcv1.VerifyPartnerPortalCredentialsResponse{Ok: ok, ExternalId: externalID, PartnerId: partnerID}, nil
+}
+
+// ResolvePartnerPortalAccess — вызывается partner-self-service-api на
+// каждый запрос вместо разбора realm_access.roles из JWT
+// (BACKOFFICE_ROADMAP.md Production Readiness Review P0#5), тот же
+// fail-closed/no-caching контракт, что CheckPermission.
+func (s *Server) ResolvePartnerPortalAccess(ctx context.Context, req *grpcv1.ResolvePartnerPortalAccessRequest) (*grpcv1.ResolvePartnerPortalAccessResponse, error) {
+	if req.GetExternalId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "external_id обязателен")
+	}
+
+	active, partnerID, roles, err := s.store.ResolvePartnerPortalAccess(ctx, req.GetExternalId())
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &grpcv1.ResolvePartnerPortalAccessResponse{Active: active, PartnerId: partnerID, Roles: roles}, nil
+}
+
+func toProtoPartnerPortalUser(u store.PartnerPortalUser) *grpcv1.PartnerPortalUser {
+	return &grpcv1.PartnerPortalUser{
+		ExternalId:  u.ExternalID,
+		Username:    u.Username,
+		PartnerId:   u.PartnerID,
+		DisplayName: u.DisplayName,
+		Active:      u.Active,
+		CreatedAt:   timestamppb.New(u.CreatedAt),
 	}
 }

@@ -114,6 +114,10 @@ V028__incident.sql оставлен как есть — оба существо�
 
 `iam.staff_accounts` — реальный Keycloak не развёрнут нигде в этом репозитории (проверено кодом до миграции: `LoginView.vue` принимает вставленный JWT в textarea, ни одного HTTP-раунд-трипа при логине; `iam.staff_role_assignments.external_id` — свободная строка без FK, ни одной таблицы идентичности для staff, в отличие от `iam.partner_portal_users`, V025). Пользователь явно отклонил LDAP, реальный Keycloak — отдельная, сильно более поздняя задача. До этого — полноценный локальный логин/пароль. `external_id = username` (нет Keycloak `sub`, взять неоткуда). Backfill заводит заглушки для уже существующих `staff_role_assignments.external_id` (`active=false`, заведомо невалидный bcrypt-хеш) перед добавлением FK — не ломает уже выданные роли, администратор должен явно завести пароль через новый экран, чтобы такой аккаунт снова заработал.
 
+## V035 — BACKOFFICE_ROADMAP.md Production Readiness Review P0#5, partner-portal login
+
+`iam.partner_portal_users` (V025) добавляет `username`/`password_hash`/`active`/`created_by` — та же форма, что `iam.staff_accounts` (V031), но без дилеммы backfill'а: таблица была реально пустой (V025's предположение "заводится при первом логине через Keycloak `sub`" так и не сбылось — реального Keycloak нет, `partner-portal-ui`'s `LoginView.vue` принимал вставленный JWT в textarea, ни одной строки сюда никогда не вставлялось), поэтому новые колонки — `NOT NULL` сразу, без промежуточных заглушек. Убирает paste-a-JWT/localStorage антипаттерн на партнёрской стороне и стале-role-claim проблему (`partner-self-service-api` раньше доверял `realm_access.roles` из JWT вместо `iam.partner_portal_role_assignments`) — подробности в `BACKOFFICE_ROADMAP.md`.
+
 ## Найдено только на этапе реального DDL (не было видно на уровне концептуальной спеки)
 
 Ради этого и стоило спускаться до миграций, а не оставаться на уровне таблиц-в-markdown:
