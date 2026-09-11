@@ -196,6 +196,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/messages/{message_id}/pdu-log": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getMessagePduLog"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/support/messages/search": {
         parameters: {
             query?: never;
@@ -840,6 +856,23 @@ export interface components {
             message_id: string;
             segments: components["schemas"]["OperatorEventSegment"][];
         };
+        PduLogEntry: {
+            direction: string;
+            pdu_type: string;
+            sequence_number: number;
+            protocol: string;
+            message_id: string;
+            stage_execution_id: string;
+            smsc_message_id: string;
+            segment_id: number;
+            status: string;
+            /** Format: date-time */
+            occurred_at: string;
+        };
+        MessagePduLogResponse: {
+            message_id: string;
+            pdus: components["schemas"]["PduLogEntry"][];
+        };
         MeResponse: {
             external_id: string;
             roles: string[];
@@ -1434,6 +1467,28 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MessageOperatorEventsResponse"];
+                };
+            };
+        };
+    };
+    getMessagePduLog: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                message_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessagePduLogResponse"];
                 };
             };
         };

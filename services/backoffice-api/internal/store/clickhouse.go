@@ -9,6 +9,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -139,6 +140,74 @@ func (c *ClickHouse) MessageStageTimeline(ctx context.Context, messageID string)
 		var e StageTimelineEntry
 		if err := rows.Scan(&e.StageName, &e.Outcome, &e.ReasonCode, &e.OccurredAt); err != nil {
 			return nil, fmt.Errorf("message_stage_timeline scan: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// PduLogEntry — одна строка analytics.operator_pdu_log (Экраны 38-40,
+// pdu-log-writer/internal/store/store.go createTableDDL): один реальный
+// SMPP PDU (submit_sm/submit_sm_resp для A2P, deliver_sm/deliver_sm_resp
+// для DLR), а не агрегат по стадии, как MessageStageTimeline выше.
+type PduLogEntry struct {
+	Direction        string
+	PduType          string
+	SequenceNumber   int32
+	Protocol         string
+	MessageID        string
+	StageExecutionID string
+	SmscMessageID    string
+	SegmentID        int32
+	Status           string
+	OccurredAt       time.Time
+}
+
+// MessagePduLog — пер-PDU лог для одного сообщения. A2P-направление
+// (submit_sm/_resp) несёт message_id напрямую, но DLR-направление
+// (deliver_sm/_resp) — нет (см. OperatorPduLog.message_id doc-комментарий
+// в platform-contracts/events/operator_events.proto: единственный ключ
+// там smsc_message_id). Поэтому вызывающая сторона (httpapi/pdulog.go)
+// сперва резолвит smsc_message_id этого сообщения через
+// dlr.dlr_correlation (Postgres.OperatorEventsByMessage) и передаёт их
+// сюда — читаем ИЛИ по message_id, ИЛИ по smsc_message_id, объединяя обе
+// направления в одну ленту.
+//
+// FINAL — та же цена корректности, что и в MessageStageTimeline: таблица
+// ReplacingMergeTree, без FINAL at-least-once redelivery от Kafka дала бы
+// дубликаты PDU в ленте одного сообщения.
+func (c *ClickHouse) MessagePduLog(ctx context.Context, messageID string, smscMessageIDs []string) ([]PduLogEntry, error) {
+	conditions := []string{"message_id = ?"}
+	args := []interface{}{messageID}
+	if len(smscMessageIDs) > 0 {
+		placeholders := make([]string, len(smscMessageIDs))
+		for i, id := range smscMessageIDs {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		conditions = append(conditions, fmt.Sprintf("smsc_message_id IN (%s)", strings.Join(placeholders, ", ")))
+	}
+
+	query := fmt.Sprintf(`
+		SELECT direction, pdu_type, sequence_number, protocol, message_id, stage_execution_id,
+		       smsc_message_id, segment_id, status, occurred_at
+		FROM analytics.operator_pdu_log FINAL
+		WHERE (%s)
+		ORDER BY occurred_at ASC, sequence_number ASC
+	`, strings.Join(conditions, " OR "))
+
+	rows, err := c.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("message_pdu_log query: %w", err)
+	}
+	defer rows.Close()
+
+	var out []PduLogEntry
+	for rows.Next() {
+		var e PduLogEntry
+		if err := rows.Scan(&e.Direction, &e.PduType, &e.SequenceNumber, &e.Protocol, &e.MessageID,
+			&e.StageExecutionID, &e.SmscMessageID, &e.SegmentID, &e.Status, &e.OccurredAt); err != nil {
+			return nil, fmt.Errorf("message_pdu_log scan: %w", err)
 		}
 		out = append(out, e)
 	}

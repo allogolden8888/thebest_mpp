@@ -296,6 +296,28 @@ components:
         segments:
           type: array
           items: { $ref: "#/components/schemas/OperatorEventSegment" }
+    PduLogEntry:
+      type: object
+      required: [direction, pdu_type, sequence_number, protocol, message_id, stage_execution_id, smsc_message_id, segment_id, status, occurred_at]
+      properties:
+        direction: { type: string }
+        pdu_type: { type: string }
+        sequence_number: { type: integer }
+        protocol: { type: string }
+        message_id: { type: string }
+        stage_execution_id: { type: string }
+        smsc_message_id: { type: string }
+        segment_id: { type: integer }
+        status: { type: string }
+        occurred_at: { type: string, format: date-time }
+    MessagePduLogResponse:
+      type: object
+      required: [message_id, pdus]
+      properties:
+        message_id: { type: string }
+        pdus:
+          type: array
+          items: { $ref: "#/components/schemas/PduLogEntry" }
     MeResponse:
       type: object
       required: [external_id, roles, permissions]
@@ -905,6 +927,20 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/MessageOperatorEventsResponse" }
+  /messages/{message_id}/pdu-log:
+    get:
+      operationId: getMessagePduLog
+      parameters:
+        - name: message_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessagePduLogResponse" }
   /support/messages/search:
     get:
       operationId: searchSupportMessages

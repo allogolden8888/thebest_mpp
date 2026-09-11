@@ -205,6 +205,10 @@ func NewRouter(d Deps) *chi.Mux {
 		// analytics.stage_events (timeline.go).
 		r.With(auth.RequirePermission("support:trace", d.IamClient)).
 			Get("/messages/{message_id}/timeline", handleMessageTimeline(d.ClickHouse))
+		// Пер-PDU лог (Экраны 38-40) — каждый реальный SMPP PDU, а не
+		// агрегат по стадии/сегменту, как два маршрута выше (pdulog.go).
+		r.With(auth.RequirePermission("support:trace", d.IamClient)).
+			Get("/messages/{message_id}/pdu-log", handleMessagePduLog(d.ClickHouse, d.Postgres))
 
 		// /v1/billing/* — лента списаний и сводка (billing.go). Читают
 		// billing.billing_ledger напрямую. Право audit:read, а не

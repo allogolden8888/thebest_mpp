@@ -50,6 +50,28 @@ func testClickHouseConn(t *testing.T) chdriver.Conn {
 	`); err != nil {
 		t.Fatalf("create table failed: %v", err)
 	}
+	// Схема должна совпадать с pdu-log-writer/internal/store/store.go
+	// (владелец таблицы) — иначе MessagePduLog() тестировал бы не ту форму
+	// строки, что реально пишет продюсер.
+	if err := conn.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS analytics.operator_pdu_log (
+			operator_id        String,
+			protocol           String,
+			direction          String,
+			pdu_type           String,
+			sequence_number    Int32,
+			message_id         String,
+			stage_execution_id String,
+			smsc_message_id    String,
+			segment_id         Int32,
+			status             String,
+			occurred_at        DateTime64(3),
+			ingested_at        DateTime64(3) DEFAULT now64(3)
+		) ENGINE = ReplacingMergeTree()
+		ORDER BY (occurred_at, operator_id, sequence_number, pdu_type)
+	`); err != nil {
+		t.Fatalf("create table failed: %v", err)
+	}
 	return conn
 }
 
@@ -81,5 +103,68 @@ func TestReportAggregatesAcrossPartnersWhenUnfiltered(t *testing.T) {
 	}
 	if len(resultsA) != 1 || resultsA[0].PartnerID != partnerA {
 		t.Fatalf("фильтр по partner_id не сработал: %+v", resultsA)
+	}
+}
+
+// TestMessagePduLogCombinesA2PAndDlrByCorrelation — A2P-строка несёт
+// message_id напрямую (submit_sm/_resp), DLR-строка — нет (deliver_sm/
+// _resp, см. OperatorPduLog.message_id doc-комментарий), только
+// smsc_message_id. handleMessagePduLog (pdulog.go) резолвит
+// smsc_message_id через dlr.dlr_correlation и передаёт сюда — здесь
+// проверяем, что MessagePduLog реально объединяет оба направления одной
+// ленты через (message_id = ? OR smsc_message_id IN (...)), в
+// хронологическом порядке.
+func TestMessagePduLogCombinesA2PAndDlrByCorrelation(t *testing.T) {
+	conn := testClickHouseConn(t)
+	s := NewClickHouseFromConn(conn)
+	ctx := context.Background()
+
+	suffix := time.Now().Format("20060102150405.000000000")
+	messageID := "msg-" + suffix
+	smscMessageID := "smsc-" + suffix
+	otherMessageID := "other-msg-" + suffix
+	base := time.Now().Truncate(time.Millisecond)
+
+	batch, err := conn.PrepareBatch(ctx, "INSERT INTO analytics.operator_pdu_log "+
+		"(operator_id, protocol, direction, pdu_type, sequence_number, message_id, stage_execution_id, smsc_message_id, segment_id, status, occurred_at)")
+	if err != nil {
+		t.Fatalf("prepare batch failed: %v", err)
+	}
+	rows := []struct {
+		pduType       string
+		seq           int32
+		messageID     string
+		smscMessageID string
+		occurredAt    time.Time
+	}{
+		{"SUBMIT_SM", 1, messageID, "", base},
+		{"SUBMIT_SM_RESP", 1, messageID, smscMessageID, base.Add(10 * time.Millisecond)},
+		// DLR-направление: message_id пуст, единственная связь — smsc_message_id.
+		{"DELIVER_SM", 7, "", smscMessageID, base.Add(time.Second)},
+		{"DELIVER_SM_RESP", 7, "", smscMessageID, base.Add(time.Second + 10*time.Millisecond)},
+		// Другое сообщение — не должно попасть в ленту.
+		{"SUBMIT_SM", 2, otherMessageID, "", base},
+	}
+	for _, r := range rows {
+		if err := batch.Append("op-1", "SMPP", "OUTBOUND", r.pduType, r.seq, r.messageID, "", r.smscMessageID, int32(0), "OK", r.occurredAt); err != nil {
+			t.Fatalf("batch append failed: %v", err)
+		}
+	}
+	if err := batch.Send(); err != nil {
+		t.Fatalf("batch send failed: %v", err)
+	}
+
+	entries, err := s.MessagePduLog(ctx, messageID, []string{smscMessageID})
+	if err != nil {
+		t.Fatalf("MessagePduLog failed: %v", err)
+	}
+	if len(entries) != 4 {
+		t.Fatalf("ожидалось 4 PDU (2 A2P + 2 DLR), получено %d: %+v", len(entries), entries)
+	}
+	wantOrder := []string{"SUBMIT_SM", "SUBMIT_SM_RESP", "DELIVER_SM", "DELIVER_SM_RESP"}
+	for i, want := range wantOrder {
+		if entries[i].PduType != want {
+			t.Fatalf("позиция %d: ожидался %s, получен %s (полная лента: %+v)", i, want, entries[i].PduType, entries)
+		}
 	}
 }

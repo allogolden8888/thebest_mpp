@@ -43,6 +43,7 @@ create_topic message.lifecycle 18 delete 86400000
 create_topic operator.submit.accepted 3 delete 86400000
 create_topic operator.dlr 9 delete 86400000
 create_topic operator.dlr.unresolved 9 delete 86400000
+create_topic operator.pdu.log 3 delete 86400000
 create_topic notification.retry 18 delete 86400000
 create_topic billing.ledger 3 delete 86400000
 create_topic scheduler.standard.commands 3 delete 86400000
