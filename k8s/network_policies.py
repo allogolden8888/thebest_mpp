@@ -102,6 +102,10 @@ CALL_GRAPH = [
     DirectCall("backoffice-api", "incident-service", 9000),
     DirectCall("backoffice-api", "ops-visibility-service", HEALTH_PORT),
     DirectCall("backoffice-api", "replay-service", 9000),
+    # SPA containers proxy same-origin browser calls through nginx. With
+    # default-deny egress these are ordinary pod-to-pod calls too; allowing
+    # only the API ingress half is insufficient.
+    DirectCall("backoffice-ui", "backoffice-api", 8080),
     DirectCall("billing-reconciliation", "execution-control-service", 9000),
     DirectCall("billing-self-service-api", "configuration-service", 9000),
     DirectCall("compliance-api", "configuration-service", 9000),
@@ -110,6 +114,8 @@ CALL_GRAPH = [
     DirectCall("delivery-service", "operator-http-gateway", 9000),
     DirectCall("delivery-service", "operator-smpp-session-manager", 9000),
     DirectCall("partner-notification-service", "partner-smpp-gateway", 9000),
+    DirectCall("partner-portal-ui", "billing-self-service-api", 8080),
+    DirectCall("partner-portal-ui", "partner-self-service-api", 8080),
     DirectCall("partner-self-service-api", "chat-service", 9000),
     DirectCall("partner-self-service-api", "configuration-service", 9000),
     DirectCall("partner-self-service-api", "credential-issuer-service", 9000),

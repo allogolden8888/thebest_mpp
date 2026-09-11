@@ -40,7 +40,12 @@ PROMETHEUS_URL = "http://prometheus-operated.monitoring.svc:9090"
 # partner-конфиг (partner-rest-receiver для auth, partner-notification-service
 # для callback-роутинга — тот же файл, два разных потребителя), получают его
 # из одного и того же ConfigMap вместо несуществующего relative dev-пути.
-PARTNER_CONFIG_SERVICES = ["partner-rest-receiver", "partner-notification-service"]
+PARTNER_CONFIG_SERVICES = [
+    "billing-service",
+    "partner-notification-service",
+    "partner-rest-receiver",
+    "partner-smpp-gateway",
+]
 PARTNER_CONFIG_MOUNT_DIR = "/etc/mpp/partner-config"
 PARTNER_CONFIG_FIXTURE = "partner.valid.json"
 PARTNER_CONFIG_CONFIGMAP_NAME = "partner-config-fixture"
@@ -57,6 +62,7 @@ KAFKA_NON_CONSUMER_CLIENTS = {
     "execution-control-service",
     "ops-visibility-service",
     "config-event-publisher",
+    "billing-outbox-publisher",
     "backoffice-api",
     "replay-service",
 }
@@ -218,7 +224,7 @@ SERVICES = [
     Service("billing-outbox-publisher", "java", "stateless", None,
             "language ПО services_specifictaion.md (Java, billing-platform-java репо) конфликтует с "
             "capacity_model.md, который группирует этот сервис в пул Go control-plane (capacity_model.md:12,113) "
-            "— расхождение между документами, не решённое здесь, см. README.md", kafka_consumer=True),
+            "— расхождение между документами, не решённое здесь, см. README.md", kafka_consumer=False),
     Service("billing-ledger-writer", "java", "stateless", None,
             "тот же языковой конфликт документов, что у billing-outbox-publisher, см. README.md",
             kafka_consumer=True),
@@ -275,6 +281,59 @@ SERVICES = [
             "не в capacity model — статический SPA, floor MIN_REPLICAS",
             external_port={"name": "http", "port": 8080, "protocol": "TCP"}, resource_tier="control-plane"),
 ]
+
+# KEDA должен смотреть на реальные topic + consumer group из entrypoint'ов,
+# а не выводить topic как ``stage.<service-name>``. У многих сервисов входы
+# вообще не stage-топики, а у Pipeline/Reconciliation/Lifecycle их несколько.
+# Config hot-reload с уникальной group на каждый pod сюда не включён: это
+# broadcast-механизм, его lag не является сигналом для горизонтального
+# масштабирования основного workload consumer.
+KEDA_KAFKA_TRIGGERS: dict[str, list[tuple[str, str]]] = {
+    "pipeline-engine": [
+        ("incoming.messages", "pipeline-engine"),
+        ("stage.completed", "pipeline-engine"),
+        ("pipeline.retry.triggers", "pipeline-engine-retry-trigger"),
+    ],
+    "destination-resolution-service": [("stage.destination-resolution", "destination-resolution-service")],
+    "policy-service": [("stage.policy", "policy-service")],
+    "billing-service": [("stage.billing", "billing-service")],
+    "routing-service": [("stage.routing", "routing-service")],
+    "delivery-service": [("stage.delivery", "delivery-service")],
+    "delivery-reconciliation-service": [
+        ("stage.delivery-reconciliation", "delivery-reconciliation-service"),
+        ("operator.submit.accepted", "delivery-reconciliation-service-submit-accepted"),
+        ("delivery.status", "delivery-reconciliation-service-delivery-status"),
+    ],
+    "config-cache-projector": [("config.changes", "config-cache-projector")],
+    "consent-cache-projector": [("config.changes", "consent-cache-projector")],
+    "dlr-correlation-writer": [("operator.submit.accepted", "dlr-correlation-writer")],
+    "dlr-manager": [
+        ("operator.dlr", "dlr-manager"),
+        ("operator.dlr.unresolved", "dlr-manager"),
+    ],
+    "billing-ledger-writer": [("billing.ledger", "billing-ledger-writer")],
+    "lifecycle-writer": [
+        ("incoming.messages", "lifecycle-writer"),
+        ("message.lifecycle", "lifecycle-writer"),
+        ("stage.destination-resolution.dlq", "lifecycle-writer"),
+        ("stage.policy.dlq", "lifecycle-writer"),
+        ("stage.billing.dlq", "lifecycle-writer"),
+        ("stage.routing.dlq", "lifecycle-writer"),
+        ("stage.delivery.dlq", "lifecycle-writer"),
+        ("stage.delivery-reconciliation.dlq", "lifecycle-writer"),
+    ],
+    "analytics-writer": [
+        ("incoming.messages", "analytics-writer"),
+        ("stage.completed", "analytics-writer"),
+        ("message.lifecycle", "analytics-writer"),
+    ],
+    "pdu-log-writer": [("operator.pdu.log", "pdu-log-writer")],
+    "partner-notification-service": [
+        ("message.lifecycle", "partner-notification-service"),
+        ("notification.retry", "partner-notification-service"),
+    ],
+    "template-management-service": [("config.changes", "template-management-service")],
+}
 
 # Секретные зависимости по сервису — из четырёх ключей ниже, каждый мапится
 # на отдельный k8s Secret (SECRET_K8S_NAME), наполняемый ExternalSecret из
@@ -700,6 +759,8 @@ def build_keda_scaledobject(svc: Service, replicas: int) -> dict:
     — consumer lag на топике стадии (это же используется в мониторинге,
     hld.md: 'Kafka consumer lag' в списке метрик). Ни один документ раньше
     не выбирал конкретный autoscaler — здесь выбор сделан явно."""
+    triggers = KEDA_KAFKA_TRIGGERS.get(svc.name)
+    assert triggers, f"{svc.name}: kafka_consumer=True, но KEDA topic/group mapping не задан"
     return {
         "apiVersion": "keda.sh/v1alpha1", "kind": "ScaledObject",
         "metadata": _metadata(svc) | {"name": f"{svc.name}-scaler"},
@@ -707,15 +768,18 @@ def build_keda_scaledobject(svc: Service, replicas: int) -> dict:
             "scaleTargetRef": {"name": svc.name},
             "minReplicaCount": replicas,
             "maxReplicaCount": replicas * 3,
-            "triggers": [{
-                "type": "kafka",
-                "metadata": {
-                    "bootstrapServers": KAFKA_BOOTSTRAP_SERVERS,
-                    "consumerGroup": svc.name,
-                    "topic": f"stage.{svc.name}",
-                    "lagThreshold": "1000",
-                },
-            }],
+            "triggers": [
+                {
+                    "type": "kafka",
+                    "metadata": {
+                        "bootstrapServers": KAFKA_BOOTSTRAP_SERVERS,
+                        "consumerGroup": consumer_group,
+                        "topic": topic,
+                        "lagThreshold": "1000",
+                    },
+                }
+                for topic, consumer_group in triggers
+            ],
         },
     }
 

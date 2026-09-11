@@ -39,7 +39,54 @@
 
 Минимальный go-live gate: чистый кластер разворачивается автоматически, все поды Ready, self-service реально меняет data plane, отзыв пользователя/ключа действует за измеримый SLA, релиз откатывается, backup восстанавливается, целевой TPS и failure modes подтверждены на production-подобном стенде.
 
-**Статус**: зафиксировано как backlog 2026-09-10, реализация не начата — ждёт отдельного планового захода (масштаб и домен — инфра/K8s/security, не backoffice-экраны, которыми занят остальной этот файл).
+**Статус на 2026-09-11**: реализация начата. Первый инфраструктурный срез ниже уже сделан и проверен локально, но общий вердикт остаётся **no-go**: это исправляет сборку deployment-каталога, scheduling, часть сетевой связности, KEDA и немедленный отзыв прав сотрудника, но не закрывает secrets/identity, динамическое применение self-service конфигурации, release pipeline, DR и production-like E2E.
+
+### Журнал работ по production readiness — 2026-09-10/11
+
+#### Что уже сделал другой агент и что было принято
+
+К моменту проверки в `main`/`origin/main` была принята серия `0530a81`/`cad31f2`/`0a2f721`/`10923e7`; последний commit смешал несколько параллельных направлений:
+
+- добавлен `chat-service`, миграция `support.chat_messages`, backoffice API/UI для чата и сгенерированные gRPC-клиенты; backoffice-часть собрана, но partner API/UI и сквозной E2E на момент проверки ещё не завершены;
+- добавлен `pdu-log-writer`, который читает `operator.pdu.log` и сохраняет PDU в ClickHouse; writer-тесты проходят, но backoffice query/UI находились в незавершённом working tree и не считаются принятыми;
+- `config-event-publisher` научен публиковать новые типы конфигурации, а policy-service — применять/архивировать placeholder-конфиг без panic;
+- IAM `CheckPermission` теперь проверяет `iam.staff_accounts.active`, поэтому деактивация сотрудника немедленно отзывает доступ даже для уже выданного JWT;
+- одновременно принят первый инфраструктурный пакет: полный каталог образов/сервисов, scheduling и базовые NetworkPolicy.
+
+В рабочем дереве также обнаружен параллельный незакоммиченный WIP другого агента: partner chat API/UI и PDU-log browse в backoffice. Эти файлы намеренно не менялись и ниже не отмечены как готовые, пока нет отдельной приёмки и E2E.
+
+#### Что сделано в инфраструктурном проходе
+
+1. **Каталог deployment и registry сведён в одну фактическую систему.** Генератор рендерит все 43 сервиса, для которых в репозитории есть runnable Dockerfile; Terraform registry содержит те же 43 имени. Добавлены отсутствовавшие self-service/admin/chat/PDU-компоненты и внутренние `ClusterIP Service` для HTTP/gRPC.
+2. **Поды теперь могут планироваться на созданные Terraform node pools.** В workload-шаблоны добавлены согласованные `nodeSelector` и `tolerations` для tainted пулов; отдельные тесты ловят drift каталога, registry и scheduling.
+3. **Исправлены service discovery endpoints.** Kafka использует реальный Strimzi bootstrap `mpp-kafka-kafka-bootstrap.mpp.svc:9092`, Prometheus — namespace `monitoring`.
+4. **NetworkPolicy стала двусторонней.** Для прямых вызовов генерируются и ingress callee, и egress caller; разрешены DNS, точные Strimzi broker labels, Prometheus scrape, Vault из namespace `mpp`, backoffice proxy и оба partner-portal proxy. Генератор создаёт 41 policy, а reachability-тесты проверяют разрешённые и запрещённые направления.
+5. **KEDA привязана к реальным consumer subscriptions.** У каждого масштабируемого сервиса теперь явный список `(topic, consumerGroup)`, включая multi-topic consumers; producer-only `billing-outbox-publisher` больше не получает фиктивный Kafka scaler. Тест сверяет mapping с рендером и списком реально provisioned topics.
+6. **Закрыт пропущенный Kafka topic.** В production profile добавлен `stage.delivery-reconciliation.dlq`, который уже читает `lifecycle-writer`, но который раньше не создавался при выключенном auto-create. Итого: 33 topic + Kafka CR.
+7. **Partner config подключён всем четырём фактическим потребителям.** Один ConfigMap и `PARTNER_CONFIG_PATH` теперь монтируются в `billing-service`, `partner-rest-receiver`, `partner-notification-service` и `partner-smpp-gateway`; регрессионный тест не позволит снова потерять потребителя.
+
+#### Чем проверено
+
+- K8s regression suite: **26 passed**;
+- строгий `kubeconform` для Kubernetes 1.34 и CRD-схем: **219/219 valid, 0 invalid, 0 errors, 0 skipped**;
+- Terraform: форматирование без diff, `terraform validate` — **Success**;
+- IAM: `go test ./...` и `go test -race ./...` — успешно;
+- `pdu-log-writer` и `config-event-publisher`: все Go-тесты — успешно;
+- policy-service: **82 passed**, в том числе config reload/archive и placeholders;
+- backoffice UI production build — успешно; Vitest router-suite периодически зависает/падает на cleanup (`global.removeEventListener`) и остаётся отдельной задачей стабилизации тестов.
+
+Это локальная верификация генераторов и компонентов. Реального apply на чистый кластер, ожидания всех Pod Ready и smoke/E2E через production-like зависимости ещё не было — go-live gate не пройден.
+
+#### Что всё ещё блокирует production (оставшийся P0)
+
+- **Secrets/config:** JWT signing/verification keys, webhook token и часть обязательных runtime-секретов ещё не provisioned end-to-end. Текущий `partner.valid.json` — пример, а не production source of truth; в нём нет ни одного `SMPP_BIND`, поэтому один только mount не делает partner SMPP готовым.
+- **Внешний egress при default-deny:** стандартная NetworkPolicy не умеет безопасно разрешать динамические FQDN managed PostgreSQL/Redis/ClickHouse, SMSC и webhook destinations. Нужна environment-specific генерация `ipBlock` после Terraform либо egress gateway/Cilium FQDN policy; широкое `0.0.0.0/0` намеренно не добавлялось.
+- **Self-service → data plane:** изменение application/sender/webhook всё ещё не доходит в live gateways/notification без механизма config watch/reload и измеримого propagation SLA.
+- **Identity:** нет полноценного OIDC/PKCE + MFA, issuer/audience contract и partner IAM/session revocation; ручной JWT в `localStorage` остаётся неприемлемым для production.
+- **Data-plane correctness:** остаются `AlwaysAdmit` в REST admission, отсутствие периодического SMPP heartbeat и неверная идентификация оператора в delivery reconciliation.
+- **Release/operations:** нет pipeline всех сервисов с immutable digest, scan/SBOM/signing, staging deploy, smoke/canary/rollback; не подтверждены alerts/SLO, backup-restore, RPO/RTO, load/failover/chaos.
+
+Следующий минимальный срез: сначала secrets + контролируемый external egress, затем один сквозной сценарий «создание application в partner portal → немедленный live REST/SMPP auth → pipeline → DLR/callback», после него identity и release pipeline.
 
 ---
 

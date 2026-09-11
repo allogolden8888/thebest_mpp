@@ -10,6 +10,7 @@ from pathlib import Path
 
 from generate_manifests import (
     KAFKA_BOOTSTRAP_SERVERS,
+    KEDA_KAFKA_TRIGGERS,
     KAFKA_NON_CONSUMER_CLIENTS,
     PROMETHEUS_URL,
     SERVICES,
@@ -20,6 +21,53 @@ from generate_manifests import (
 )
 
 ROOT = Path(__file__).parent.parent
+
+# Acceptance-set from the actual consumer construction in service entrypoints.
+# Deliberately independent from KEDA_KAFKA_TRIGGERS so a bad edit cannot make
+# both generator and expectation drift together.
+EXPECTED_KEDA_TRIGGERS = {
+    "pipeline-engine": {
+        ("incoming.messages", "pipeline-engine"),
+        ("stage.completed", "pipeline-engine"),
+        ("pipeline.retry.triggers", "pipeline-engine-retry-trigger"),
+    },
+    "destination-resolution-service": {("stage.destination-resolution", "destination-resolution-service")},
+    "policy-service": {("stage.policy", "policy-service")},
+    "billing-service": {("stage.billing", "billing-service")},
+    "routing-service": {("stage.routing", "routing-service")},
+    "delivery-service": {("stage.delivery", "delivery-service")},
+    "delivery-reconciliation-service": {
+        ("stage.delivery-reconciliation", "delivery-reconciliation-service"),
+        ("operator.submit.accepted", "delivery-reconciliation-service-submit-accepted"),
+        ("delivery.status", "delivery-reconciliation-service-delivery-status"),
+    },
+    "config-cache-projector": {("config.changes", "config-cache-projector")},
+    "consent-cache-projector": {("config.changes", "consent-cache-projector")},
+    "dlr-correlation-writer": {("operator.submit.accepted", "dlr-correlation-writer")},
+    "dlr-manager": {("operator.dlr", "dlr-manager"), ("operator.dlr.unresolved", "dlr-manager")},
+    "billing-ledger-writer": {("billing.ledger", "billing-ledger-writer")},
+    "lifecycle-writer": {
+        ("incoming.messages", "lifecycle-writer"),
+        ("message.lifecycle", "lifecycle-writer"),
+        ("stage.destination-resolution.dlq", "lifecycle-writer"),
+        ("stage.policy.dlq", "lifecycle-writer"),
+        ("stage.billing.dlq", "lifecycle-writer"),
+        ("stage.routing.dlq", "lifecycle-writer"),
+        ("stage.delivery.dlq", "lifecycle-writer"),
+        ("stage.delivery-reconciliation.dlq", "lifecycle-writer"),
+    },
+    "analytics-writer": {
+        ("incoming.messages", "analytics-writer"),
+        ("stage.completed", "analytics-writer"),
+        ("message.lifecycle", "analytics-writer"),
+    },
+    "pdu-log-writer": {("operator.pdu.log", "pdu-log-writer")},
+    "partner-notification-service": {
+        ("message.lifecycle", "partner-notification-service"),
+        ("notification.retry", "partner-notification-service"),
+    },
+    "template-management-service": {("config.changes", "template-management-service")},
+}
 
 
 def _service_names_from_registry() -> set[str]:
@@ -32,6 +80,11 @@ def _service_names_from_registry() -> set[str]:
 def _terraform_node_pools() -> set[str]:
     source = (ROOT / "infra" / "terraform" / "variables.tf").read_text()
     return set(re.findall(r"^\s*([a-z]+-pool)\s*=", source, re.MULTILINE))
+
+
+def _provisioned_kafka_topics() -> set[str]:
+    source = (ROOT / "infra" / "kafka" / "generate_kafka_topics.py").read_text()
+    return set(re.findall(r'Topic\("([a-z0-9.-]+)"', source))
 
 
 def _pod_spec(svc) -> dict:
@@ -130,6 +183,32 @@ def test_runtime_infrastructure_addresses_match_installed_resources():
             if doc["kind"] == "ScaledObject":
                 trigger = doc["spec"]["triggers"][0]
                 assert trigger["metadata"]["bootstrapServers"] == KAFKA_BOOTSTRAP_SERVERS
+
+
+def test_keda_uses_real_consumer_topics_and_groups():
+    actual_mapping = {
+        service: set(triggers)
+        for service, triggers in KEDA_KAFKA_TRIGGERS.items()
+    }
+    assert actual_mapping == EXPECTED_KEDA_TRIGGERS
+
+    expected_scaled_services = {
+        svc.name for svc in SERVICES
+        if svc.kafka_consumer and svc.workload_class == "stateless"
+    }
+    assert set(actual_mapping) == expected_scaled_services
+
+    provisioned_topics = _provisioned_kafka_topics()
+    for svc in SERVICES:
+        if svc.name not in EXPECTED_KEDA_TRIGGERS:
+            continue
+        scaled_object = next(doc for doc in render_service(svc) if doc["kind"] == "ScaledObject")
+        rendered = {
+            (trigger["metadata"]["topic"], trigger["metadata"]["consumerGroup"])
+            for trigger in scaled_object["spec"]["triggers"]
+        }
+        assert rendered == EXPECTED_KEDA_TRIGGERS[svc.name]
+        assert {topic for topic, _ in rendered} <= provisioned_topics
 
 
 def test_container_port_names_and_numbers_are_unique():

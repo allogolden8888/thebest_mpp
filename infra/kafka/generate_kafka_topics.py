@@ -127,6 +127,8 @@ TOPICS = [
     Topic("stage.billing.dlq", TopicCategory.DLQ, ["scheduler-background-lane"], 7 * 24 * HOUR),
     Topic("stage.routing.dlq", TopicCategory.DLQ, ["scheduler-background-lane"], 7 * 24 * HOUR),
     Topic("stage.delivery.dlq", TopicCategory.DLQ, ["scheduler-background-lane"], 7 * 24 * HOUR),
+    Topic("stage.delivery-reconciliation.dlq", TopicCategory.DLQ, ["lifecycle-writer"], 7 * 24 * HOUR,
+          note="lifecycle-writer подписан на этот DLQ; явное создание обязательно при disabled auto-create"),
     Topic("operator.dlr.dlq", TopicCategory.DLQ, ["dlr-manager"], 7 * 24 * HOUR),
     Topic("notification.archived", TopicCategory.DLQ, ["partner-notification-service"], 7 * 24 * HOUR,
           note="реальная находка нагрузочного теста: раньше единственным пределом ретрая была NotificationTTL "

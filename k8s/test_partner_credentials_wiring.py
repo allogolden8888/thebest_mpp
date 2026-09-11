@@ -18,6 +18,7 @@ from generate_manifests import (
     PARTNER_CONFIG_CONFIGMAP_NAME,
     PARTNER_CONFIG_FIXTURE,
     PARTNER_CONFIG_MOUNT_DIR,
+    PARTNER_CONFIG_SERVICES,
     credential_ref_to_env_var,
 )
 
@@ -82,6 +83,33 @@ def test_partner_notification_service_also_mounts_config_but_not_credentials():
     assert env.get("PARTNER_CONFIG_PATH") == f"{PARTNER_CONFIG_MOUNT_DIR}/{PARTNER_CONFIG_FIXTURE}"
     secret_refs = {ef["secretRef"]["name"] for ef in container.get("envFrom", [])}
     assert "partner-credentials" not in secret_refs
+
+
+def test_every_partner_config_consumer_mounts_the_same_config():
+    # Эти четыре сервиса вызывают загрузчик PARTNER_CONFIG_PATH при старте или
+    # используют его для runtime routing/auth. Пропуск любого из них означает
+    # либо crash-loop (billing), либо пустой/неработающий runtime-контур.
+    assert set(PARTNER_CONFIG_SERVICES) == {
+        "billing-service",
+        "partner-notification-service",
+        "partner-rest-receiver",
+        "partner-smpp-gateway",
+    }
+
+    for service in PARTNER_CONFIG_SERVICES:
+        docs = _load_docs(f"{service}.yaml")
+        workload = next(d for d in docs if d["kind"] in {"Deployment", "StatefulSet"})
+        pod_spec = workload["spec"]["template"]["spec"]
+        container = pod_spec["containers"][0]
+
+        volumes = {v["name"]: v for v in pod_spec.get("volumes", [])}
+        assert volumes["partner-config"]["configMap"]["name"] == PARTNER_CONFIG_CONFIGMAP_NAME
+
+        mounts = {m["name"]: m for m in container.get("volumeMounts", [])}
+        assert mounts["partner-config"]["mountPath"] == PARTNER_CONFIG_MOUNT_DIR
+
+        env = {e["name"]: e["value"] for e in container.get("env", [])}
+        assert env["PARTNER_CONFIG_PATH"] == f"{PARTNER_CONFIG_MOUNT_DIR}/{PARTNER_CONFIG_FIXTURE}"
 
 
 if __name__ == "__main__":
