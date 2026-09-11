@@ -242,3 +242,620 @@ jobs:
         run: terraform -chdir=infra/terraform init -backend=false
       - name: terraform validate
         run: terraform -chdir=infra/terraform validate
+
+  # --- Расширение CI-покрытия (BACKOFFICE_ROADMAP.md, P0 #7): ниже добавлены
+  # go build+test / cargo build+test / mvn test для всех сервисов services/*,
+  # у которых есть реальный код (go.mod / Cargo.toml / pom.xml) и которые ещё
+  # не были покрыты выше (protobuf/migrations/python-artifacts/k8s-manifests/
+  # kafka-topics/destination-resolution-service/policy-service/billing-service/
+  # routing-service/pipeline-engine/terraform). Каждый job — build+test ровно
+  # так же, как это делалось вручную в этой сессии; паттерн (checkout →
+  # setup языка → cd в директорию сервиса → build → test) идентичен уже
+  # существующим job'ам выше, без caching (существующие job'ы его тоже не
+  # используют). backoffice-ui и partner-portal-ui (Vue/vitest, только
+  # package.json) сюда сознательно не включены: в файле нет ни одного job'а
+  # для Node/npm, который можно было бы повторить один-в-один, а изобретать
+  # новый паттерн вместо копирования существующего — вне рамок этой правки;
+  # это отдельный, реальный пробел в CI-покрытии (см. BACKOFFICE_ROADMAP.md).
+
+  analytics-writer:
+    name: Analytics Writer (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/analytics-writer
+          go build ./...
+      - name: "go test ./... (17 тестов: core/health/kafkaio/store)"
+        run: |
+          cd services/analytics-writer
+          go test ./...
+
+  backoffice-api:
+    name: Backoffice API (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/backoffice-api
+          go build ./...
+      - name: "go test ./... (61 тест: auth/health/httpapi/kafkaio/store/telemetry)"
+        run: |
+          cd services/backoffice-api
+          go test ./...
+
+  billing-self-service-api:
+    name: Billing Self-Service API (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/billing-self-service-api
+          go build ./...
+      - name: "go test ./... (7 тестов: httpapi)"
+        run: |
+          cd services/billing-self-service-api
+          go test ./...
+
+  chat-service:
+    name: Chat Service (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/chat-service
+          go build ./...
+      - name: "go test ./... (9 тестов: grpcserver/store)"
+        run: |
+          cd services/chat-service
+          go test ./...
+
+  compliance-api:
+    name: Compliance API (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/compliance-api
+          go build ./...
+      - name: "go test ./... (10 тестов: httpapi)"
+        run: |
+          cd services/compliance-api
+          go test ./...
+
+  config-cache-projector:
+    name: Config Cache Projector (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/config-cache-projector
+          go build ./...
+      - name: "go test ./... (25 тестов: health/kafkaio/projector)"
+        run: |
+          cd services/config-cache-projector
+          go test ./...
+
+  config-event-publisher:
+    name: Config Event Publisher (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/config-event-publisher
+          go build ./...
+      - name: "go test ./... (23 теста: health/kafkaio/outbox)"
+        run: |
+          cd services/config-event-publisher
+          go test ./...
+
+  configuration-service:
+    name: Configuration Service (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/configuration-service
+          go build ./...
+      - name: "go test ./... (44 теста: grpcserver/health/store/validate)"
+        run: |
+          cd services/configuration-service
+          go test ./...
+
+  consent-cache-projector:
+    name: Consent Cache Projector (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/consent-cache-projector
+          go build ./...
+      - name: "go test ./... (23 теста: health/kafkaio/projector)"
+        run: |
+          cd services/consent-cache-projector
+          go test ./...
+
+  credential-issuer-service:
+    name: Credential Issuer Service (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/credential-issuer-service
+          go build ./...
+      - name: "go test ./... (25 тестов: grpcserver/store/vault)"
+        run: |
+          cd services/credential-issuer-service
+          go test ./...
+
+  dlr-correlation-writer:
+    name: DLR Correlation Writer (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/dlr-correlation-writer
+          go build ./...
+      - name: "go test ./... (28 тестов: kafkaio/writer)"
+        run: |
+          cd services/dlr-correlation-writer
+          go test ./...
+
+  dlr-manager:
+    name: DLR Manager (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/dlr-manager
+          go build ./...
+      - name: "go test ./... (42 теста: correlation/dlr/kafkaio/pending)"
+        run: |
+          cd services/dlr-manager
+          go test ./...
+
+  execution-control-service:
+    name: Execution Control Service (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/execution-control-service
+          go build ./...
+      - name: "go test ./... (38 тестов: grpcserver/health/hysteresis/kafkaio/registry/signals/store)"
+        run: |
+          cd services/execution-control-service
+          go test ./...
+
+  iam-service:
+    name: IAM Service (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/iam-service
+          go build ./...
+      - name: "go test ./... (34 теста: grpcserver/store)"
+        run: |
+          cd services/iam-service
+          go test ./...
+
+  incident-service:
+    name: Incident Service (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/incident-service
+          go build ./...
+      - name: "go test ./... (23 теста: grpcserver/store)"
+        run: |
+          cd services/incident-service
+          go test ./...
+
+  lifecycle-writer:
+    name: Lifecycle Writer (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/lifecycle-writer
+          go build ./...
+      - name: "go test ./... (30 тестов: core/health/kafkaio/store)"
+        run: |
+          cd services/lifecycle-writer
+          go test ./...
+
+  operator-http-gateway:
+    name: Operator HTTP Gateway (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/operator-http-gateway
+          go build ./...
+      - name: "go test ./... (64 теста: core/grpcserver/health/httpio/kafkaio/registry/webhook)"
+        run: |
+          cd services/operator-http-gateway
+          go test ./...
+
+  ops-visibility-service:
+    name: Ops Visibility Service (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/ops-visibility-service
+          go build ./...
+      - name: "go test ./... (40 тестов: health/httpapi/kafkalag/readyz/services/store)"
+        run: |
+          cd services/ops-visibility-service
+          go test ./...
+
+  partner-api:
+    name: Partner API (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/partner-api
+          go build ./...
+      - name: "go test ./... (auth/health/httpapi/ratelimit/store/telemetry; Postgres-тесты пропускаются, если БД недоступна)"
+        run: |
+          cd services/partner-api
+          go test ./...
+
+  partner-notification-service:
+    name: Partner Notification Service (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/partner-notification-service
+          go build ./...
+      - name: "go test ./... (27 тестов: config/notify/schedule)"
+        run: |
+          cd services/partner-notification-service
+          go test ./...
+
+  partner-self-service-api:
+    name: Partner Self-Service API (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/partner-self-service-api
+          go build ./...
+      - name: "go test ./... (19 тестов: httpapi)"
+        run: |
+          cd services/partner-self-service-api
+          go test ./...
+
+  pdu-log-writer:
+    name: PDU Log Writer (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/pdu-log-writer
+          go build ./...
+      - name: "go test ./... (10 тестов: core/health/kafkaio/store)"
+        run: |
+          cd services/pdu-log-writer
+          go test ./...
+
+  replay-service:
+    name: Replay Service (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/replay-service
+          go build ./...
+      - name: "go test ./... (45 тестов: controlsnapshot/core/grpcserver/health/kafkaio/store)"
+        run: |
+          cd services/replay-service
+          go test ./...
+
+  scheduler-critical-sweep:
+    name: Scheduler Critical Sweep (go build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: go build ./...
+        run: |
+          cd services/scheduler-critical-sweep
+          go build ./...
+      - name: "go test ./... (61 тест: controlsnapshot/health/kafkaio/redisio/sweep)"
+        run: |
+          cd services/scheduler-critical-sweep
+          go test ./...
+
+  partner-rest-receiver:
+    name: Partner REST Receiver (cargo build + test, real platform-contracts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc + librdkafka
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler librdkafka-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo build (compiles platform-contracts/common+events protos via build.rs)
+        run: |
+          cd services/partner-rest-receiver
+          cargo build
+      - name: "cargo test (119 тестов: segmentation/vault_auth/request/idempotency/msgctx)"
+        run: |
+          cd services/partner-rest-receiver
+          cargo test
+
+  template-management-service:
+    name: Template Management Service (cargo build + test, порт template_matching на Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc + librdkafka
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler librdkafka-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo build (compiles platform-contracts/common/*.proto via build.rs)
+        run: |
+          cd services/template-management-service
+          cargo build
+      - name: "cargo test (47 тестов: template_matching/preview/bulk)"
+        run: |
+          cd services/template-management-service
+          cargo test
+
+  billing-ledger-writer:
+    name: Billing Ledger Writer (mvn test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: "mvn test (17 тестов: kafkaio/store)"
+        run: |
+          cd services/billing-ledger-writer
+          mvn -B "-Dprotobuf.protocExecutable=$(which protoc)" test
+
+  billing-outbox-publisher:
+    name: Billing Outbox Publisher (mvn test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: "mvn test (13 тестов: redisio)"
+        run: |
+          cd services/billing-outbox-publisher
+          mvn -B "-Dprotobuf.protocExecutable=$(which protoc)" test
+
+  billing-reconciliation:
+    name: Billing Reconciliation (mvn test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: "mvn test (30 тестов: Main/store)"
+        run: |
+          cd services/billing-reconciliation
+          mvn -B "-Dprotobuf.protocExecutable=$(which protoc)" test
+
+  delivery-reconciliation-service:
+    name: Delivery Reconciliation Service (mvn test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: "mvn test (44 теста: kafkaio/grpcclient/store; Postgres-тесты в store пропускаются, если БД недоступна)"
+        run: |
+          cd services/delivery-reconciliation-service
+          mvn -B "-Dprotobuf.protocExecutable=$(which protoc)" test
+
+  delivery-service:
+    name: Delivery Service (mvn test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: "mvn test (83 теста: AdaptiveThreadPoolCalibrator/OffsetWatermarkTracker/...)"
+        run: |
+          cd services/delivery-service
+          mvn -B "-Dprotobuf.protocExecutable=$(which protoc)" test
+
+  message-state-resolver:
+    name: Message State Resolver (mvn test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: "mvn test (30 тестов: MessageStateStore/LifecycleStatusMapping/HealthServer/CandidateTransitionResolver/TransitionValidator)"
+        run: |
+          cd services/message-state-resolver
+          mvn -B "-Dprotobuf.protocExecutable=$(which protoc)" test
+
+  operator-smpp-session-manager:
+    name: Operator SMPP Session Manager (mvn test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: "mvn test (74 теста: codec/grpcserver/registry/client/session)"
+        run: |
+          cd services/operator-smpp-session-manager
+          mvn -B "-Dprotobuf.protocExecutable=$(which protoc)" test
+
+  partner-smpp-gateway:
+    name: Partner SMPP Gateway (mvn test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: "mvn test (71 тест: server/registry/vault/session)"
+        run: |
+          cd services/partner-smpp-gateway
+          mvn -B "-Dprotobuf.protocExecutable=$(which protoc)" test
+
+  scheduler-background-lane:
+    name: Scheduler Background Lane (mvn test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: "mvn test (12 тестов: topology/core)"
+        run: |
+          cd services/scheduler-background-lane
+          mvn -B "-Dprotobuf.protocExecutable=$(which protoc)" test
+
+  scheduler-standard-lane:
+    name: Scheduler Standard Lane (mvn test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: "mvn test (40 тестов: topology/core)"
+        run: |
+          cd services/scheduler-standard-lane
+          mvn -B "-Dprotobuf.protocExecutable=$(which protoc)" test
