@@ -2,6 +2,7 @@
 //! сервисов этого среза (см. destination-resolution-service/src/health.rs).
 //! Бизнес-REST API (`/v1/messages`) слушает отдельный порт — см. `http.rs`/`main.rs`.
 
+use crate::admission::ControlSnapshot;
 use axum::{Router, routing::get};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,20 +28,24 @@ impl Default for HealthState {
     }
 }
 
-pub fn router(state: Arc<HealthState>) -> Router {
+pub fn router(state: Arc<HealthState>, control_snapshot: Arc<ControlSnapshot>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route(
             "/readyz",
             get({
                 let state = state.clone();
+                let control_snapshot = control_snapshot.clone();
                 move || {
                     let state = state.clone();
+                    let control_snapshot = control_snapshot.clone();
                     async move {
                         if !state.ready.load(Ordering::Relaxed) {
                             (axum::http::StatusCode::SERVICE_UNAVAILABLE, "partner snapshot not loaded")
                         } else if !state.vault_healthy.load(Ordering::Relaxed) {
                             (axum::http::StatusCode::SERVICE_UNAVAILABLE, "vault unreachable")
+                        } else if !control_snapshot.is_ready() {
+                            (axum::http::StatusCode::SERVICE_UNAVAILABLE, "execution control snapshot not ready")
                         } else {
                             (axum::http::StatusCode::OK, "ready")
                         }
@@ -63,10 +68,14 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
+    fn ready_control_snapshot() -> Arc<ControlSnapshot> {
+        ControlSnapshot::ready_for_test()
+    }
+
     #[tokio::test]
     async fn healthz_always_ok() {
         let state = Arc::new(HealthState::default());
-        let app = router(state);
+        let app = router(state, Arc::new(ControlSnapshot::default()));
         let response = app.oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }
@@ -74,12 +83,12 @@ mod tests {
     #[tokio::test]
     async fn readyz_503_until_loaded() {
         let state = Arc::new(HealthState::default());
-        let app = router(state.clone());
+        let app = router(state.clone(), ready_control_snapshot());
         let response = app.oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
         state.ready.store(true, Ordering::Relaxed);
-        let app = router(state);
+        let app = router(state, ready_control_snapshot());
         let response = app.oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }
@@ -91,7 +100,7 @@ mod tests {
         // зависимости, которая не задействована в этом режиме.
         let state = Arc::new(HealthState::default());
         state.ready.store(true, Ordering::Relaxed);
-        let app = router(state);
+        let app = router(state, ready_control_snapshot());
         let response = app.oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }
@@ -101,12 +110,12 @@ mod tests {
         let state = Arc::new(HealthState::default());
         state.ready.store(true, Ordering::Relaxed);
         state.vault_healthy.store(false, Ordering::Relaxed);
-        let app = router(state.clone());
+        let app = router(state.clone(), ready_control_snapshot());
         let response = app.oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
         state.vault_healthy.store(true, Ordering::Relaxed);
-        let app = router(state);
+        let app = router(state, ready_control_snapshot());
         let response = app.oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }

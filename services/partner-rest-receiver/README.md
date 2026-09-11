@@ -2,7 +2,7 @@
 
 **Основание:** `development_plan.md` Фаза 2.1, шестой сервис "ходового скелета" (Главный агент) — единственная точка входа сообщений в систему для REST-партнёров (`hld.md` §2, `services_specifictaion.md` §2.1). Первый сервис в этой серии, публикующий `incoming.messages` (не потребляющий `stage.*`), и первый с настоящим внешним HTTP API поверх бизнес-логики (не только `/healthz`).
 
-**Статус:** реально компилируется и тестируется — `cargo build && cargo test`, **102/102 тестов проходят** (было 80 — +22 по итогам `VaultAuthVerifier` ниже, число тестов и до этого росло по мере находок кодревью и локального docker-compose прогона, см. разделы ниже), компилирует настоящие `platform-contracts/{common,events}/*.proto` (тот же паттерн двух package с cross-package ссылками, что у `pipeline-engine`).
+**Статус:** реально компилируется и тестируется — `cargo build && cargo test`, **119/119 тестов проходят**, компилирует настоящие `platform-contracts/{common,events}/*.proto` (тот же паттерн двух package с cross-package ссылками, что у `pipeline-engine`).
 
 **Исправлено (найдено при реализации `dlr-manager`, полный разбор — его README, "Реальная находка (систематическая...)"):** `main.rs` раньше читал единственную `REDIS_RUNTIME_URL`, которую k8s никогда не установит — реальный секрет инжектится дискретными `REDIS_RUNTIME_HOST`/`PORT`/`PASSWORD` (`envFrom: secretRef`). `redis_url::build_redis_runtime_url()` теперь собирает connection string из них, `REDIS_RUNTIME_URL` оставлена как явный override для локальной разработки/тестов. 3 новых теста.
 
@@ -12,6 +12,30 @@ cd services/partner-rest-receiver
 cargo build
 cargo test
 ```
+
+## P0: production admission из `execution.control` (2026-09-11)
+
+Production main больше не использует `AlwaysAdmit`. Каждая реплика независимо
+читает **все** партиции compacted-топика `execution.control` с начала и строит
+локальный потокобезопасный snapshot. До полного initial replay и появления
+GLOBAL sentinel `/readyz` остаётся 503, а ingress отклоняет запросы — свежий
+под не может открыть трафик на пустом/недочитанном состоянии. После bootstrap
+при потере Kafka действует fail-static: последнее подтверждённое состояние
+сохраняется, consumer переподключается в фоне.
+
+На REST ingress применимы GLOBAL и PARTNER scopes: `PAUSED`/rate=0 отклоняют
+запрос с `Retry-After`, частичный `admission_rate` реально семплирует поток,
+effective rate — минимум GLOBAL и PARTNER. STAGE/PARTNER_STAGE/OPERATOR_ROUTE
+на этой точке ещё не известны и остаются ответственностью downstream consumers.
+Kafka key сверяется с protobuf scope/id; неизвестные enum, некорректный rate,
+битый payload и запись без key не могут тихо открыть трафик. Tombstone удаляет
+scope. Истёкший PARTNER override больше не блокирует поток; истёкший GLOBAL без
+свежего автоматического состояния переводит gate/readiness в fail-closed.
+
+`AlwaysAdmit` оставлен только под `#[cfg(test)]` для unit-тестов HTTP-порядка
+проверок и отсутствует в production binary path. Проверено полным `cargo test`:
+119 passed, включая startup/empty snapshot, GLOBAL/partner pause, tombstone,
+partial rate, malformed payload и expiry.
 
 ## Порты
 
@@ -41,7 +65,7 @@ Content-Type: application/json
 | `validate_request_schema` | `request.rs::validate_request_schema` | Чистая функция, JSON-парсинг + msisdn-валидация (E.164 без `+`, 9-15 цифр) |
 | `authenticate_partner` | `http.rs::authorize_and_admit` + `auth.rs::EnvAuthVerifier` | См. "Аутентификация" ниже |
 | `check_ip_and_application` | `ip_allowlist.rs` | Ручной IPv4 CIDR-парсер (`partner.schema.json` — только IPv4), + проверка `allowed_channels` |
-| `check_admission` | `admission.rs::AlwaysAdmit` | Fail-open заглушка — см. "Что НЕ реализовано" |
+| `check_admission` | `admission.rs::SnapshotAdmissionGate` + full compacted-topic snapshot | Fail-closed до bootstrap, fail-static после него; GLOBAL/PARTNER pause и rate применяются на ingress |
 | `check_rate_limit` | `rate_limit.rs::RateLimiter` | Локальный token bucket на `(partner_id, application_id)`, реальная логика (refill/capacity/независимые bucket'ы), не заглушка |
 | `sync_rate_limit_counters` | `redis_sync.rs` | Реальный `redis` крейт, таймер ~1с в `main.rs`, не интеграционно проверено (см. ниже) |
 | `generate_message_id`/`generate_trace_id` | `build_incoming.rs` | UUID v4 |
@@ -112,13 +136,13 @@ Content-Type: application/json
 * `rate_limit.rs` (7) — token bucket: исчерпание, рефилл со временем, независимость bucket'ов по паре, `drain_consumed` (для Redis-синхронизации), защита от переполнения capacity долгим простоем, + новое: `auth_attempt_buckets` независимость от message bucket, legitimate-трафик никогда не задевает auth-attempt bucket.
 * `build_incoming.rs` (4) — построение `IncomingMessage`, `message_ttl`, кодировка по телу.
 * `idempotency.rs` (5, 2 — **реально против локального Redis**) — encode/decode round-trip, scoping по паре, повторный claim с тем же ключом переиспользует ids, независимость разных ключей.
-* `redis_url.rs` (3), `admission.rs` (1), `health.rs` (4, +2 для Vault readiness — см. "Аутентификация"), `partner_config.rs` (3) — снапшот-загрузка на реальном `config_schemas/examples/partner.valid.json` (та же кросс-артефактная сверка, что у остальных сервисов).
+* `redis_url.rs` (3), `admission.rs` (8), `health.rs` (4, включая execution-control/Vault readiness), `partner_config.rs` (3) — снапшот-загрузка на реальном `config_schemas/examples/partner.valid.json` (та же кросс-артефактная сверка, что у остальных сервисов).
 * `vault_auth.rs` (20) — `credential_ref` парсинг (границы: несколько сегментов пути, отсутствие `vault://`, отсутствие `/`, пустой property после trailing slash), реальный round-trip чтения/кеша/TTL против `vault server -dev` (успешный read, cache-hit не зовёт сеть повторно, TTL истёк — зовёт снова, отсутствующий path/property — fail closed, недоступный Vault на холодном/протухшем кеше), Kubernetes-login flow против фейкового HTTP-сервера (кеширование токена, релогин после истечения, отсутствующий JWT-файл, отклонённый login).
 * `http.rs` (13) — `authorize_and_admit`: полный порядок проверок из `service_internal_methods.md` §1.1 (auth-attempt rate limit → auth → IP/канал → admission → rate limit), включая **неизвестный партнёр отклоняется тем же кодом ошибки, что неверный API-ключ** (`AuthFailed`, не отдельным "партнёр не найден") — не даёт внешнему атакующему через код ошибки определить, существует ли `partner_id`; + новое: brute-force против известной пары в итоге throttle'ится, легитимный трафик по своему tps никогда не видит `AuthRateLimited`.
 
 ## Что НЕ реализовано на этом шаге (честно, не спрятано)
 
-* **`check_admission` — `AlwaysAdmit`, пустой снапшот `execution.control`, fail-open по всем scope.** Тот же паттерн, что уже задокументирован в `routing-service/src/routing.rs` (`ControlState` для отсутствующих записей) — ни один сервис в этой сессии не реализует реальное потребление `execution.control` (Execution Control Service, владелец Субагент 1, сам ещё не публикует его для всех scope — см. `CODE_REVIEW.md`). Путь обработки `AdmissionDecision::Reject` (429/503 + `Retry-After`) уже построен и протестирован — включение реального consumer'а не потребует трогать `http.rs`.
+* **Live Kafka integration admission consumer ещё не прогонялся.** Unit-тесты доказывают decode/key/rate/scope/expiry и HTTP reject path, но нужен production-like тест initial replay → GLOBAL/PAUSED → 503/Retry-After → ACTIVE без рестарта.
 * **`sync_rate_limit_counters` — реальный `redis` API, ни разу не запущен против живого Runtime Redis.** Тот же класс оговорки, что у `RedisMessageContextStore` в policy-service. (`VaultAuthVerifier`, в отличие от этого пункта, реально протестирован против живого локального Vault — см. "Аутентификация" выше.)
 * **ОБНОВЛЕНО 2026-08-06:** `docker build` реально прогнан и провалидирован для этого сервиса (найдены и исправлены реальные баги по пути, где применимо — см. `development_plan.md` "Координация" п.5 и `infra/docker/README.md`). Формулировка ниже — из более раннего состояния сессии, оставлена для истории.
 * **`docker build` не выполнялся** — недоступен Docker daemon в этом окружении (см. `services/destination-resolution-service/README.md`).

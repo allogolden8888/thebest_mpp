@@ -16,7 +16,7 @@ mod request;
 mod segmentation;
 mod vault_auth;
 
-use admission::AlwaysAdmit;
+use admission::{ControlSnapshot, DEFAULT_RETRY_AFTER_SECONDS, SnapshotAdmissionGate};
 use auth::{AuthVerifier, EnvAuthVerifier};
 use health::HealthState;
 use partner_config::{Partner, PartnerSnapshot};
@@ -78,7 +78,8 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     let health_state = Arc::new(HealthState::default());
-    let health_router = health::router(health_state.clone());
+    let control_snapshot = Arc::new(ControlSnapshot::default());
+    let health_router = health::router(health_state.clone(), control_snapshot.clone());
     let health_listener = tokio::net::TcpListener::bind("0.0.0.0:9090")
         .await
         .expect("не удалось забиндить health-порт 9090");
@@ -99,6 +100,16 @@ async fn main() {
     let bootstrap_servers = std::env::var("KAFKA_BOOTSTRAP_SERVERS")
         .unwrap_or_else(|_| "kafka-bootstrap.mpp.svc:9092".to_string());
     let producer = kafka_io::build_producer(&bootstrap_servers);
+    let control_brokers = bootstrap_servers
+        .split(',')
+        .map(str::trim)
+        .filter(|broker| !broker.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    {
+        let snapshot = control_snapshot.clone();
+        tokio::spawn(async move { admission::run_control_consumer(control_brokers, snapshot).await });
+    }
 
     let redis_runtime_url = redis_url::build_redis_runtime_url();
     // Один `MultiplexedConnection` на весь процесс — клонируется (дёшево, тот
@@ -118,11 +129,16 @@ async fn main() {
     let rate_limiter = RateLimiter::default();
 
     let auth_verifier = build_auth_verifier(&health_state);
+    let admission_retry_after = std::env::var("ADMISSION_RETRY_AFTER_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_RETRY_AFTER_SECONDS);
 
     let state = Arc::new(http::AppState {
         partner_snapshot,
         auth_verifier,
-        admission_gate: Box::new(AlwaysAdmit),
+        admission_gate: Box::new(SnapshotAdmissionGate::new(control_snapshot, admission_retry_after)),
         rate_limiter,
         producer,
         redis_conn,

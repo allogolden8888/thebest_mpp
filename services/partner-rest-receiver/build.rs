@@ -25,6 +25,7 @@ fn main() {
             format!("{proto_root}/common/enums.proto"),
             format!("{proto_root}/common/types.proto"),
             format!("{proto_root}/events/message_events.proto"),
+            format!("{proto_root}/events/config_and_control.proto"),
         ],
         &includes,
     )
@@ -33,4 +34,5 @@ fn main() {
     println!("cargo:rerun-if-changed={proto_root}/common/enums.proto");
     println!("cargo:rerun-if-changed={proto_root}/common/types.proto");
     println!("cargo:rerun-if-changed={proto_root}/events/message_events.proto");
+    println!("cargo:rerun-if-changed={proto_root}/events/config_and_control.proto");
 }

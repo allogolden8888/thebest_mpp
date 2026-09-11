@@ -1,5 +1,5 @@
 //! Два protobuf package — mpp.common.v1 (`SmsPayload`, `Channel`, `PartnerContext`)
-//! и mpp.events.v1 (`IncomingMessage`) — та же находка компилятора, что уже
+//! и mpp.events.v1 (`IncomingMessage`, `ExecutionControlRecord`) — та же находка компилятора, что уже
 //! задокументирована в `services/pipeline-engine/src/proto.rs`: prost генерирует
 //! cross-package ссылки как `super::super::common::v1::X`, что требует точного
 //! совпадения структуры модулей с точками в имени package.
