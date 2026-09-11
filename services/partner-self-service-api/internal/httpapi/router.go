@@ -34,6 +34,11 @@ type Deps struct {
 	Validator        *auth.Validator
 	ConfigClient     grpcv1.ConfigServiceClient
 	CredentialClient grpcv1.CredentialIssuerServiceClient
+	// ChatClient — BACKOFFICE_DESIGN_SPEC.md Экран 27 "Chat" (chat.go),
+	// proxy в chat-service. Тот же класс зависимости, что CredentialClient
+	// выше — маленький выделенный control-plane сервис, не прямой доступ к
+	// support.chat_messages (см. services/chat-service/README.md).
+	ChatClient grpcv1.ChatServiceClient
 	// TemplatesServiceURL — базовый URL template-management-service (Ф4,
 	// без trailing slash), используется только handleListTemplates
 	// (templates.go) — см. doc-комментарий там за тем, почему это
@@ -62,6 +67,7 @@ func NewRouter(d Deps) *chi.Mux {
 		mountCredentials(r, d)
 		mountWebhook(r, d)
 		mountTemplates(r, d)
+		mountChat(r, d)
 	})
 
 	return r

@@ -5,6 +5,12 @@
 // зеркалит partner-api: RS256, обязательные aud/iss). IamService НЕ
 // используется — см. doc-комментарий в internal/auth/jwt.go за полным
 // обоснованием (нет RPC под iam.partner_portal_role_assignments).
+//
+// internal/httpapi/chat.go (BACKOFFICE_DESIGN_SPEC.md Экран 27 "Chat") —
+// тонкий gRPC-прокси в chat-service, тот же класс зависимости, что
+// ConfigService/CredentialIssuerService ниже — не прямое подключение к
+// Postgres (см. services/chat-service/README.md за разбором, почему
+// отдельный сервис).
 package main
 
 import (
@@ -119,6 +125,15 @@ func main() {
 	}
 	defer credentialConn.Close()
 
+	// chatConn — BACKOFFICE_DESIGN_SPEC.md Экран 27 "Chat"
+	// (internal/httpapi/chat.go), проксируется в chat-service — тот же
+	// класс зависимости, что configConn/credentialConn выше.
+	chatConn, err := dialGRPC(env("CHAT_SERVICE_ADDR", "chat-service.mpp.svc:9000"))
+	if err != nil {
+		log.Fatalf("не удалось подключиться к Chat Service: %v", err)
+	}
+	defer chatConn.Close()
+
 	tp := telemetry.NewProvider(sdktrace.NewBatchSpanProcessor(noopExporter{}))
 	defer func() { _ = telemetry.Shutdown(context.Background(), tp) }()
 
@@ -126,6 +141,7 @@ func main() {
 		Validator:           validator,
 		ConfigClient:        grpcv1.NewConfigServiceClient(configConn),
 		CredentialClient:    grpcv1.NewCredentialIssuerServiceClient(credentialConn),
+		ChatClient:          grpcv1.NewChatServiceClient(chatConn),
 		TemplatesServiceURL: env("TEMPLATE_MANAGEMENT_SERVICE_URL", "http://template-management-service.mpp.svc:8080"),
 		TracerProvider:      tp,
 	})
@@ -133,6 +149,7 @@ func main() {
 	healthState.SetDependencyChecks(map[string]func(context.Context) error{
 		"configuration-service":     grpcConnCheck(configConn),
 		"credential-issuer-service": grpcConnCheck(credentialConn),
+		"chat-service":              grpcConnCheck(chatConn),
 	})
 	healthState.SetReady(true)
 
