@@ -65,12 +65,14 @@
 6. **Закрыт пропущенный Kafka topic.** В production profile добавлен `stage.delivery-reconciliation.dlq`, который уже читает `lifecycle-writer`, но который раньше не создавался при выключенном auto-create. Итого: 33 topic + Kafka CR.
 7. **Partner config подключён всем четырём фактическим потребителям.** Один ConfigMap и `PARTNER_CONFIG_PATH` теперь монтируются в `billing-service`, `partner-rest-receiver`, `partner-notification-service` и `partner-smpp-gateway`; регрессионный тест не позволит снова потерять потребителя.
 8. **Обязательные startup-секреты доведены до pod env.** Terraform принимает PEM/token только через sensitive variables и записывает три раздельных Vault KV entry: backoffice RSA keypair, partner IdP verification key и operator webhook token. External Secrets создаёт соответствующие Kubernetes Secrets, а deployment-каталог подключает их ровно к `backoffice-api`, partner/self-service/compliance API и `operator-http-gateway`. Backoffice и partner IdP намеренно остаются разными trust domain.
+9. **Усилен infrastructure CI gate.** Workflow закрепляет версию kubeconform, генерирует production Kafka topology до KEDA-тестов, запускает весь K8s/ExternalSecret pytest-набор и валидирует Kubernetes + Strimzi/KEDA/Istio/ESO/PodMonitor/cert-manager по строгим CRD-схемам без `ignore-missing`/skip. Это закрывает silent pass манифеста неизвестного CI типу, но пока не заменяет отсутствующий build/sign/deploy pipeline всех образов.
 
 #### Чем проверено
 
 - K8s regression suite: **27 passed**;
 - External Secrets contract suite: **1 passed**;
 - строгий `kubeconform` для Kubernetes 1.34 и CRD-схем, включая ExternalSecret/ClusterSecretStore: **229/229 valid, 0 invalid, 0 errors, 0 skipped**;
+- полный набор workload + Kafka + Istio + ingress + observability CRD: **267/267 valid, 0 invalid, 0 errors, 0 skipped**;
 - Terraform: форматирование без diff, `terraform validate` — **Success**;
 - IAM: `go test ./...` и `go test -race ./...` — успешно;
 - `pdu-log-writer` и `config-event-publisher`: все Go-тесты — успешно;

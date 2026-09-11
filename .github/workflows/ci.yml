@@ -83,10 +83,10 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: pip install pyyaml
+        run: pip install pytest pyyaml
       - name: Install kubeconform
         run: |
-          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz | tar xz
           sudo mv kubeconform /usr/local/bin/
       - name: Generate manifests
         run: |
@@ -97,13 +97,25 @@ jobs:
         run: |
           cd infra/secrets
           python3 generate_external_secrets.py
-      - name: kubeconform (real Kubernetes 1.34 OpenAPI schemas; Strimzi/KEDA/Istio/ESO/PodMonitor/cert-manager CRDs skipped — no offline schema, see infra/README.md)
+      - name: Generate production Kafka topology (KEDA mapping test input)
         run: |
-          kubeconform -strict -kubernetes-version 1.34.0 -ignore-missing-schemas -summary k8s/rendered/*.yaml infra/istio/*.yaml infra/secrets/rendered/*.yaml infra/observability/*.yaml infra/ingress/*.yaml
-      - name: NetworkPolicy reachability tests
+          cd infra/kafka
+          python3 generate_kafka_topics.py --profile production
+      - name: kubeconform (strict Kubernetes 1.34 + published CRD schemas; no skipped resources)
+        run: |
+          kubeconform -strict -summary -kubernetes-version 1.34.0 \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            k8s/rendered/*.yaml infra/istio/*.yaml infra/secrets/rendered/*.yaml \
+            infra/observability/*.yaml infra/ingress/*.yaml infra/kafka/rendered/*.yaml
+      - name: Catalog, scheduling, KEDA, required secrets and NetworkPolicy regression tests
         run: |
           cd k8s
-          python3 test_network_policy_reachability.py
+          python3 -m pytest -q test_*.py
+      - name: ExternalSecret Vault contracts
+        run: |
+          cd infra/secrets
+          python3 -m pytest -q
 
   kafka-topics:
     name: Kafka-топики (partition/replication план + kubeconform)
@@ -117,16 +129,19 @@ jobs:
         run: pip install pyyaml
       - name: Install kubeconform
         run: |
-          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz | tar xz
           sudo mv kubeconform /usr/local/bin/
       - name: Generate Strimzi CRDs
         run: |
           cd infra/kafka
           python3 generate_kafka_topics.py
-      - name: kubeconform (структурная валидация; Strimzi CRD-схем нет в офлайн-каталоге — см. infra/README.md)
+      - name: kubeconform (strict Strimzi CRD schema)
         run: |
           cd infra/kafka
-          kubeconform -kubernetes-version 1.34.0 -ignore-missing-schemas -summary rendered/*.yaml
+          kubeconform -strict -summary -kubernetes-version 1.34.0 \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            rendered/*.yaml
 
   destination-resolution-service:
     name: Destination Resolution Service (cargo build + test, real platform-contracts)
