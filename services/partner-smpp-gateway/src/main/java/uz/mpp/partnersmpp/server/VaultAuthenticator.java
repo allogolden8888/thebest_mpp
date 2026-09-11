@@ -11,6 +11,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -57,7 +58,7 @@ public final class VaultAuthenticator implements PartnerAuthenticator {
 
     private static final Logger LOG = Logger.getLogger(VaultAuthenticator.class.getName());
 
-    private final Map<String, SmppBindCredential> bySystemId;
+    private final Supplier<Map<String, SmppBindCredential>> bySystemIdSupplier;
     private final VaultSecretReader vault;
     private final Duration cacheTtl;
     private final Clock clock;
@@ -66,13 +67,37 @@ public final class VaultAuthenticator implements PartnerAuthenticator {
     private record CachedSecret(String value, Instant fetchedAt) {
     }
 
+    /**
+     * Фиксированная карта — используется тестами и любым вызывающим кодом,
+     * которому не нужен hot-reload. Оборачивается в константный
+     * {@link Supplier}, так что поведение идентично тому, что было до
+     * появления {@link uz.mpp.partnersmpp.config.PartnerConfigStore}.
+     */
     public VaultAuthenticator(Map<String, SmppBindCredential> bySystemId, VaultSecretReader vault) {
-        this(bySystemId, vault, DEFAULT_CACHE_TTL, Clock.systemUTC());
+        this(() -> bySystemId, vault, DEFAULT_CACHE_TTL, Clock.systemUTC());
     }
 
     public VaultAuthenticator(Map<String, SmppBindCredential> bySystemId, VaultSecretReader vault,
                                Duration cacheTtl, Clock clock) {
-        this.bySystemId = bySystemId;
+        this(() -> bySystemId, vault, cacheTtl, clock);
+    }
+
+    /**
+     * Живая карта — {@code Main.java} передаёт сюда {@code
+     * PartnerConfigStore::currentCredentials}, так что каждый {@code
+     * authenticate} видит самую свежую версию, атомарно выставленную
+     * {@code config.changes}-консьюмером ({@link
+     * uz.mpp.partnersmpp.kafkaio.ConfigChangeConsumer}), без необходимости
+     * пересоздавать {@link VaultAuthenticator} на каждое изменение
+     * партнёрского конфига.
+     */
+    public VaultAuthenticator(Supplier<Map<String, SmppBindCredential>> bySystemIdSupplier, VaultSecretReader vault) {
+        this(bySystemIdSupplier, vault, DEFAULT_CACHE_TTL, Clock.systemUTC());
+    }
+
+    public VaultAuthenticator(Supplier<Map<String, SmppBindCredential>> bySystemIdSupplier, VaultSecretReader vault,
+                               Duration cacheTtl, Clock clock) {
+        this.bySystemIdSupplier = bySystemIdSupplier;
         this.vault = vault;
         this.cacheTtl = cacheTtl;
         this.clock = clock;
@@ -80,7 +105,7 @@ public final class VaultAuthenticator implements PartnerAuthenticator {
 
     @Override
     public AuthResult authenticate(String systemId, String password) {
-        SmppBindCredential cred = bySystemId.get(systemId);
+        SmppBindCredential cred = bySystemIdSupplier.get().get(systemId);
         if (cred == null) {
             // Неизвестный system_id — ни разу не обращаемся к Vault, нечего искать.
             return AuthResult.reject();

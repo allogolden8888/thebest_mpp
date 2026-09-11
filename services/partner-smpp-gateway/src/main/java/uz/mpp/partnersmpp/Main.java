@@ -2,9 +2,11 @@ package uz.mpp.partnersmpp;
 
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
-import uz.mpp.partnersmpp.config.PartnerConfigLoader;
+import uz.mpp.partnersmpp.config.PartnerConfigStore;
+import uz.mpp.partnersmpp.config.RedisUrl;
 import uz.mpp.partnersmpp.grpcserver.DeliverSmServer;
 import uz.mpp.partnersmpp.health.HealthServer;
+import uz.mpp.partnersmpp.kafkaio.ConfigChangeConsumer;
 import uz.mpp.partnersmpp.kafkaio.IncomingPublisher;
 import uz.mpp.partnersmpp.registry.SessionRedisRegistry;
 import uz.mpp.partnersmpp.server.ChannelRegistry;
@@ -36,8 +38,12 @@ public final class Main {
         String kafkaBrokers = env("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap.mpp.svc:9092");
         IncomingPublisher publisher = new IncomingPublisher(kafkaBrokers);
 
-        String redisUri = "redis://" + env("REDIS_RUNTIME_HOST", "localhost") + ":" + env("REDIS_RUNTIME_PORT", "6379");
-        SessionRedisRegistry sessionRegistry = new SessionRedisRegistry(redisUri, env("HOSTNAME", "partner-smpp-gateway-0"), Duration.ofSeconds(30));
+        // RedisUrl.buildRuntimeUrl() — не голая "redis://host:port" конкатенация
+        // (см. её javadoc "найдено при реальном live-прогоне" за полным
+        // разбором: без пароля SessionRedisRegistry не смог бы подключиться
+        // к redis-runtime с requirepass, тем же классом находки, что несколько
+        // других сервисов этого репозитория уже поймали и исправили).
+        SessionRedisRegistry sessionRegistry = new SessionRedisRegistry(RedisUrl.buildRuntimeUrl(), env("HOSTNAME", "partner-smpp-gateway-0"), Duration.ofSeconds(30));
 
         // AUTH_VERIFIER_MODE=vault (по умолчанию) — реальный партнёрский
         // конфиг + реальный Vault (VaultAuthenticator, см. README "Vault-
@@ -48,7 +54,15 @@ public final class Main {
         String authVerifierMode = env("AUTH_VERIFIER_MODE", "vault");
         PartnerAuthenticator authenticator;
         VaultClient vaultClientForHealth = null;
-        Map<String, PartnerConfigLoader.SmppBindCredential> smppCredentialsForHealth = null;
+        PartnerConfigStore partnerConfigStoreForHealth = null;
+        ConfigChangeConsumer configChangeConsumer = null;
+
+        // ChannelRegistry конструируется здесь (не в PartnerSmppServer'е,
+        // как раньше) — configChangeConsumer ниже должен видеть тот же
+        // экземпляр, что и SmppServerHandler, чтобы принудительное
+        // разъединение архивированных партнёров (см. блок ниже) реально
+        // закрывало живые каналы, а не какой-то отдельный registry.
+        ChannelRegistry channelRegistry = new ChannelRegistry();
 
         if ("env".equals(authVerifierMode)) {
             authenticator = new StaticAuthenticator(Map.of(
@@ -60,20 +74,96 @@ public final class Main {
                 )
             ));
         } else {
-            Path partnerConfigPath = Path.of(env("PARTNER_CONFIG_PATH", "../../config_schemas/examples/partner.valid.json"));
-            Map<String, PartnerConfigLoader.SmppBindCredential> smppCredentials = PartnerConfigLoader.fromFile(partnerConfigPath);
-            if (smppCredentials.isEmpty()) {
-                System.err.println("Partner SMPP Gateway: " + partnerConfigPath
-                    + " не содержит ни одного auth.type=SMPP_BIND приложения — ни один bind не пройдёт аутентификацию, пока конфиг не обновится");
+            // Production Readiness Review P0#4: раньше PartnerConfigLoader.fromFile
+            // (PARTNER_CONFIG_PATH) читался ОДИН РАЗ при старте — новый/изменённый
+            // партнёрский SMPP-бинд (partner-self-service-api -> Configuration
+            // Service -> config.changes) никогда не подхватывался без ручного
+            // рестарта. PartnerConfigStore заменяет это: (a) реальный bootstrap
+            // из Configuration Redis (тот же источник, что config-cache-projector
+            // уже проецирует, см. её README), (b) живой config.changes консьюмер
+            // ниже, который на entity_type=PARTNER атомарно подменяет карту —
+            // VaultAuthenticator получает Supplier, не статичный Map, так что
+            // видит каждое обновление без пересоздания.
+            PartnerConfigStore partnerConfigStore = new PartnerConfigStore(RedisUrl.buildConfigurationUrl());
+            partnerConfigStore.bootstrap();
+            if (partnerConfigStore.currentCredentials().isEmpty()) {
+                System.err.println("Partner SMPP Gateway: Configuration Redis не содержит ни одного auth.type=SMPP_BIND "
+                    + "приложения — ни один bind не пройдёт аутентификацию, пока не придёт первое config.changes событие");
             }
 
             VaultClient vaultClient = buildVaultClient();
-            authenticator = new VaultAuthenticator(smppCredentials, vaultClient);
+            authenticator = new VaultAuthenticator(partnerConfigStore::currentCredentials, vaultClient);
             vaultClientForHealth = vaultClient;
-            smppCredentialsForHealth = smppCredentials;
+            partnerConfigStoreForHealth = partnerConfigStore;
+
+            // Судьба уже держащейся TCP-сессии на config.changes — три
+            // сценария, требуемых Production Readiness Review P0#4, каждый
+            // разобран отдельно (ни один из них не был решён предыдущим
+            // проходом — PartnerConfigStore.refreshPartner документирует,
+            // что решение "забота вызывающего кода", но сам вызывающий код
+            // (здесь) этот вызов раньше не делал):
+            //
+            // 1. Партнёр РОТИРУЕТ credential (self-service, status остаётся
+            //    "active") при уже держащейся сессии — сессия НЕ рвётся
+            //    принудительно. authenticate() и раньше вызывался только на
+            //    bind (см. SmppServerHandler::handleBind), не на каждый PDU
+            //    — уже держащийся бинд был легитимно аутентифицирован
+            //    валидным на тот момент credential'ом, и разрыв TCP ничего
+            //    не даёт с точки зрения безопасности (сокет уже открыт
+            //    легитимно), только создаёт ненужный даунтайм для рутинной
+            //    самообслуживаемой смены пароля. Тот же дух, что
+            //    VaultAuthenticator уже применяет к своему TTL-кешу секрета
+            //    (ротация должна стать эффективной за разумное время БЕЗ
+            //    прерывания уже легитимно установленных соединений) —
+            //    новый пароль подхватится на следующий bind (переподключение
+            //    партнёра, обычно уже сегодня периодическое по инициативе
+            //    самого партнёра, либо после ReadTimeoutHandler).
+            // 2. Партнёр АРХИВИРУЕТСЯ/удаляется — этот случай качественно
+            //    другой: архивация — явное решение оператора (или самого
+            //    партнёра) прекратить доступ, не рутинная гигиена
+            //    credential'а. Продолжать принимать submit_sm от уже
+            //    держащейся сессии архивированного партнёра неограниченно
+            //    долго (партнёр может держать сессию открытой годами через
+            //    enquire_link, ReadTimeoutHandler здесь не поможет) —
+            //    реальный риск (биллинг/комплаенс/абьюз) для нулевой пользы.
+            //    Поэтому здесь, в отличие от (1), сессия ЗАКРЫВАЕТСЯ
+            //    принудительно сразу после события — см. лямбду ниже,
+            //    ChannelRegistry.sessionsForPartner. Закрытие канала
+            //    проходит через тот же channelInactive -> deregister путь,
+            //    что обычный unbind (SmppServerHandler), так что
+            //    Runtime Redis (SessionRedisRegistry) корректно освобождается
+            //    тем же unbindListener, без дублирования логики очистки
+            //    здесь. StatefulSet: каждый под видит КАЖДОЕ событие (см.
+            //    ConfigChangeConsumer javadoc) и закрывает ТОЛЬКО те каналы,
+            //    что реально держит сам (TCP-сокет пришпилен к одному поду) —
+            //    межподовая координация не нужна.
+            // 3. Новое auth.type=SMPP_BIND приложение добавлено существующему
+            //    активному партнёру — событие приходит с тем же
+            //    entity_id=partner_id, status="active", refreshPartner делает
+            //    полный re-fetch партнёра из Redis (не только изменившийся
+            //    system_id) — новое приложение появляется в живой карте сразу,
+            //    бинд-способно без рестарта. Ничего дополнительно строить не
+            //    нужно — уже покрыто существующим "весь партнёр целиком"
+            //    re-fetch'ем в PartnerConfigStore.
+            ChannelRegistry channelRegistryForConfigChanges = channelRegistry;
+            configChangeConsumer = new ConfigChangeConsumer(
+                kafkaBrokers,
+                // Уникальная группа на каждый запуск ЭТОГО пода — см.
+                // ConfigChangeConsumer javadoc "Каждый под — свой независимый
+                // consumer group" за полным обоснованием (StatefulSet с
+                // несколькими репликами, каждая должна видеть КАЖДОЕ событие,
+                // не получать свою партицию общей группы).
+                "partner-smpp-gateway-config-changes-" + env("HOSTNAME", "partner-smpp-gateway-0") + "-" + System.nanoTime(),
+                (partnerId, status) -> {
+                    partnerConfigStore.refreshPartner(partnerId, status);
+                    if (!"active".equals(status)) {
+                        forceDisconnectPartner(channelRegistryForConfigChanges, partnerId, status);
+                    }
+                }
+            );
+            configChangeConsumer.start();
         }
 
-        ChannelRegistry channelRegistry = new ChannelRegistry();
         String endpoint = env("HOSTNAME", "partner-smpp-gateway-0") + ":" + env("SMPP_PORT", "2775");
         PartnerSmppServer smppServer = new PartnerSmppServer(
             authenticator,
@@ -95,15 +185,20 @@ public final class Main {
 
         if (vaultClientForHealth != null) {
             VaultClient vaultForCheck = vaultClientForHealth;
-            Map<String, PartnerConfigLoader.SmppBindCredential> credsForCheck = smppCredentialsForHealth;
+            // Живая проверка (PartnerConfigStore::currentCredentials), не
+            // замороженный на старте снапшот — раньше /readyz "partner_config"
+            // навсегда оставался бы красным для пода, который стартовал до
+            // публикации первого партнёра, даже после того, как config.changes
+            // догнал бы состояние; теперь отражает текущую живую карту.
+            PartnerConfigStore storeForCheck = partnerConfigStoreForHealth;
             Map<String, java.util.concurrent.Callable<Void>> checks = new HashMap<>();
             checks.put("vault", () -> {
                 vaultForCheck.ping();
                 return null;
             });
             checks.put("partner_config", () -> {
-                if (credsForCheck.isEmpty()) {
-                    throw new IllegalStateException("ни одного auth.type=SMPP_BIND приложения не загружено из PARTNER_CONFIG_PATH");
+                if (storeForCheck.currentCredentials().isEmpty()) {
+                    throw new IllegalStateException("ни одного auth.type=SMPP_BIND приложения не загружено из Configuration Redis");
                 }
                 return null;
             });
@@ -112,11 +207,19 @@ public final class Main {
 
         health.setReady(true);
 
+        ConfigChangeConsumer configChangeConsumerForShutdown = configChangeConsumer;
+        PartnerConfigStore partnerConfigStoreForShutdown = partnerConfigStoreForHealth;
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             grpcServer.shutdown();
             smppServer.stop();
             sessionRegistry.close();
             publisher.close();
+            if (configChangeConsumerForShutdown != null) {
+                configChangeConsumerForShutdown.close();
+            }
+            if (partnerConfigStoreForShutdown != null) {
+                partnerConfigStoreForShutdown.close();
+            }
             health.stop();
         }));
 
@@ -126,6 +229,30 @@ public final class Main {
     private static String env(String key, String fallback) {
         String v = System.getenv(key);
         return (v == null || v.isEmpty()) ? fallback : v;
+    }
+
+    /**
+     * Партнёр стал неактивным ({@code status != "active"}, обычно
+     * {@code "archived"}) — принудительно закрывает КАЖДУЮ живую SMPP-сессию
+     * этого партнёра, которую держит ЭТОТ под (см. развёрнутое обоснование
+     * в вызывающем коде выше, "1./2./3."). {@code Channel.close()} на Netty
+     * канале асинхронно триггерит стандартный
+     * {@code SmppServerHandler::channelInactive} -> {@code deregister} ->
+     * {@code unbindListener} путь — тот же путь, что обычный клиентский
+     * {@code UNBIND}, так что {@code ChannelRegistry}/Runtime Redis
+     * ({@code SessionRedisRegistry}) корректно освобождаются без
+     * дублирования той логики здесь.
+     */
+    private static void forceDisconnectPartner(ChannelRegistry channelRegistry, String partnerId, String status) {
+        var sessions = channelRegistry.sessionsForPartner(partnerId);
+        if (sessions.isEmpty()) {
+            return;
+        }
+        System.out.println("Partner SMPP Gateway: partner_id=" + partnerId + " status=" + status
+            + " — принудительно закрываем " + sessions.size() + " живую SMPP-сессию(и) на этом поде (config.changes)");
+        for (ChannelRegistry.PartnerSession s : sessions) {
+            s.session().channel().close();
+        }
     }
 
     /**
