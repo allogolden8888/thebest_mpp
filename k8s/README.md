@@ -60,6 +60,40 @@ kubeconform -strict -kubernetes-version 1.34.0 -ignore-missing-schemas -summary 
 
 **Обновление:** механизм mTLS выбран и подключён — Istio (`infra/terraform/istio.tf`, `infra/istio/peer-authentication-strict.yaml`: `PeerAuthentication` STRICT + `DestinationRule` `ISTIO_MUTUAL` для `*.mpp.svc.cluster.local`), namespace `mpp` помечен `istio-injection: enabled` здесь же в генераторе (`main()`, `00-namespace.yaml`). Сервисы не реализуют TLS в собственном коде — Envoy sidecar каждого пода прозрачно поднимает mTLS между собой, приложение общается со своим sidecar по localhost plaintext. Кодревью (PART 2) отметило `partner-notification-service`'s `insecure.NewCredentials()` в gRPC-клиенте как HIGH ("нет mTLS") — расследовано и признано false positive именно по этой причине, см. `services/partner-notification-service/README.md`.
 
+## Внешний egress при default-deny — managed PostgreSQL/Redis/ClickHouse (частично закрыто)
+
+`network_policies.py` теперь также генерирует egress к managed-зависимостям вне mesh (Yandex Managed PostgreSQL/Redis x3/ClickHouse) плюс Istio `ServiceEntry` для тех же хостов (`service_entries.py`) и две честные промежуточные меры для случаев, где статический хост заранее не известен (см. ниже). Источник FQDN/IP — `k8s/external_hosts.py`:
+
+```bash
+python3 k8s/generate_manifests.py
+python3 k8s/network_policies.py
+python3 k8s/service_entries.py
+python3 -m pytest -q k8s/test_*.py
+kubeconform -strict -kubernetes-version 1.34.0 -ignore-missing-schemas -summary k8s/rendered/*.yaml
+```
+
+`-ignore-missing-schemas` above reports all 5 `ServiceEntry` as **skipped**, same honest reason as the 17 `ScaledObject` (KEDA): plain `kubeconform` has no offline schema for third-party CRDs (`networking.istio.io/v1`). Strict validation with **0 skipped** needs the CRD-schema-location flag already used by `.github/workflows/ci.yml`, verified locally:
+
+```bash
+kubeconform -strict -summary -kubernetes-version 1.34.0 \
+  -schema-location default \
+  -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+  k8s/rendered/*.yaml infra/istio/*.yaml infra/secrets/rendered/*.yaml \
+  infra/observability/*.yaml infra/ingress/*.yaml infra/kafka/rendered/*.yaml
+# Summary: 280 resources found in 52 files - Valid: 280, Invalid: 0, Errors: 0, Skipped: 0
+```
+
+* **PostgreSQL/Redis (runtime/configuration/billing)/ClickHouse** — `ipBlock` egress + `ServiceEntry` per категория, `podSelector` — точный список сервисов, у которых эта категория реально указана в `SECRET_DEPENDENCIES` (`generate_manifests.py`). IP берутся из `k8s/external_hosts.py`, а не угадываются по CIDR — Yandex генерирует эти FQDN/IP только после `terraform apply` (провайдер не даёт `ip_address` статически, только `fqdn` — см. комментарий в `external_hosts.py`), поэтому статический CIDR в коде был бы либо неверным, либо шире необходимого.
+  * **Источник истины по приоритету:** `k8s/external-hosts.json` (реальный, per-environment, в `.gitignore`, НЕ коммитится) > `k8s/external-hosts.example.json` (committed placeholder-фикстура — RFC 5737 TEST-NET IP / `.example` FQDN, тот же приём, что `EXTERNAL_DOMAIN = "mpp.example"` в `generate_manifests.py`). **Открытый пробел, зафиксированный честно:** `infra/terraform/export_external_hosts.sh`, на который ссылается комментарий в `external_hosts.py` как на производителя реального `external-hosts.json` после `terraform apply`, **ещё не написан**. Пока его нет, `load_external_hosts()` всегда падает на fixture-путь — в том числе в проде — и производственный прогон этого шага **предупреждает в stderr, но не блокирует генерацию** (см. вывод `WARNING: ... external-hosts.json не найден`). Это нужно закрыть до реального деплоя, иначе NetworkPolicy/ServiceEntry будут указывать на несуществующие RFC 5737 адреса.
+* **ServiceEntry, не замена NetworkPolicy.** Istio sidecar не подменяет src/dst IP для plain-TCP destinations вроде PostgreSQL/Redis/ClickHouse — `ipBlock` в NetworkPolicy остаётся фактической точкой принуждения, `ServiceEntry` (`location: MESH_EXTERNAL`) даёт mesh-уровню знание об этих хостах для DestinationRule/телеметрии/будущего `Sidecar` c `outboundTrafficPolicy: REGISTRY_ONLY` (сознательно не включён в этот шаг — влияет на egress всех подов namespace разом, нельзя безопасно проверить без живого кластера на все 32+ сервиса).
+
+**Честно НЕ закрыто этим шагом — два принципиально динамических случая, где статический `ipBlock`/`ServiceEntry` физически невозможен на этапе генерации манифестов:**
+
+1. **SMSC-эндпоинты операторов** (`operator-smpp-session-manager`) — host/port конкретного оператора нигде не смоделирован в конфиге сегодня (`config_schemas/operator.schema.json`'s `smpp_profile` несёт только протокольные параметры, не адрес; `OPERATOR_SMSC_HOST/PORT` — dev-only env с дефолтом `localhost`, генератор их не устанавливает) и в любом случае меняется в runtime через `route_table`/`config.changes`, не на этапе `k8s/generate_manifests.py`. Промежуточная мера: egress разрешён на конвенциональные SMPP-порты 2775/2776 к публичному интернету (исклюая RFC1918/link-local/loopback), не на конкретный хост — это НЕ эквивалент egress-контроля per-operator, произвольный хост на этих портах пройдёт.
+2. **Partner webhook / operator HTTP callback URL** (`partner-notification-service.notification_callback_url`, `operator-http-gateway.http_profile.endpoint_url`) — произвольный HTTPS-адрес, зарегистрированный партнёром/оператором в runtime-конфиге, тоже не известен на этапе генерации манифестов. Промежуточная мера: egress разрешён только на порт 443 к публичному интернету (та же приватная-диапазон exclusion), не на конкретный хост.
+
+Обе меры — defense-in-depth поверх уже существующего app-level SSRF guard (`services/partner-notification-service/internal/notify/ssrf_guard.go`, `services/operator-http-gateway/internal/httpio/ssrf_guard.go`), не замена: они сужают L3/L4 (не пустить трафик на RFC1918/metadata-адреса даже если guard в коде обойдён), но НЕ ограничивают, к какому именно внешнему хосту на разрешённом порту можно обратиться. Полноценное закрытие обоих случаев требует egress-gateway с hostname allow-list, сверяемым с этими же конфигурационными значениями в runtime (не Kubernetes NetworkPolicy/Istio ServiceEntry, оба статичны на этапе генерации) — отдельная, не сделанная здесь задача (см. `BACKOFFICE_ROADMAP.md`, P1 "Внешний egress").
+
 ## Что осталось вне этого шага
 
 * Ingress-контроллер и TLS-терминация для внешних `LoadBalancer`/`ClusterIP` сервисов (Partner REST Receiver, Partner SMPP Gateway, Operator HTTP Gateway, Partner API, Backoffice API/UI) — сами Service-объекты сгенерированы, конкретный Ingress class/сертификаты — вне этого LLD.
