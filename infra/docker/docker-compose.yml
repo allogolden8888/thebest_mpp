@@ -908,6 +908,26 @@ services:
       postgres:
         condition: service_healthy
 
+  # chat-service — BACKOFFICE_DESIGN_SPEC.md Экран 27 "Chat"
+  # (migrations/V034__chat_messages.sql, support.chat_messages). Тот же
+  # small Go control-plane паттерн, что iam-service/incident-service выше
+  # (gRPC :9000, health :9090) — см. services/chat-service/README.md за
+  # разбором, почему отдельный сервис, а не прямой доступ к таблице из
+  # backoffice-api/partner-self-service-api.
+  chat-service:
+    image: mpp/chat-service:test
+    ports:
+      - "9121:9090"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: mpp
+      POSTGRES_USER: mpp
+      POSTGRES_PASSWORD: mpp_local_dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   ops-visibility-service:
     image: mpp/ops-visibility-service:test
     ports:
@@ -926,7 +946,7 @@ services:
       # суффикс настраиваемым (SERVICE_DNS_SUFFIX). Список ниже — то, что
       # реально поднято в этом стенде (см. `docker ps`) минус backoffice-ui/
       # partner-portal-ui (статичный nginx, нет /readyz).
-      SERVICES_OVERRIDE: "backoffice-api,billing-self-service-api,billing-service,compliance-api,config-event-publisher,configuration-service,credential-issuer-service,delivery-service,destination-resolution-service,iam-service,incident-service,lifecycle-writer,message-state-resolver,operator-smpp-session-manager,ops-visibility-service,partner-notification-service,partner-rest-receiver,partner-self-service-api,pipeline-engine,policy-service,routing-service,scheduler-background-lane,template-management-service"
+      SERVICES_OVERRIDE: "backoffice-api,billing-self-service-api,billing-service,chat-service,compliance-api,config-event-publisher,configuration-service,credential-issuer-service,delivery-service,destination-resolution-service,iam-service,incident-service,lifecycle-writer,message-state-resolver,operator-smpp-session-manager,ops-visibility-service,partner-notification-service,partner-rest-receiver,partner-self-service-api,pipeline-engine,policy-service,routing-service,scheduler-background-lane,template-management-service"
       # "none" — реальная находка: этот кодбейз повсеместно использует
       # env(key, fallback), которое не отличает "явно задано в пустую
       # строку" от "не задано вообще" — SERVICE_DNS_SUFFIX="" тихо
@@ -980,10 +1000,13 @@ services:
       CONFIGURATION_SERVICE_ADDR: configuration-service:9000
       CREDENTIAL_ISSUER_SERVICE_ADDR: credential-issuer-service:9000
       TEMPLATE_MANAGEMENT_SERVICE_URL: http://template-management-service:8080
+      CHAT_SERVICE_ADDR: chat-service:9000
     depends_on:
       configuration-service:
         condition: service_started
       credential-issuer-service:
+        condition: service_started
+      chat-service:
         condition: service_started
 
   billing-self-service-api:
@@ -1162,6 +1185,7 @@ services:
       CLICKHOUSE_USER: mpp
       CLICKHOUSE_PASSWORD: mpp_local_dev
       INCIDENT_SERVICE_ADDR: incident-service:9000
+      CHAT_SERVICE_ADDR: chat-service:9000
       OPS_VISIBILITY_SERVICE_ADDR: ops-visibility-service:9090
       COMPLIANCE_API_ADDR: compliance-api:8080
       COMPLIANCE_API_HEALTH_ADDR: compliance-api:9090
@@ -1179,6 +1203,8 @@ services:
         condition: service_started
       redis-runtime:
         condition: service_healthy
+      chat-service:
+        condition: service_started
 
   backoffice-ui:
     image: mpp/backoffice-ui:test
@@ -1241,6 +1267,30 @@ services:
       # отнимает общий CPU/IO у горячего пути — при этом сам двухсекундный
       # flush метрику НЕ искажает, occurred_at ставит продюсер.
       BATCH_SIZE: "10000"
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "9000"
+      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_USER: mpp
+      CLICKHOUSE_PASSWORD: mpp_local_dev
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  # --- Пер-PDU лог (BACKOFFICE_DESIGN_SPEC.md Экраны 38-40). Отдельный
+  # consumer от analytics-writer выше — тот же buffer/flush-паттерн
+  # (1:1 портирован, см. package doc в cmd/pdu-log-writer/main.go), но
+  # свой topic (operator.pdu.log, ~на порядок выше объём — по PDU, а не
+  # по сообщению) и своя таблица analytics.operator_pdu_log (общая база
+  # ClickHouse, EnsureSchema создаёт схему сам при старте — тот же приём,
+  # что analytics-writer).
+  pdu-log-writer:
+    image: mpp/pdu-log-writer:test
+    ports:
+      - "9122:9090"
+    environment:
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PORT: "9000"
       CLICKHOUSE_DB: analytics
