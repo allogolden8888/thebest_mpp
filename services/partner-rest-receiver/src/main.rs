@@ -1,6 +1,7 @@
 mod admission;
 mod auth;
 mod build_incoming;
+mod config_reload;
 mod health;
 mod http;
 mod idempotency;
@@ -79,23 +80,27 @@ async fn main() {
 
     let health_state = Arc::new(HealthState::default());
     let control_snapshot = Arc::new(ControlSnapshot::default());
-    let health_router = health::router(health_state.clone(), control_snapshot.clone());
+
+    // Файл — только bootstrap fallback. Snapshot не считается готовым и не
+    // отдаёт приложение в auth path до полного replay config.changes.
+    let partner_path = std::env::var("PARTNER_CONFIG_PATH")
+        .unwrap_or_else(|_| "../../config_schemas/examples/partner.valid.json".to_string());
+    let partner_json = std::fs::read_to_string(&partner_path)
+        .unwrap_or_else(|e| panic!("не удалось прочитать {partner_path}: {e}"));
+    let partner: Partner = serde_json::from_str(&partner_json).expect("partner.schema.json форма");
+    let partner_snapshot = PartnerSnapshot::bootstrap_from_partners(vec![partner]);
+
+    let health_router = health::router(
+        health_state.clone(),
+        control_snapshot.clone(),
+        partner_snapshot.clone(),
+    );
     let health_listener = tokio::net::TcpListener::bind("0.0.0.0:9090")
         .await
         .expect("не удалось забиндить health-порт 9090");
     tokio::spawn(async move {
         axum::serve(health_listener, health_router).await.expect("health-сервер упал");
     });
-
-    // В проде — снапшот из config.changes (entity_type=PARTNER); здесь заглушка
-    // на тот же формат, один тестовый партнёр (Фаза 2.2, тот же паттерн
-    // упрощения, что у Routing/Policy — см. README).
-    let partner_path = std::env::var("PARTNER_CONFIG_PATH")
-        .unwrap_or_else(|_| "../../config_schemas/examples/partner.valid.json".to_string());
-    let partner_json = std::fs::read_to_string(&partner_path)
-        .unwrap_or_else(|e| panic!("не удалось прочитать {partner_path}: {e}"));
-    let partner: Partner = serde_json::from_str(&partner_json).expect("partner.schema.json форма");
-    let partner_snapshot = PartnerSnapshot::from_partners(vec![partner]);
 
     let bootstrap_servers = std::env::var("KAFKA_BOOTSTRAP_SERVERS")
         .unwrap_or_else(|_| "kafka-bootstrap.mpp.svc:9092".to_string());
@@ -108,7 +113,12 @@ async fn main() {
         .collect::<Vec<_>>();
     {
         let snapshot = control_snapshot.clone();
-        tokio::spawn(async move { admission::run_control_consumer(control_brokers, snapshot).await });
+        let brokers = control_brokers.clone();
+        tokio::spawn(async move { admission::run_control_consumer(brokers, snapshot).await });
+    }
+    {
+        let snapshot = partner_snapshot.clone();
+        tokio::spawn(async move { config_reload::run_config_consumer(control_brokers, snapshot).await });
     }
 
     let redis_runtime_url = redis_url::build_redis_runtime_url();

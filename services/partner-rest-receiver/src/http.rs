@@ -99,7 +99,7 @@ pub async fn authorize_and_admit(
     if !partner.is_active() {
         return Err(HandlerError::PartnerNotActive);
     }
-    if !auth_verifier.verify(application, &validated.api_key).await {
+    if !auth_verifier.verify(&application, &validated.api_key).await {
         return Err(HandlerError::AuthFailed);
     }
 

@@ -2,7 +2,7 @@
 
 **Основание:** `development_plan.md` Фаза 2.1, шестой сервис "ходового скелета" (Главный агент) — единственная точка входа сообщений в систему для REST-партнёров (`hld.md` §2, `services_specifictaion.md` §2.1). Первый сервис в этой серии, публикующий `incoming.messages` (не потребляющий `stage.*`), и первый с настоящим внешним HTTP API поверх бизнес-логики (не только `/healthz`).
 
-**Статус:** реально компилируется и тестируется — `cargo build && cargo test`, **119/119 тестов проходят**, компилирует настоящие `platform-contracts/{common,events}/*.proto` (тот же паттерн двух package с cross-package ссылками, что у `pipeline-engine`).
+**Статус:** реально компилируется и тестируется — `cargo build && cargo test`, **125/125 тестов проходят**, компилирует настоящие `platform-contracts/{common,events}/*.proto` (тот же паттерн двух package с cross-package ссылками, что у `pipeline-engine`).
 
 **Исправлено (найдено при реализации `dlr-manager`, полный разбор — его README, "Реальная находка (систематическая...)"):** `main.rs` раньше читал единственную `REDIS_RUNTIME_URL`, которую k8s никогда не установит — реальный секрет инжектится дискретными `REDIS_RUNTIME_HOST`/`PORT`/`PASSWORD` (`envFrom: secretRef`). `redis_url::build_redis_runtime_url()` теперь собирает connection string из них, `REDIS_RUNTIME_URL` оставлена как явный override для локальной разработки/тестов. 3 новых теста.
 
@@ -34,8 +34,32 @@ scope. Истёкший PARTNER override больше не блокирует п
 
 `AlwaysAdmit` оставлен только под `#[cfg(test)]` для unit-тестов HTTP-порядка
 проверок и отсутствует в production binary path. Проверено полным `cargo test`:
-119 passed, включая startup/empty snapshot, GLOBAL/partner pause, tombstone,
+125 passed во всём сервисе, включая startup/empty snapshot, GLOBAL/partner pause, tombstone,
 partial rate, malformed payload и expiry.
+
+## P0: self-service PARTNER config применяется без рестарта (2026-09-11)
+
+Статический `PARTNER_CONFIG_PATH` теперь только bootstrap fallback и сам по
+себе не открывает ingress. Каждая реплика вручную назначает себе все партиции
+compacted `config.changes`, реплеит их с начала и после EOF всех партиций
+атомарно устанавливает полный PARTNER snapshot. До этого `/readyz`=503, а
+auth path не видит bootstrap-приложения — свежий pod не принимает трафик на
+устаревшем example-файле. После bootstrap application/status/IP allowlist/
+rate/credential_ref меняются live; при потере Kafka сохраняется последняя
+валидная версия.
+
+Config Service version используется для защиты от out-of-order delivery;
+archive хранится как versioned tombstone, поэтому поздний старый `active` не
+воскресит партнёра. Kafka key, entity_id и payload.partner_id сверяются;
+невалидная версия логируется и не заменяет последний snapshot, но не блокирует
+более новые записи партиции. Проверено тестами active/archive/revival,
+key/payload mismatch, readiness и fail-closed bootstrap.
+
+Открытый межсервисный риск: Config Event Publisher всё ещё ключует compacted
+topic только по `entity_id`, а не `(entity_type, entity_id)`. Совпавшие ID
+партнёра и другой конфигурационной сущности могут вытеснить друг друга при
+compaction; исправление key contract требует coordinated rollout и tombstone
+старых ключей, поэтому не маскируется внутри одного consumer.
 
 ## Порты
 
@@ -101,7 +125,7 @@ Content-Type: application/json
 * `k8s/generate_manifests.py`: новый `PARTNER_CONFIG_CONFIGMAP_NAME` ConfigMap (`00-partner-config.yaml`), реально монтирующий `config_schemas/examples/partner.valid.json` в `/etc/mpp/partner-config/` + `PARTNER_CONFIG_PATH` env var, для обоих реальных потребителей этого файла (`partner-rest-receiver`, `partner-notification-service`).
 * `partner-rest-receiver` получил новый секрет-ключ `partner-credentials` в `SECRET_DEPENDENCIES`.
 * `infra/secrets/generate_external_secrets.py`: новый `build_partner_credentials_external_secret()` — по одной Vault KV v2 записи на `credential_ref` каждого application'а в фикстуре (`vault_kv_path_and_property`), с именем env var, построенным `credential_ref_to_env_var` — Python-портом ТОЙ ЖЕ функции из `auth.rs`, сверенным с тем же тестовым вектором (`k8s/test_partner_credentials_wiring.py::test_credential_ref_to_env_var_matches_rust_test_vector`).
-* Реальный Vault-клиент/`config.changes`-based динамическая загрузка партнёров по-прежнему НЕ реализованы (см. "Что НЕ реализовано" ниже) — это тот же явно раскрытый класс упрощения, что был всегда; исправление здесь заводит РЕАЛЬНО СУЩЕСТВУЮЩИЙ EnvAuthVerifier-механизм на единственного тестового партнёра, который этот срез моделирует, а не изобретает новую инфраструктуру.
+* На момент этого старого прохода dynamic `config.changes` ещё не был реализован; пробел закрыт отдельным P0-срезом 2026-09-11 выше. Статический mount сохранён только как bootstrap fallback, не как production source of truth.
 
 `python3 k8s/generate_manifests.py && python3 k8s/test_partner_credentials_wiring.py` — 5/5, плюс `kubeconform -strict` на обновлённый рендер (98→82 native-valid объекта, см. `k8s/README.md`).
 
@@ -128,7 +152,7 @@ Content-Type: application/json
 
 ## Тесты — что доказано
 
-102 теста, по модулям (было 78 до `vault_auth.rs`):
+125 тестов, по модулям (счётчик вырос за счёт execution-control и PARTNER config reload):
 * `segmentation.rs` (12) — GSM-7/UCS-2 определение и подсчёт сегментов на границах.
 * `request.rs` (16) — валидация схемы: отсутствующие заголовки, невалидный JSON, невалидный msisdn, лимит длины тела на границе, + новое: `sender_id` длина/символы (граница 21, control char, non-ASCII, дефис/пробел, numeric — 7 тестов).
 * `auth.rs` (5) — построение имени переменной окружения, верный/неверный ключ, отсутствующая переменная (не паникует).
@@ -136,17 +160,17 @@ Content-Type: application/json
 * `rate_limit.rs` (7) — token bucket: исчерпание, рефилл со временем, независимость bucket'ов по паре, `drain_consumed` (для Redis-синхронизации), защита от переполнения capacity долгим простоем, + новое: `auth_attempt_buckets` независимость от message bucket, legitimate-трафик никогда не задевает auth-attempt bucket.
 * `build_incoming.rs` (4) — построение `IncomingMessage`, `message_ttl`, кодировка по телу.
 * `idempotency.rs` (5, 2 — **реально против локального Redis**) — encode/decode round-trip, scoping по паре, повторный claim с тем же ключом переиспользует ids, независимость разных ключей.
-* `redis_url.rs` (3), `admission.rs` (8), `health.rs` (4, включая execution-control/Vault readiness), `partner_config.rs` (3) — снапшот-загрузка на реальном `config_schemas/examples/partner.valid.json` (та же кросс-артефактная сверка, что у остальных сервисов).
+* `redis_url.rs` (3), `admission.rs` (8), `config_reload.rs` (3), `health.rs` (5, включая execution-control/config/Vault readiness), `partner_config.rs` (5) — versioned live snapshot, archive tombstone и загрузка реального `config_schemas/examples/partner.valid.json`.
 * `vault_auth.rs` (20) — `credential_ref` парсинг (границы: несколько сегментов пути, отсутствие `vault://`, отсутствие `/`, пустой property после trailing slash), реальный round-trip чтения/кеша/TTL против `vault server -dev` (успешный read, cache-hit не зовёт сеть повторно, TTL истёк — зовёт снова, отсутствующий path/property — fail closed, недоступный Vault на холодном/протухшем кеше), Kubernetes-login flow против фейкового HTTP-сервера (кеширование токена, релогин после истечения, отсутствующий JWT-файл, отклонённый login).
 * `http.rs` (13) — `authorize_and_admit`: полный порядок проверок из `service_internal_methods.md` §1.1 (auth-attempt rate limit → auth → IP/канал → admission → rate limit), включая **неизвестный партнёр отклоняется тем же кодом ошибки, что неверный API-ключ** (`AuthFailed`, не отдельным "партнёр не найден") — не даёт внешнему атакующему через код ошибки определить, существует ли `partner_id`; + новое: brute-force против известной пары в итоге throttle'ится, легитимный трафик по своему tps никогда не видит `AuthRateLimited`.
 
 ## Что НЕ реализовано на этом шаге (честно, не спрятано)
 
-* **Live Kafka integration admission consumer ещё не прогонялся.** Unit-тесты доказывают decode/key/rate/scope/expiry и HTTP reject path, но нужен production-like тест initial replay → GLOBAL/PAUSED → 503/Retry-After → ACTIVE без рестарта.
+* **Live Kafka integration обоих full-mirror consumer ещё не прогонялась.** Unit-тесты доказывают decode/key/version/rate/scope/expiry и HTTP/readiness paths, но нужен production-like E2E: config application change + GLOBAL PAUSED/ACTIVE без рестарта.
 * **`sync_rate_limit_counters` — реальный `redis` API, ни разу не запущен против живого Runtime Redis.** Тот же класс оговорки, что у `RedisMessageContextStore` в policy-service. (`VaultAuthVerifier`, в отличие от этого пункта, реально протестирован против живого локального Vault — см. "Аутентификация" выше.)
 * **ОБНОВЛЕНО 2026-08-06:** `docker build` реально прогнан и провалидирован для этого сервиса (найдены и исправлены реальные баги по пути, где применимо — см. `development_plan.md` "Координация" п.5 и `infra/docker/README.md`). Формулировка ниже — из более раннего состояния сессии, оставлена для истории.
 * **`docker build` не выполнялся** — недоступен Docker daemon в этом окружении (см. `services/destination-resolution-service/README.md`).
-* **Партнёрский снапшот грузится один раз из статического файла**, не из `config.changes` (entity_type=PARTNER) — тот же паттерн упрощения, что у Routing/Policy (Фаза 2.2, один тестовый партнёр).
+* **Compacted key `config.changes` не namespaced по entity_type.** Publisher использует только `entity_id`; коллизия между типами может удалить PARTNER snapshot при compaction. Нужен отдельный coordinated contract rollout.
 * **`sync_rate_limit_counters` открывает новое TCP-соединение на каждый цикл синхронизации (~1с)**, не переиспользует мультиплексированное соединение — тот же класс компромисса, что уже задокументирован как отложенный в `billing-service/README.md` ("нет пулинга соединений").
 * **Rate limiting — только token bucket, без синхронизации лимита между репликами до первого цикла sync** (~1с окно, в течение которого несколько реплик могут независимо пропустить сообщения сверх номинального лимита партнёра) — задокументированное, не скрытое ограничение той же архитектуры, что описана в `service_io_contracts.md` §1.1 для этого паттерна.
-* `Application.display_name`/`AuthConfig.auth_type`/`Partner.version` — поля честно смоделированы по `partner.schema.json`, но не используются логикой этого среза (multi-auth-type/hot-reload не реализованы) — помечены `#[allow(dead_code)]` с объяснением в коде, не удалены.
+* `Application.display_name`/`AuthConfig.auth_type` — поля честно смоделированы по `partner.schema.json`, но не используются текущей REST-логикой (multi-auth-type не реализован); `Partner.version` хранится в payload, а ordering live reload намеренно использует отдельный `ConfigChangeEvent.version`.
