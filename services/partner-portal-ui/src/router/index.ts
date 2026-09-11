@@ -14,6 +14,7 @@ const router = createRouter({
     { path: "/webhook", name: "webhook", component: () => import("../views/WebhookView.vue") },
     { path: "/billing", name: "billing", component: () => import("../views/BillingView.vue") },
     { path: "/templates", name: "templates", component: () => import("../views/TemplatesView.vue") },
+    { path: "/chat", name: "chat", component: () => import("../views/ChatView.vue") },
   ],
 });
 

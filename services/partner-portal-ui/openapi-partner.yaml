@@ -150,6 +150,29 @@ components:
           items: { $ref: "#/components/schemas/Template" }
         limit: { type: integer, format: int64 }
         offset: { type: integer, format: int64 }
+    ChatMessage:
+      type: object
+      required: [id, partner_id, sender_type, sender_id, body]
+      properties:
+        id: { type: integer, format: int64 }
+        partner_id: { type: string }
+        sender_type: { type: string, enum: [partner, admin] }
+        sender_id: { type: string }
+        body: { type: string }
+        created_at: { type: string, format: date-time }
+        read_at: { type: string, format: date-time }
+    ListChatMessagesResponse:
+      type: object
+      required: [messages]
+      properties:
+        messages:
+          type: array
+          items: { $ref: "#/components/schemas/ChatMessage" }
+    SendChatMessageRequest:
+      type: object
+      required: [body]
+      properties:
+        body: { type: string }
 paths:
   /applications:
     get:
@@ -337,3 +360,34 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TemplatesListResponse" }
+  /chat/messages:
+    get:
+      operationId: listChatMessages
+      description: >
+        Единственный тред вызывающего партнёра (partner_id всегда из JWT на
+        бэкенде) — нет query-параметра partner_id, в отличие от
+        backoffice-ui's эквивалентного эндпоинта (там partner_id в path,
+        админ видит все треды).
+      parameters:
+        - name: since
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ListChatMessagesResponse" }
+    post:
+      operationId: sendChatMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SendChatMessageRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChatMessage" }

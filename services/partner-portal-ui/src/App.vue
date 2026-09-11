@@ -30,6 +30,7 @@ const allMenuOptions = [
   { label: () => h(RouterLink, { to: "/webhook" }, () => "Webhook"), key: "webhook", adminOnly: false },
   { label: () => h(RouterLink, { to: "/billing" }, () => "Billing"), key: "billing", adminOnly: false },
   { label: () => h(RouterLink, { to: "/templates" }, () => "Мои шаблоны"), key: "templates", adminOnly: false },
+  { label: () => h(RouterLink, { to: "/chat" }, () => "Chat"), key: "chat", adminOnly: false },
 ];
 
 const menuOptions = computed(() => allMenuOptions.filter((o) => !o.adminOnly || auth.isAdmin()));
