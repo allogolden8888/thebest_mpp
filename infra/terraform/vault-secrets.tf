@@ -21,6 +21,30 @@ variable "vault_token" {
   sensitive   = true
 }
 
+variable "backoffice_jwt_public_key_pem" {
+  description = "PKIX/SPKI RSA public key временного backoffice issuer (TF_VAR_backoffice_jwt_public_key_pem)"
+  type        = string
+  sensitive   = true
+}
+
+variable "backoffice_jwt_private_key_pem" {
+  description = "PKCS#1 RSA private key временного backoffice issuer (TF_VAR_backoffice_jwt_private_key_pem)"
+  type        = string
+  sensitive   = true
+}
+
+variable "partner_oidc_public_key_pem" {
+  description = "PKIX/SPKI RSA public key partner IdP для статической JWT-верификации (TF_VAR_partner_oidc_public_key_pem)"
+  type        = string
+  sensitive   = true
+}
+
+variable "operator_webhook_auth_token" {
+  description = "Bootstrap token входящего operator DLR webhook (TF_VAR_operator_webhook_auth_token); заменить per-operator config/Vault lookup"
+  type        = string
+  sensitive   = true
+}
+
 resource "vault_mount" "mpp" {
   path = "mpp"
   type = "kv-v2"
@@ -133,5 +157,33 @@ resource "vault_kv_secret_v2" "clickhouse" {
     CLICKHOUSE_DB       = yandex_mdb_clickhouse_database.mpp_analytics.name
     CLICKHOUSE_USER     = "admin"
     CLICKHOUSE_PASSWORD = var.clickhouse_password
+  })
+}
+
+# Обязательные startup credentials: без них соответствующие сервисы
+# завершаются через log.Fatal ещё до readiness. Backoffice и partner IdP —
+# разные trust domain/keypair; намеренно не объединять их в один Vault path.
+resource "vault_kv_secret_v2" "backoffice_jwt" {
+  mount = vault_mount.mpp.path
+  name  = "backoffice-jwt"
+  data_json = jsonencode({
+    JWT_PUBLIC_KEY_PEM  = var.backoffice_jwt_public_key_pem
+    JWT_PRIVATE_KEY_PEM = var.backoffice_jwt_private_key_pem
+  })
+}
+
+resource "vault_kv_secret_v2" "partner_oidc_verification" {
+  mount = vault_mount.mpp.path
+  name  = "partner-oidc-verification"
+  data_json = jsonencode({
+    JWT_PUBLIC_KEY_PEM = var.partner_oidc_public_key_pem
+  })
+}
+
+resource "vault_kv_secret_v2" "operator_webhook" {
+  mount = vault_mount.mpp.path
+  name  = "operator-webhook"
+  data_json = jsonencode({
+    WEBHOOK_AUTH_TOKEN = var.operator_webhook_auth_token
   })
 }

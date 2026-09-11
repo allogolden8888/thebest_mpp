@@ -335,7 +335,7 @@ KEDA_KAFKA_TRIGGERS: dict[str, list[tuple[str, str]]] = {
     "template-management-service": [("config.changes", "template-management-service")],
 }
 
-# Секретные зависимости по сервису — из четырёх ключей ниже, каждый мапится
+# Секретные зависимости по сервису — каждый ключ ниже мапится
 # на отдельный k8s Secret (SECRET_K8S_NAME), наполняемый ExternalSecret из
 # Vault (infra/secrets/). Источник — services_specifictaion.md (упоминания
 # "Runtime Redis"/"Configuration Redis"/"Billing Redis"/"PostgreSQL"/
@@ -351,7 +351,7 @@ SECRET_DEPENDENCIES: dict[str, list[str]] = {
     "partner-rest-receiver": ["redis-runtime", "redis-configuration"],
     "partner-smpp-gateway": ["redis-runtime", "redis-configuration"],
     "operator-smpp-session-manager": ["redis-runtime", "redis-configuration"],
-    "operator-http-gateway": ["redis-runtime", "redis-configuration"],
+    "operator-http-gateway": ["redis-runtime", "redis-configuration", "operator-webhook-auth"],
     "pipeline-engine": ["redis-runtime", "redis-configuration"],
     "destination-resolution-service": ["redis-configuration"],
     "policy-service": ["redis-runtime", "redis-configuration"],
@@ -409,10 +409,11 @@ SECRET_DEPENDENCIES: dict[str, list[str]] = {
     "billing-outbox-publisher": ["redis-billing"],
     "billing-ledger-writer": ["postgresql"],
     "billing-reconciliation": ["redis-billing", "postgresql"],
-    "billing-self-service-api": ["postgresql"],
-    "compliance-api": ["redis-runtime"],
-    "partner-api": ["postgresql", "clickhouse"],
-    "backoffice-api": ["postgresql", "clickhouse"],
+    "billing-self-service-api": ["postgresql", "partner-oidc-verification"],
+    "compliance-api": ["redis-runtime", "partner-oidc-verification"],
+    "partner-api": ["postgresql", "clickhouse", "partner-oidc-verification"],
+    "backoffice-api": ["postgresql", "clickhouse", "backoffice-jwt-keypair"],
+    "partner-self-service-api": ["partner-oidc-verification"],
     "replay-service": ["postgresql"],
     "lifecycle-writer": ["postgresql"],
     "analytics-writer": ["clickhouse"],
@@ -488,6 +489,11 @@ SECRET_K8S_NAME = {
     "redis-configuration": "redis-configuration-credentials",
     "redis-billing": "redis-billing-credentials",
     "clickhouse": "clickhouse-credentials",
+    # Два разных trust domain: локальный временный issuer backoffice и
+    # внешний IdP partner portal нельзя сводить в один RSA keypair.
+    "backoffice-jwt-keypair": "backoffice-jwt-keypair",
+    "partner-oidc-verification": "partner-oidc-verification",
+    "operator-webhook-auth": "operator-webhook-auth",
     # Форма отличается от пяти секретов выше (один Vault-путь = одна запись
     # в этом Secret) — у partner-credentials каждый ключ (один на
     # credential_ref) читает СВОЙ собственный Vault-путь, не общую запись.

@@ -1,0 +1,34 @@
+from generate_external_secrets import (
+    SECRET_KEYS,
+    VAULT_PATH,
+    build_external_secret,
+)
+
+
+EXPECTED_RUNTIME_SECRETS = {
+    "backoffice-jwt-keypair": {
+        "path": "backoffice-jwt",
+        "keys": {"JWT_PUBLIC_KEY_PEM", "JWT_PRIVATE_KEY_PEM"},
+    },
+    "partner-oidc-verification": {
+        "path": "partner-oidc-verification",
+        "keys": {"JWT_PUBLIC_KEY_PEM"},
+    },
+    "operator-webhook-auth": {
+        "path": "operator-webhook",
+        "keys": {"WEBHOOK_AUTH_TOKEN"},
+    },
+}
+
+
+def test_required_runtime_secrets_have_exact_vault_contracts():
+    for name, expected in EXPECTED_RUNTIME_SECRETS.items():
+        assert set(SECRET_KEYS[name]) == expected["keys"]
+        assert VAULT_PATH[name] == expected["path"]
+
+        external_secret = build_external_secret(name)
+        assert external_secret["metadata"]["name"] == name
+        data = external_secret["spec"]["data"]
+        assert {item["secretKey"] for item in data} == expected["keys"]
+        assert {item["remoteRef"]["key"] for item in data} == {expected["path"]}
+        assert all(item["remoteRef"]["property"] == item["secretKey"] for item in data)

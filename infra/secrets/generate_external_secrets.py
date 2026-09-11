@@ -6,7 +6,7 @@ Operator. Решение выбрано, не задано пользовате�
 self-hosted через Strimzi), ESO поддерживает Vault "из коробки" одним из
 первых провайдеров, в отличие от нишевых cloud-specific secret-менеджеров.
 
-Пять секретов — ровно пять хранилищ, к которым обращаются сервисы
+Набор секретов покрывает managed-хранилища и обязательные runtime credentials
 (k8s/generate_manifests.py SECRET_K8S_NAME — единственный источник имён,
 импортируется отсюда, не дублируется). Каждому ExternalSecret соответствует
 Vault KV v2 путь `mpp/data/<key>`, наполняемый Terraform'ом
@@ -40,6 +40,9 @@ SECRET_KEYS = {
     "redis-configuration-credentials": ["REDIS_CONFIGURATION_HOST", "REDIS_CONFIGURATION_PORT", "REDIS_CONFIGURATION_PASSWORD"],
     "redis-billing-credentials": ["REDIS_BILLING_HOST", "REDIS_BILLING_PORT", "REDIS_BILLING_PASSWORD"],
     "clickhouse-credentials": ["CLICKHOUSE_HOST", "CLICKHOUSE_PORT", "CLICKHOUSE_DB", "CLICKHOUSE_USER", "CLICKHOUSE_PASSWORD"],
+    "backoffice-jwt-keypair": ["JWT_PUBLIC_KEY_PEM", "JWT_PRIVATE_KEY_PEM"],
+    "partner-oidc-verification": ["JWT_PUBLIC_KEY_PEM"],
+    "operator-webhook-auth": ["WEBHOOK_AUTH_TOKEN"],
 }
 
 # k8s Secret name -> Vault KV v2 путь (без /data/ префикса — ESO сам его подставляет для kv-v2).
@@ -49,6 +52,9 @@ VAULT_PATH = {
     "redis-configuration-credentials": "redis-configuration",
     "redis-billing-credentials": "redis-billing",
     "clickhouse-credentials": "clickhouse",
+    "backoffice-jwt-keypair": "backoffice-jwt",
+    "partner-oidc-verification": "partner-oidc-verification",
+    "operator-webhook-auth": "operator-webhook",
 }
 
 

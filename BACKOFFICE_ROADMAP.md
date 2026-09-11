@@ -39,7 +39,7 @@
 
 Минимальный go-live gate: чистый кластер разворачивается автоматически, все поды Ready, self-service реально меняет data plane, отзыв пользователя/ключа действует за измеримый SLA, релиз откатывается, backup восстанавливается, целевой TPS и failure modes подтверждены на production-подобном стенде.
 
-**Статус на 2026-09-11**: реализация начата. Первый инфраструктурный срез ниже уже сделан и проверен локально, но общий вердикт остаётся **no-go**: это исправляет сборку deployment-каталога, scheduling, часть сетевой связности, KEDA и немедленный отзыв прав сотрудника, но не закрывает secrets/identity, динамическое применение self-service конфигурации, release pipeline, DR и production-like E2E.
+**Статус на 2026-09-11**: реализация начата. Первый инфраструктурный срез ниже уже сделан и проверен локально, но общий вердикт остаётся **no-go**: это исправляет сборку deployment-каталога, scheduling, часть сетевой связности, KEDA, startup wiring обязательных секретов и немедленный отзыв прав сотрудника, но не закрывает полный secret lifecycle/identity, динамическое применение self-service конфигурации, release pipeline, DR и production-like E2E.
 
 ### Журнал работ по production readiness — 2026-09-10/11
 
@@ -64,11 +64,13 @@
 5. **KEDA привязана к реальным consumer subscriptions.** У каждого масштабируемого сервиса теперь явный список `(topic, consumerGroup)`, включая multi-topic consumers; producer-only `billing-outbox-publisher` больше не получает фиктивный Kafka scaler. Тест сверяет mapping с рендером и списком реально provisioned topics.
 6. **Закрыт пропущенный Kafka topic.** В production profile добавлен `stage.delivery-reconciliation.dlq`, который уже читает `lifecycle-writer`, но который раньше не создавался при выключенном auto-create. Итого: 33 topic + Kafka CR.
 7. **Partner config подключён всем четырём фактическим потребителям.** Один ConfigMap и `PARTNER_CONFIG_PATH` теперь монтируются в `billing-service`, `partner-rest-receiver`, `partner-notification-service` и `partner-smpp-gateway`; регрессионный тест не позволит снова потерять потребителя.
+8. **Обязательные startup-секреты доведены до pod env.** Terraform принимает PEM/token только через sensitive variables и записывает три раздельных Vault KV entry: backoffice RSA keypair, partner IdP verification key и operator webhook token. External Secrets создаёт соответствующие Kubernetes Secrets, а deployment-каталог подключает их ровно к `backoffice-api`, partner/self-service/compliance API и `operator-http-gateway`. Backoffice и partner IdP намеренно остаются разными trust domain.
 
 #### Чем проверено
 
-- K8s regression suite: **26 passed**;
-- строгий `kubeconform` для Kubernetes 1.34 и CRD-схем: **219/219 valid, 0 invalid, 0 errors, 0 skipped**;
+- K8s regression suite: **27 passed**;
+- External Secrets contract suite: **1 passed**;
+- строгий `kubeconform` для Kubernetes 1.34 и CRD-схем, включая ExternalSecret/ClusterSecretStore: **229/229 valid, 0 invalid, 0 errors, 0 skipped**;
 - Terraform: форматирование без diff, `terraform validate` — **Success**;
 - IAM: `go test ./...` и `go test -race ./...` — успешно;
 - `pdu-log-writer` и `config-event-publisher`: все Go-тесты — успешно;
@@ -79,14 +81,14 @@
 
 #### Что всё ещё блокирует production (оставшийся P0)
 
-- **Secrets/config:** JWT signing/verification keys, webhook token и часть обязательных runtime-секретов ещё не provisioned end-to-end. Текущий `partner.valid.json` — пример, а не production source of truth; в нём нет ни одного `SMPP_BIND`, поэтому один только mount не делает partner SMPP готовым.
+- **Secrets/config lifecycle:** Kubernetes/Vault wiring для обязательных JWT/webhook startup values теперь есть, но сами production-значения ещё должны быть безопасно переданы в Terraform/bootstrap, проверены на соответствие issuer'у и отротированы; статический public key нужно заменить на JWKS/`kid` rotation, общий webhook token — на per-operator credential lookup. Текущий `partner.valid.json` — пример, а не production source of truth; в нём нет ни одного `SMPP_BIND`, поэтому один только mount не делает partner SMPP готовым.
 - **Внешний egress при default-deny:** стандартная NetworkPolicy не умеет безопасно разрешать динамические FQDN managed PostgreSQL/Redis/ClickHouse, SMSC и webhook destinations. Нужна environment-specific генерация `ipBlock` после Terraform либо egress gateway/Cilium FQDN policy; широкое `0.0.0.0/0` намеренно не добавлялось.
 - **Self-service → data plane:** изменение application/sender/webhook всё ещё не доходит в live gateways/notification без механизма config watch/reload и измеримого propagation SLA.
 - **Identity:** нет полноценного OIDC/PKCE + MFA, issuer/audience contract и partner IAM/session revocation; ручной JWT в `localStorage` остаётся неприемлемым для production.
 - **Data-plane correctness:** остаются `AlwaysAdmit` в REST admission, отсутствие периодического SMPP heartbeat и неверная идентификация оператора в delivery reconciliation.
 - **Release/operations:** нет pipeline всех сервисов с immutable digest, scan/SBOM/signing, staging deploy, smoke/canary/rollback; не подтверждены alerts/SLO, backup-restore, RPO/RTO, load/failover/chaos.
 
-Следующий минимальный срез: сначала secrets + контролируемый external egress, затем один сквозной сценарий «создание application в partner portal → немедленный live REST/SMPP auth → pipeline → DLR/callback», после него identity и release pipeline.
+Следующий минимальный срез: сначала контролируемый external egress + production secret bootstrap/rotation, затем один сквозной сценарий «создание application в partner portal → немедленный live REST/SMPP auth → pipeline → DLR/callback», после него identity и release pipeline.
 
 ---
 
