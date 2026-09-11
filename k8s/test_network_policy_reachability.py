@@ -4,17 +4,22 @@ from pathlib import Path
 
 import yaml
 
-from generate_manifests import HEALTH_PORT, SERVICES
+from generate_manifests import HEALTH_PORT, SECRET_DEPENDENCIES, SERVICES
 from network_policies import (
     CALL_GRAPH,
     CROSS_NAMESPACE_CALLS,
+    EXTERNAL_DB_KEYS,
     KAFKA_BROKER_LABELS,
     KAFKA_CLIENTS,
     KAFKA_PORT,
     MONITORING_NAMESPACE,
     NAMESPACE_NAME_LABEL,
+    PRIVATE_RANGES_EXCEPT,
     PROMETHEUS_LABELS,
+    SCOPED_PUBLIC_HTTPS_CLIENTS,
+    SMPP_CONVENTIONAL_PORTS,
     VAULT_NAMESPACE,
+    generate_all,
 )
 
 RENDERED = Path(__file__).parent / "rendered" / "01-network-policies.yaml"
@@ -235,6 +240,89 @@ def test_external_ingress_matches_public_service_table_exactly():
         if doc["metadata"]["name"].startswith("allow-external-ingress-")
     }
     assert actual == expected
+
+
+# --- Внешний egress (BACKOFFICE_ROADMAP.md P1) --------------------------------
+
+FIXTURE_EXTERNAL_HOSTS = {
+    "postgresql": {"fqdn": "pg.invalid", "port": 5432, "ips": ["203.0.113.10"]},
+    "redis-runtime": {"fqdn": "redis-runtime.invalid", "port": 6379, "ips": ["203.0.113.20"]},
+    "redis-configuration": {"fqdn": "redis-configuration.invalid", "port": 6379, "ips": ["203.0.113.21"]},
+    "redis-billing": {"fqdn": "redis-billing.invalid", "port": 6379, "ips": ["203.0.113.22"]},
+    "clickhouse": {"fqdn": "ch.invalid", "port": 9000, "ips": ["203.0.113.30", "203.0.113.31"]},
+}
+
+
+def test_external_db_egress_allows_exactly_the_resolved_ips_per_category():
+    docs = generate_all(hosts=FIXTURE_EXTERNAL_HOSTS)
+    for db_key, entry in FIXTURE_EXTERNAL_HOSTS.items():
+        policy = _find(docs, f"allow-external-egress-{db_key}")
+        assert policy is not None, f"missing NetworkPolicy for {db_key}"
+        rule = policy["spec"]["egress"][0]
+        assert rule["to"] == [{"ipBlock": {"cidr": f"{ip}/32"}} for ip in sorted(entry["ips"])]
+        assert rule["ports"] == [{"protocol": "TCP", "port": entry["port"]}]
+
+
+def test_external_db_egress_selector_matches_secret_dependencies_exactly():
+    docs = generate_all(hosts=FIXTURE_EXTERNAL_HOSTS)
+    for db_key in EXTERNAL_DB_KEYS:
+        expected_clients = sorted(name for name, deps in SECRET_DEPENDENCIES.items() if db_key in deps)
+        policy = _find(docs, f"allow-external-egress-{db_key}")
+        if not expected_clients:
+            assert policy is None
+            continue
+        expression = policy["spec"]["podSelector"]["matchExpressions"][0]
+        assert expression == {"key": "app", "operator": "In", "values": expected_clients}
+
+
+def test_external_db_egress_does_not_grant_an_unrelated_external_host():
+    """A totally unrelated external IP (not one of the resolved DB hosts)
+    must not be reachable through the generated policy -- proves the rule is
+    scoped to exactly the resolved addresses, not a broad CIDR guess."""
+    docs = generate_all(hosts=FIXTURE_EXTERNAL_HOSTS)
+    policy = _find(docs, "allow-external-egress-postgresql")
+    rule = policy["spec"]["egress"][0]
+    allowed_cidrs = {peer["ipBlock"]["cidr"] for peer in rule["to"]}
+    assert "8.8.8.8/32" not in allowed_cidrs
+    assert allowed_cidrs == {"203.0.113.10/32"}
+
+
+def test_scoped_public_https_egress_is_limited_to_port_443_and_excludes_private_ranges():
+    docs = generate_all(hosts=FIXTURE_EXTERNAL_HOSTS)
+    for name in SCOPED_PUBLIC_HTTPS_CLIENTS:
+        policy = _find(docs, f"allow-scoped-public-https-egress-{name}")
+        assert policy is not None
+        assert policy["spec"]["podSelector"] == {"matchLabels": {"app": name}}
+        rule = policy["spec"]["egress"][0]
+        assert rule["ports"] == [{"protocol": "TCP", "port": 443}]
+        ip_block = rule["to"][0]["ipBlock"]
+        assert ip_block["cidr"] == "0.0.0.0/0"
+        assert set(ip_block["except"]) == set(PRIVATE_RANGES_EXCEPT)
+
+
+def test_scoped_public_https_egress_is_not_a_blanket_allow_all():
+    """The roadmap explicitly rejected a blanket 0.0.0.0/0 egress -- this
+    checks the generated rule is meaningfully narrower: single port, and
+    RFC1918/link-local/loopback carved out via `except`."""
+    docs = generate_all(hosts=FIXTURE_EXTERNAL_HOSTS)
+    policy = _find(docs, "allow-scoped-public-https-egress-partner-notification-service")
+    rule = policy["spec"]["egress"][0]
+    assert rule["ports"] != [{"protocol": "TCP"}]  # port is present, not wide open
+    assert len(rule["ports"]) == 1
+    assert "10.0.0.0/8" in rule["to"][0]["ipBlock"]["except"]
+    assert "169.254.0.0/16" in rule["to"][0]["ipBlock"]["except"]
+
+
+def test_smsc_egress_is_scoped_to_conventional_smpp_ports_and_excludes_private_ranges():
+    docs = generate_all(hosts=FIXTURE_EXTERNAL_HOSTS)
+    policy = _find(docs, "allow-smsc-egress-operator-smpp-session-manager")
+    assert policy is not None
+    assert policy["spec"]["podSelector"] == {"matchLabels": {"app": "operator-smpp-session-manager"}}
+    rule = policy["spec"]["egress"][0]
+    assert {p["port"] for p in rule["ports"]} == set(SMPP_CONVENTIONAL_PORTS)
+    ip_block = rule["to"][0]["ipBlock"]
+    assert ip_block["cidr"] == "0.0.0.0/0"
+    assert set(ip_block["except"]) == set(PRIVATE_RANGES_EXCEPT)
 
 
 if __name__ == "__main__":

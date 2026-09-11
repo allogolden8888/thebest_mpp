@@ -15,7 +15,8 @@ from pathlib import Path
 
 import yaml
 
-from generate_manifests import HEALTH_PORT, NAMESPACE, SERVICES
+from external_hosts import load_external_hosts
+from generate_manifests import HEALTH_PORT, NAMESPACE, SECRET_DEPENDENCIES, SERVICES
 
 KAFKA_PORT = 9092
 DNS_PORT = 53
@@ -23,6 +24,59 @@ VAULT_PORT = 8200
 MONITORING_NAMESPACE = "monitoring"
 VAULT_NAMESPACE = "vault-system"
 NAMESPACE_NAME_LABEL = "kubernetes.io/metadata.name"
+
+# Ключи SECRET_DEPENDENCIES (generate_manifests.py), которые указывают на
+# managed-зависимость вне mesh, а не на in-cluster секрет (operator-webhook-auth/
+# partner-oidc-verification/backoffice-jwt-keypair — не сетевые destinations).
+EXTERNAL_DB_KEYS = ("postgresql", "redis-runtime", "redis-configuration", "redis-billing", "clickhouse")
+
+# RFC1918 + link-local (включает 169.254.169.254 — cloud metadata) + loopback —
+# исключаются из "публичный интернет, порт 443" egress ниже, чтобы
+# скомпрометированный partner/operator-webhook destination нельзя было
+# использовать как pivot обратно в кластер/VPC/metadata endpoint. Совпадает
+# по духу (не по коду — тот на Go) с уже существующим app-level guard
+# services/partner-notification-service/internal/notify/ssrf_guard.go и
+# services/operator-http-gateway/internal/httpio/ssrf_guard.go
+# (isPubliclyRoutable) — NetworkPolicy здесь defense-in-depth поверх него, не
+# замена.
+PRIVATE_RANGES_EXCEPT = [
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "169.254.0.0/16",
+    "127.0.0.0/8",
+]
+
+# partner-notification-service.notification_callback_url и
+# operator-http-gateway.http_profile.endpoint_url — оба произвольные
+# HTTPS-адреса, зарегистрированные партнёром/оператором в конфиге, известные
+# только в runtime (config.changes), не на этапе генерации манифестов —
+# статический ServiceEntry/ipBlock на каждый адрес невозможен без отдельного
+# egress-gateway с hostname allow-list, сверяемым с этими же
+# конфигурационными значениями (не сделано в этом заходе — см.
+# BACKOFFICE_ROADMAP.md P1). Честная промежуточная мера ниже: не блокирующий
+# 0.0.0.0/0 на все порты/протоколы (roadmap явно отказался от этого), а
+# единственный порт 443 к публичному интернету, только этим двум сервисам.
+SCOPED_PUBLIC_HTTPS_CLIENTS = ("partner-notification-service", "operator-http-gateway")
+
+# operator-smpp-session-manager: config_schemas/operator.schema.json
+# (smpp_profile) не несёт вообще ни host, ни port у оператора — модель несёт
+# только протокольные параметры (window/TPS/reconnect_policy). Физический
+# адрес SMSC сегодня приходит через OPERATOR_SMSC_HOST/OPERATOR_SMSC_PORT env
+# (Main.java, дефолт "localhost"), которые k8s/generate_manifests.py вообще
+# не устанавливает — т.е. это не "динамическое, но известное на деплое"
+# значение (как FQDN managed БД), а полностью не смоделированное на сегодня.
+# Статический ServiceEntry на конкретного оператора здесь невозможен без
+# сначала заведения host/port в конфиг оператора и генерации ServiceEntry per
+# active operator при изменении config.changes — отдельная задача, не
+# сделанная сейчас (см. BACKOFFICE_ROADMAP.md P1). Честная промежуточная
+# мера: разрешить TCP только на конвенциональные SMPP-порты (2775/2776 —
+# наиболее распространённые среди SMSC; НЕ универсальны, нестандартный порт
+# конкретного оператора потребует либо расширения этого списка руками, либо
+# реальной динамической генерации) к публичному интернету, исключая
+# внутренние диапазоны — тот же PRIVATE_RANGES_EXCEPT, что webhook egress
+# выше.
+SMPP_CONVENTIONAL_PORTS = (2775, 2776)
 
 # Этот label явно задаётся Prometheus pod через
 # infra/terraform/observability.tf, поэтому policy не зависит от внутренних
@@ -302,6 +356,85 @@ def build_namespaced_call_egress(call: NamespacedCall) -> dict:
     }
 
 
+def _db_clients(db_key: str) -> list[str]:
+    return sorted(name for name, deps in SECRET_DEPENDENCIES.items() if db_key in deps)
+
+
+def build_external_db_egress(hosts: dict) -> list[dict]:
+    """Egress к Yandex Managed PostgreSQL/Redis x3/ClickHouse — по резолвленным
+    IP из k8s/external_hosts.py (единственный источник — Terraform, см.
+    комментарий там), не по угаданному CIDR. Один документ на БД-категорию,
+    podSelector — точный список сервисов, у которых эта категория реально
+    указана в SECRET_DEPENDENCIES (тот же стиль, что build_common_kafka_egress
+    для KAFKA_CLIENTS).
+    """
+    docs = []
+    for db_key in EXTERNAL_DB_KEYS:
+        clients = _db_clients(db_key)
+        if not clients:
+            continue
+        entry = hosts[db_key]
+        docs.append({
+            "apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+            "metadata": _meta(f"allow-external-egress-{db_key}"),
+            "spec": {
+                "podSelector": {"matchExpressions": [{
+                    "key": "app", "operator": "In", "values": clients,
+                }]},
+                "policyTypes": ["Egress"],
+                "egress": [{
+                    "to": [{"ipBlock": {"cidr": f"{ip}/32"}} for ip in sorted(entry["ips"])],
+                    "ports": [{"protocol": "TCP", "port": entry["port"]}],
+                }],
+            },
+        })
+    return docs
+
+
+def build_scoped_public_https_egress() -> list[dict]:
+    """Честная промежуточная мера для арбитражных partner/operator webhook
+    destinations — см. комментарий у SCOPED_PUBLIC_HTTPS_CLIENTS выше. НЕ
+    заменяет app-level SSRF guard (ssrf_guard.go в обоих сервисах), а
+    дополняет его на уровне L3/L4.
+    """
+    docs = []
+    for name in SCOPED_PUBLIC_HTTPS_CLIENTS:
+        docs.append({
+            "apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+            "metadata": _meta(f"allow-scoped-public-https-egress-{name}"),
+            "spec": {
+                "podSelector": {"matchLabels": {"app": name}},
+                "policyTypes": ["Egress"],
+                "egress": [{
+                    "to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": list(PRIVATE_RANGES_EXCEPT)}}],
+                    "ports": [{"protocol": "TCP", "port": 443}],
+                }],
+            },
+        })
+    return docs
+
+
+def build_smsc_egress() -> dict:
+    """Честная промежуточная мера для SMSC — см. комментарий у
+    SMPP_CONVENTIONAL_PORTS выше: host/port оператора нигде не смоделирован,
+    статический ServiceEntry невозможен, поэтому это единственная из трёх
+    новых категорий, где даже FQDN-уровня знания у mesh нет (в отличие от
+    managed БД и webhook-хостов, для webhook хотя бы порт фиксирован по HTTPS).
+    """
+    return {
+        "apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+        "metadata": _meta("allow-smsc-egress-operator-smpp-session-manager"),
+        "spec": {
+            "podSelector": {"matchLabels": {"app": "operator-smpp-session-manager"}},
+            "policyTypes": ["Egress"],
+            "egress": [{
+                "to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": list(PRIVATE_RANGES_EXCEPT)}}],
+                "ports": [{"protocol": "TCP", "port": port} for port in SMPP_CONVENTIONAL_PORTS],
+            }],
+        },
+    }
+
+
 def _served_ports(service) -> set[int]:
     ports = {HEALTH_PORT}
     for attr in ("internal_http_port", "internal_grpc_port", "external_port"):
@@ -313,7 +446,9 @@ def _served_ports(service) -> set[int]:
     return ports
 
 
-def generate_all() -> list[dict]:
+def generate_all(hosts: dict | None = None) -> list[dict]:
+    hosts = hosts if hosts is not None else load_external_hosts()
+
     docs = [
         build_default_deny(),
         build_common_dns_egress(),
@@ -347,6 +482,19 @@ def generate_all() -> list[dict]:
     for call in CROSS_NAMESPACE_CALLS:
         assert call.caller in SERVICES_BY_NAME, f"Cross-namespace caller missing from SERVICES: {call.caller}"
         docs.append(build_namespaced_call_egress(call))
+
+    unknown_db_clients = {
+        name for db_key in EXTERNAL_DB_KEYS for name in _db_clients(db_key)
+    } - SERVICES_BY_NAME.keys()
+    assert not unknown_db_clients, f"SECRET_DEPENDENCIES clients missing from SERVICES: {sorted(unknown_db_clients)}"
+    docs.extend(build_external_db_egress(hosts))
+
+    unknown_https_clients = set(SCOPED_PUBLIC_HTTPS_CLIENTS) - SERVICES_BY_NAME.keys()
+    assert not unknown_https_clients, f"SCOPED_PUBLIC_HTTPS_CLIENTS missing from SERVICES: {sorted(unknown_https_clients)}"
+    docs.extend(build_scoped_public_https_egress())
+
+    assert "operator-smpp-session-manager" in SERVICES_BY_NAME
+    docs.append(build_smsc_egress())
 
     return docs
 
