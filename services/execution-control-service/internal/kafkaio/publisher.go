@@ -11,6 +11,7 @@
 package kafkaio
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"time"
@@ -119,4 +120,91 @@ func (p *Publisher) Publish(ctx context.Context, key registry.ScopeKey, rec *eve
 
 	result := p.client.ProduceSync(ctx, record)
 	return result.FirstErr()
+}
+
+// EnsureGlobalBootstrap закрывает холодный старт всей платформы: consumer'ы
+// execution.control (pipeline-engine::execution_control.rs,
+// partner-rest-receiver::admission.rs) fail-closed, пока не увидят
+// ExecutionControlRecord для scope=GLOBAL, а runGlobalControlLoop публикует
+// GLOBAL только после первого УСПЕШНОГО тика Prometheus — на пустом трафике
+// global_error_rate = 0/0 = NaN и тик пропускается (см. main.go). Без
+// реального трафика метрика никогда не станет валидной, а без GLOBAL sentinel
+// трафик никогда не пойдёт — платформа зависает навсегда с абсолютно нуля
+// (пустой/новый execution.control), а не только в этом локальном стенде.
+//
+// Если для GLOBAL уже есть запись (тёплый рестарт на непустом compacted
+// топике), эта функция ничего не делает — не затирает легитимный
+// DEGRADED/PAUSED state форсированным ACTIVE.
+func EnsureGlobalBootstrap(ctx context.Context, brokers []string, pub *Publisher) error {
+	globalKey := registry.ScopeKey{Scope: hysteresis.ScopeGlobal}
+	wantKey := RecordKey(globalKey)
+
+	found, err := hasExistingRecord(ctx, brokers, wantKey)
+	if err != nil {
+		return fmt.Errorf("ensure_global_bootstrap: чтение текущего состояния: %w", err)
+	}
+	if found {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	rec := &eventsv1.ExecutionControlRecord{
+		Scope:         commonv1.ExecutionControlScope_EXECUTION_CONTROL_SCOPE_GLOBAL,
+		State:         commonv1.ExecutionControlState_EXECUTION_CONTROL_STATE_ACTIVE,
+		AdmissionRate: 1.0,
+		DispatchRate:  1.0,
+		Reason:        "bootstrap_default_no_prior_global_state",
+		Version:       1,
+		CreatedAt:     timestamppb.New(now),
+	}
+	if err := pub.Publish(ctx, globalKey, rec); err != nil {
+		return fmt.Errorf("ensure_global_bootstrap: публикация дефолта: %w", err)
+	}
+	return nil
+}
+
+// hasExistingRecord — best-effort чтение execution.control с начала до тех
+// пор, пока за readIdleTimeout не появится ни одной новой записи (топик мал
+// и compacted, так что "тихо" на практике означает "дочитали до конца"),
+// в поиске записи с заданным ключом. Отдельный direct-consumer client (без
+// consumer group) — не мешает будущим реальным consumer'ам этого сервиса.
+func hasExistingRecord(ctx context.Context, brokers []string, wantKey []byte) (bool, error) {
+	const readIdleTimeout = 3 * time.Second
+
+	client, err := kgo.NewClient(
+		kgo.SeedBrokers(brokers...),
+		kgo.ConsumeTopics(Topic),
+		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+		kgo.FetchMaxWait(500*time.Millisecond),
+	)
+	if err != nil {
+		return false, fmt.Errorf("kgo.NewClient: %w", err)
+	}
+	defer client.Close()
+
+	for {
+		pollCtx, cancel := context.WithTimeout(ctx, readIdleTimeout)
+		fetches := client.PollFetches(pollCtx)
+		cancel()
+
+		empty := true
+		found := false
+		fetches.EachRecord(func(r *kgo.Record) {
+			empty = false
+			if bytes.Equal(r.Key, wantKey) {
+				found = true
+			}
+		})
+		if found {
+			return true, nil
+		}
+		if empty {
+			// Ни одной записи за целый readIdleTimeout — считаем, что дочитали
+			// до конца существующих данных compacted-топика.
+			return false, nil
+		}
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+	}
 }

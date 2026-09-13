@@ -103,9 +103,14 @@ impl RedisStateStore {
     /// перед тем, как атомарно записать результат обратно через
     /// `cas_advance`.
     pub async fn load(&self, message_id: &str) -> Result<Option<ExecutionState>, String> {
+        let started = std::time::Instant::now();
         let mut conn = self.connection().await?;
         let key = format!("exec:{message_id}");
         let fields: HashMap<String, String> = conn.hgetall(&key).await.map_err(|e| format!("HGETALL {key}: {e}"))?;
+        let elapsed_ms = started.elapsed().as_millis();
+        if elapsed_ms > 50 {
+            tracing::warn!("redis_cas::load заняло {elapsed_ms}мс (message_id={message_id})");
+        }
         if fields.is_empty() {
             return Ok(None);
         }
@@ -143,6 +148,7 @@ impl RedisStateStore {
         old_stage_execution_id_to_remove: Option<&str>,
         new_state: &ExecutionState,
     ) -> Result<CasOutcome, String> {
+        let started = std::time::Instant::now();
         let mut conn = self.connection().await?;
         let exec_key = format!("exec:{}", new_state.message_id);
         let new_stage_execution_id = new_state.awaiting_stage_execution_id.clone().unwrap_or_default();
@@ -178,6 +184,11 @@ impl RedisStateStore {
             .invoke_async(&mut conn)
             .await
             .map_err(|e| format!("EVAL cas_transition: {e}"))?;
+
+        let elapsed_ms = started.elapsed().as_millis();
+        if elapsed_ms > 50 {
+            tracing::warn!("redis_cas::cas_advance заняло {elapsed_ms}мс (message_id={})", new_state.message_id);
+        }
 
         parse_cas_result(result)
     }

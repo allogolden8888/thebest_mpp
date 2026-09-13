@@ -47,7 +47,11 @@ async fn main() {
     let live_pipeline = Arc::new(ArcSwap::from_pointee(overlay.current()));
 
     let bootstrap_servers = std::env::var("KAFKA_BOOTSTRAP_SERVERS").unwrap_or_else(|_| "kafka-bootstrap.mpp.svc:9092".to_string());
-    let producer = kafka_io::build_producer(&bootstrap_servers);
+    // Диагностика 2026-09-13 (500 TPS): один общий FutureProducer оказался
+    // последовательной точкой (одно TCP-соединение/один I/O-поток
+    // librdkafka на все ~768 конкурентных тасков) — см. ProducerPool в
+    // kafka_io.rs. Несколько независимых клиентов вместо одного.
+    let producer = kafka_io::ProducerPool::new(&bootstrap_servers, kafka_io::producer_pool_size());
 
     // Pipeline не начинает читать data-plane до полного replay всех
     // partition compacted execution.control и GLOBAL sentinel. Каждая

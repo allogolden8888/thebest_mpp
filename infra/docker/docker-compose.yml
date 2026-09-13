@@ -96,6 +96,14 @@ services:
     ports:
       - "9094:9094"
     environment:
+      # Диагностика 2026-09-13 (500 TPS деградация p95/p99, но container CPU
+      # почти не выросло): нужен разбивка LocalTimeMs/RequestQueueTimeMs/
+      # ResponseSendTimeMs по типам запросов, а JMX нигде не был включён —
+      # без него не нашли бы, что producer.send() (pipeline-engine), а не
+      # сам брокер, был причиной 500 TPS деградации. Оставлено постоянно:
+      # порт не проброшен наружу (виден только внутри docker_default),
+      # без аутентификации, но это локальный dev/test-стенд, не прод.
+      KAFKA_JMX_PORT: "9999"
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:9094
@@ -237,6 +245,37 @@ services:
       kafka:
         condition: service_healthy
 
+  # Раньше не был заведён вообще, а pipeline-engine/partner-rest-receiver
+  # (execution_control.rs / admission.rs) fail-closed без ExecutionControlRecord
+  # scope=GLOBAL в execution.control (compacted) — на пустом стенде это
+  # тупик: runGlobalControlLoop публикует GLOBAL только после первого
+  # успешного тика Prometheus (которого здесь нет), а на нулевом трафике
+  # error_rate=0/0=NaN и тик и так вечно пропускается. Раньше закрывали это
+  # вручную (seed-global-sentinel.js). Настоящий фикс — EnsureGlobalBootstrap
+  # (internal/kafkaio/publisher.go): сервис сам публикует безопасный
+  # ACTIVE-дефолт при старте, если для GLOBAL ещё нет записи, и ничего не
+  # делает на тёплом рестарте с уже существующим состоянием.
+  # PROMETHEUS_URL оставлен на дефолте — Prometheus в этом стенде не поднят,
+  # metric-driven тик будет просто логировать ошибку раз в 10с, это не
+  # фатально и не блокирует readyz.
+  execution-control-service:
+    image: mpp/execution-control-service:test
+    mem_limit: 256m
+    ports:
+      - "9123:9090"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: mpp
+      POSTGRES_USER: mpp
+      POSTGRES_PASSWORD: mpp_local_dev
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
   # Первый сервис "ходового скелета" — входная точка REST-ingest. credential_ref
   # "vault://partners/click_uz/main/api_key" (config_schemas/examples/partner.valid.json,
   # уже запечён в образ) резолвится в PARTNER_CRED_VAULT___PARTNERS_CLICK_UZ_MAIN_API_KEY
@@ -314,6 +353,10 @@ services:
       # Значение оставлено env-переключаемым СОЗНАТЕЛЬНО: эффект надо мерить
       # A/B на одном образе, а не сравнением двух сборок.
       PIPELINE_COMMIT_INTERVAL_MS: "${PIPELINE_COMMIT_INTERVAL_MS:-0}"
+      # Диагностика 2026-09-13 (500 TPS): один общий FutureProducer был
+      # последовательной точкой (ProducerPool в kafka_io.rs). env-переключаемо
+      # для A/B на одном образе — см. SUMMARY в results/.
+      PIPELINE_PRODUCER_POOL_SIZE: "${PIPELINE_PRODUCER_POOL_SIZE:-4}"
       PIPELINE_INCOMING_CONCURRENCY: "384"
       PIPELINE_COMPLETED_CONCURRENCY: "384"
       PIPELINE_RETRY_TRIGGER_CONCURRENCY: "128"
@@ -1154,11 +1197,12 @@ services:
       - billing-self-service-api
 
   # Админка (backoffice) — RBAC/аудит через iam-service, ротация credentials,
-  # инциденты, ops-видимость. EXECUTION_CONTROL_SERVICE_ADDR/REPLAY_SERVICE_ADDR
-  # оставлены на дефолтах (эти два сервиса сюда не заведены) — некритично:
-  # gRPC-клиенты лениво коннектятся (grpc.NewClient не блокирует и не падает
-  # на недостижимом таргете), их health-проверки покажут unhealthy, остальное
-  # не затронуто.
+  # инциденты, ops-видимость. execution-control-service теперь заведён (см.
+  # выше) — EXECUTION_CONTROL_SERVICE_ADDR указывает на него явно.
+  # REPLAY_SERVICE_ADDR остаётся на дефолте (этот сервис сюда не заведён) —
+  # некритично: gRPC-клиенты лениво коннектятся (grpc.NewClient не блокирует
+  # и не падает на недостижимом таргете), их health-проверки покажут
+  # unhealthy, остальное не затронуто.
   #
   # CLICKHOUSE_* теперь задан по-настоящему: ClickHouse поднят выше, и от него
   # зависят GET /v1/reports (все графики/отчёты) и
@@ -1225,6 +1269,7 @@ services:
       CONFIGURATION_SERVICE_ADDR: configuration-service:9000
       CREDENTIAL_ISSUER_SERVICE_ADDR: credential-issuer-service:9000
       IAM_SERVICE_ADDR: iam-service:9000
+      EXECUTION_CONTROL_SERVICE_ADDR: execution-control-service:9000
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PORT: "9000"
       CLICKHOUSE_DB: analytics

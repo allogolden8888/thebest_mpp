@@ -30,6 +30,7 @@ use rdkafka::message::Message as _;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::{Offset, TopicPartitionList};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
@@ -177,11 +178,23 @@ async fn publish_dispatch(
         ),
     };
     let record = FutureRecord::to(topic).key(&command.message_id).payload(&bytes);
-    producer
+    let started = std::time::Instant::now();
+    let result = producer
         .send(record, Duration::from_secs(5))
         .await
         .map(|_| ())
-        .map_err(|(error, _)| error.to_string())
+        .map_err(|(error, _)| error.to_string());
+    let elapsed_ms = started.elapsed().as_millis();
+    // 2026-09-13: этот замер вскрыл реальную причину 500 TPS деградации
+    // (ProducerPool ниже — один общий FutureProducer был последовательной
+    // точкой на все хопы; Kafka broker и Redis отдельно измерены и быстрые).
+    // Оставлено постоянно, не только на время диагностики — стоимость
+    // одного Instant::now()/elapsed() на send() пренебрежимо мала, а сигнал
+    // ценен на будущее (тот же класс проблемы уже повторялся дважды).
+    if elapsed_ms > 50 {
+        tracing::warn!("publish_dispatch: producer.send() заняло {elapsed_ms}мс (topic={topic})");
+    }
+    result
 }
 
 pub(crate) fn now_ms() -> i64 {
@@ -238,6 +251,52 @@ pub fn build_producer(bootstrap_servers: &str) -> FutureProducer {
         .set("linger.ms", "5")
         .create()
         .expect("не удалось создать Kafka producer")
+}
+
+/// Диагностика 2026-09-13 (500 TPS деградация, см. commit): единственный
+/// `FutureProducer` — это Arc-хендл на ОДИН нативный librdkafka-клиент,
+/// у которого одно TCP-соединение на брокер и один внутренний I/O-поток,
+/// обслуживающий это соединение. Замер `producer.send()` под конкурентной
+/// нагрузкой (до ~768 одновременных tokio-тасков, см.
+/// PIPELINE_*_CONCURRENCY) показал: на 300 TPS почти нет задержек
+/// (max=81мс за весь прогон), на 500 TPS — p50=146мс, p99=347мс на КАЖДОМ
+/// хопе, при том что и Kafka broker (JMX: Produce TotalTimeMs p99<5мс), и
+/// Redis CAS/load (0 медленных вызовов) в это же время быстрые. Тот же
+/// класс проблемы, что уже чинили (см. queue.buffering.max.messages выше),
+/// но другой механизм: не переполнение локальной очереди, а
+/// последовательность одного соединения/одного I/O-потока под конкурентным
+/// доступом. Несколько независимых `FutureProducer` (каждый — свой вызов
+/// `.create()`, свой нативный клиент, своё TCP-соединение к тому же
+/// брокеру) дают реальный параллелизм на уровне транспорта, которого не
+/// даёт клонирование одного и того же producer (Arc::clone на тот же
+/// клиент/соединение).
+#[derive(Clone)]
+pub struct ProducerPool {
+    producers: Arc<Vec<FutureProducer>>,
+    next: Arc<AtomicUsize>,
+}
+
+impl ProducerPool {
+    pub fn new(bootstrap_servers: &str, size: usize) -> Self {
+        let size = size.max(1);
+        let producers = (0..size).map(|_| build_producer(bootstrap_servers)).collect();
+        Self { producers: Arc::new(producers), next: Arc::new(AtomicUsize::new(0)) }
+    }
+
+    /// Round-robin — стадии пайплайна для одного message_id идут строго
+    /// последовательно (следующий хоп публикуется только после того, как
+    /// предыдущий подтверждён и состояние продвинуто), поэтому нет
+    /// зависимости от того, какой именно producer из пула обслужит какой
+    /// вызов — упорядоченность по ключу партиционирования Kafka не зависит
+    /// от того, какой клиент отправил запрос.
+    pub fn pick(&self) -> FutureProducer {
+        let idx = self.next.fetch_add(1, AtomicOrdering::Relaxed) % self.producers.len();
+        self.producers[idx].clone()
+    }
+}
+
+pub fn producer_pool_size() -> usize {
+    std::env::var("PIPELINE_PRODUCER_POOL_SIZE").ok().and_then(|v| v.parse().ok()).filter(|v| *v > 0).unwrap_or(4)
 }
 
 /// `handle_incoming` + `cache_message_context` (упрощённо, без Runtime Redis —
@@ -400,7 +459,7 @@ async fn process_one_incoming_record(
 
 pub async fn run_incoming_loop(
     consumer: StreamConsumer,
-    producer: FutureProducer,
+    producer: ProducerPool,
     pipeline: Arc<ArcSwap<PipelineDefinition>>,
     store: Arc<RedisStateStore>,
     control: Arc<ControlSnapshot>,
@@ -429,7 +488,7 @@ pub async fn run_incoming_loop(
 
                                 let permit = semaphore.clone().acquire_owned().await.expect("semaphore не должен закрываться");
                 let consumer_task = consumer.clone();
-                let producer_task = producer.clone();
+                let producer_task = producer.pick();
                 // Один снапшот на сообщение — все обращения к графу внутри
                 // задачи (entry_node дважды: handle_incoming + stage_topic)
                 // видят ровно ту же версию, даже если config_reload.rs
@@ -622,7 +681,7 @@ async fn process_one_completed_record(
 
 pub async fn run_completed_loop(
     consumer: StreamConsumer,
-    producer: FutureProducer,
+    producer: ProducerPool,
     pipeline: Arc<ArcSwap<PipelineDefinition>>,
     store: Arc<RedisStateStore>,
     control: Arc<ControlSnapshot>,
@@ -659,7 +718,7 @@ pub async fn run_completed_loop(
 
                                 let permit = semaphore.clone().acquire_owned().await.expect("semaphore не должен закрываться");
                 let consumer_task = consumer.clone();
-                let producer_task = producer.clone();
+                let producer_task = producer.pick();
                 let pipeline_snapshot = pipeline.load_full();
                 let store_task = store.clone();
                 let control_task = control.clone();
@@ -847,7 +906,7 @@ async fn process_one_retry_trigger_record(
 
 pub async fn run_retry_trigger_loop(
     consumer: StreamConsumer,
-    producer: FutureProducer,
+    producer: ProducerPool,
     pipeline: Arc<ArcSwap<PipelineDefinition>>,
     store: Arc<RedisStateStore>,
     control: Arc<ControlSnapshot>,
@@ -879,7 +938,7 @@ pub async fn run_retry_trigger_loop(
 
                                 let permit = semaphore.clone().acquire_owned().await.expect("semaphore не должен закрываться");
                 let consumer_task = consumer.clone();
-                let producer_task = producer.clone();
+                let producer_task = producer.pick();
                 let pipeline_snapshot = pipeline.load_full();
                 let store_task = store.clone();
                 let control_task = control.clone();

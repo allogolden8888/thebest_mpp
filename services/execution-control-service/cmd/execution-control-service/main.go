@@ -142,6 +142,21 @@ func main() {
 	}
 	defer publisher.Close()
 
+	// Закрывает холодный старт с абсолютно нуля: runGlobalControlLoop публикует
+	// GLOBAL только после первого успешного тика Prometheus, но на пустом
+	// трафике error_rate=0/0=NaN навсегда, а без GLOBAL sentinel в
+	// execution.control ни один consumer (pipeline-engine,
+	// partner-rest-receiver) не выпустит трафик наружу — см. kafkaio.go
+	// EnsureGlobalBootstrap. Не блокирует старт надолго: не более
+	// нескольких секунд на пустом/маленьком compacted-топике.
+	{
+		bootstrapCtx, bootstrapCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if err := kafkaio.EnsureGlobalBootstrap(bootstrapCtx, brokers, publisher); err != nil {
+			log.Printf("ensure_global_bootstrap: не удалось проверить/засеять GLOBAL sentinel: %v", err)
+		}
+		bootstrapCancel()
+	}
+
 	// publisher передаётся в gRPC-сервер, чтобы ApplyOverride/ClearOverride
 	// публиковали ExecutionControlRecord для ЛЮБОГО scope, а не только
 	// GLOBAL через runGlobalControlLoop (CODE_REVIEW.md CRITICAL finding —
