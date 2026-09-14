@@ -31,6 +31,22 @@ resource "yandex_mdb_clickhouse_cluster_v2" "mpp" {
     type      = "CLICKHOUSE"
   } }
 
+  # Автоматический backup — top-level атрибуты в `_v2` (не block, в отличие
+  # от `yandex_mdb_postgresql_cluster.config.backup_window_start`), тот же
+  # "nested attributes, не repeatable blocks" паттерн, что уже отмечен в
+  # комментарии наверху файла про `hosts = {...}`; подтверждено
+  # `terraform providers schema -json` на установленном провайдере, не
+  # предположено. ClickHouse — не source of truth (PostgreSQL — источник),
+  # при недоступности Analytics Writer копит lag и продолжает работу
+  # (комментарий наверху файла) — отсюда более мягкий RPO/retention, чем у
+  # PostgreSQL: 7 суток бэкапов достаточно для аналитического/диагностического
+  # хранилища, не транзакционного. Обоснование цифр — DISASTER_RECOVERY_RUNBOOK.md.
+  backup_retain_period_days = 7
+  backup_window_start = {
+    hours   = 4
+    minutes = 0
+  }
+
   maintenance_window {
     type = "ANYTIME" # staging по умолчанию; production — переключить на WEEKLY с конкретным окном
   }

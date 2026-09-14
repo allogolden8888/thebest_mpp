@@ -33,6 +33,17 @@ locals {
   }
 }
 
+# Backup: в отличие от yandex_mdb_postgresql_cluster/yandex_mdb_clickhouse_cluster_v2,
+# у yandex_mdb_redis_cluster в установленном провайдере (yandex-cloud/yandex
+# 0.218.0, проверено `terraform providers schema -json`, не предположено)
+# НЕТ backup_retain_period_days/backup_window_start — управляемый Redis не
+# даёт Terraform-контроль над автоматическими бэкапами так же, как PostgreSQL/
+# ClickHouse. Yandex Managed Service for Redis по документации всё равно снимает
+# ежедневные автоматические бэкапы при persistence_mode=ON, но с фиксированной,
+# не настраиваемой отсюда политикой хранения — до реального DR-прогона на
+# облаке считать это подтверждённым нельзя (см. DISASTER_RECOVERY_RUNBOOK.md,
+# раздел "что ещё нужно проверить на реальном облаке"). persistence_mode
+# ниже — единственный настраиваемый здесь рычаг durability.
 resource "yandex_mdb_redis_cluster" "mpp" {
   for_each    = local.redis_clusters
   name        = "mpp-${var.environment}-redis-${each.key}"
