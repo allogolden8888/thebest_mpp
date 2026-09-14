@@ -14,11 +14,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	_ "github.com/KimMachineGun/automemlimit"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"mpp/partner-api/internal/auth"
@@ -43,6 +45,31 @@ func (noopExporter) ExportSpans(ctx context.Context, spans []sdktracepkg.ReadOnl
 
 func (noopExporter) Shutdown(ctx context.Context) error {
 	return nil
+}
+
+// buildSpanExporter — BACKOFFICE_ROADMAP.md P1 "Observability": раньше все
+// спаны (internal/telemetry, реальный SDK) шли в noopExporter и сразу
+// отбрасывались — ни один трейс никогда никуда не уходил. При заданном
+// OTEL_EXPORTER_OTLP_ENDPOINT реально экспортирует их по OTLP/gRPC в
+// otel-collector (infra/docker/docker-compose.yml). Без переменной (bare
+// `go test`, окружения без коллектора) — прежний noop, старт не блокируется
+// и не падает: otlptracegrpc.New не делает блокирующий dial, а ошибки
+// самого экспорта BatchSpanProcessor только логирует.
+func buildSpanExporter(ctx context.Context) sdktracepkg.SpanExporter {
+	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	if endpoint == "" {
+		return noopExporter{}
+	}
+	endpoint = strings.TrimPrefix(strings.TrimPrefix(endpoint, "https://"), "http://")
+	exp, err := otlptracegrpc.New(ctx,
+		otlptracegrpc.WithEndpoint(endpoint),
+		otlptracegrpc.WithInsecure(),
+	)
+	if err != nil {
+		log.Printf("otel: не удалось создать OTLP exporter (%s), откат на noop: %v", endpoint, err)
+		return noopExporter{}
+	}
+	return exp
 }
 
 func env(key, fallback string) string {
@@ -123,7 +150,7 @@ func main() {
 	// используется no-op batcher без реального exporter'а, span'ы создаются
 	// и завершаются реально (см. internal/telemetry), но никуда не
 	// отправляются за пределы процесса.
-	tp := telemetry.NewProvider(sdktrace.NewBatchSpanProcessor(noopExporter{}))
+	tp := telemetry.NewProvider(sdktrace.NewBatchSpanProcessor(buildSpanExporter(context.Background())))
 	defer func() { _ = telemetry.Shutdown(context.Background(), tp) }()
 
 	router := httpapi.NewRouter(validator, pg, ch, tp)

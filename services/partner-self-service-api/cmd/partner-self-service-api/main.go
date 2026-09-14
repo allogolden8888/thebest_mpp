@@ -23,10 +23,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	_ "github.com/KimMachineGun/automemlimit"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
@@ -116,6 +118,31 @@ func (noopExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySp
 }
 func (noopExporter) Shutdown(ctx context.Context) error { return nil }
 
+// buildSpanExporter — BACKOFFICE_ROADMAP.md P1 "Observability": раньше все
+// спаны (internal/telemetry, реальный SDK) шли в noopExporter и сразу
+// отбрасывались — ни один трейс никогда никуда не уходил. При заданном
+// OTEL_EXPORTER_OTLP_ENDPOINT реально экспортирует их по OTLP/gRPC в
+// otel-collector (infra/docker/docker-compose.yml). Без переменной (bare
+// `go test`, окружения без коллектора) — прежний noop, старт не блокируется
+// и не падает: otlptracegrpc.New не делает блокирующий dial, а ошибки
+// самого экспорта BatchSpanProcessor только логирует.
+func buildSpanExporter(ctx context.Context) sdktrace.SpanExporter {
+	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	if endpoint == "" {
+		return noopExporter{}
+	}
+	endpoint = strings.TrimPrefix(strings.TrimPrefix(endpoint, "https://"), "http://")
+	exp, err := otlptracegrpc.New(ctx,
+		otlptracegrpc.WithEndpoint(endpoint),
+		otlptracegrpc.WithInsecure(),
+	)
+	if err != nil {
+		log.Printf("otel: не удалось создать OTLP exporter (%s), откат на noop: %v", endpoint, err)
+		return noopExporter{}
+	}
+	return exp
+}
+
 func main() {
 	healthState := &health.State{}
 	healthSrv := &http.Server{Addr: ":9090", Handler: health.Router(healthState)}
@@ -177,7 +204,7 @@ func main() {
 	}
 	defer iamConn.Close()
 
-	tp := telemetry.NewProvider(sdktrace.NewBatchSpanProcessor(noopExporter{}))
+	tp := telemetry.NewProvider(sdktrace.NewBatchSpanProcessor(buildSpanExporter(context.Background())))
 	defer func() { _ = telemetry.Shutdown(context.Background(), tp) }()
 
 	router := httpapi.NewRouter(httpapi.Deps{
