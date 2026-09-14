@@ -75,7 +75,7 @@ func handleGetWebhook(d Deps) http.HandlerFunc {
 		}
 		applicationID := chi.URLParam(r, "application_id")
 
-		cfg, err := getPartnerConfig(r.Context(), d.ConfigClient, claims.PartnerID)
+		cfg, _, err := getPartnerConfig(r.Context(), d.ConfigClient, claims.PartnerID)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("не удалось прочитать конфиг партнёра: %v", err), http.StatusBadGateway)
 			return
@@ -140,7 +140,7 @@ func handlePutWebhook(d Deps) http.HandlerFunc {
 			return
 		}
 
-		cfg, err := getPartnerConfig(r.Context(), d.ConfigClient, claims.PartnerID)
+		cfg, expectedVersion, err := getPartnerConfig(r.Context(), d.ConfigClient, claims.PartnerID)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("не удалось прочитать конфиг партнёра: %v", err), http.StatusBadGateway)
 			return
@@ -154,8 +154,8 @@ func handlePutWebhook(d Deps) http.HandlerFunc {
 
 		cfg.Applications[idx].NotificationCallbackURL = req.NotificationCallbackURL
 
-		if err := putPartnerConfig(r.Context(), d.ConfigClient, cfg, claims.Subject); err != nil {
-			http.Error(w, fmt.Sprintf("не удалось сохранить конфиг партнёра: %v", err), http.StatusBadGateway)
+		if err := putPartnerConfig(r.Context(), d.ConfigClient, cfg, claims.Subject, expectedVersion); err != nil {
+			writePutConfigError(w, err)
 			return
 		}
 
@@ -186,7 +186,7 @@ func handleTestWebhook(d Deps) http.HandlerFunc {
 		}
 		applicationID := chi.URLParam(r, "application_id")
 
-		cfg, err := getPartnerConfig(r.Context(), d.ConfigClient, claims.PartnerID)
+		cfg, _, err := getPartnerConfig(r.Context(), d.ConfigClient, claims.PartnerID)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("не удалось прочитать конфиг партнёра: %v", err), http.StatusBadGateway)
 			return

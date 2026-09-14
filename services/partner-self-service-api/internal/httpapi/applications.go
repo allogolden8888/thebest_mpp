@@ -34,7 +34,7 @@ func handleListApplications(d Deps) http.HandlerFunc {
 			http.Error(w, "нет claims в контексте", http.StatusInternalServerError)
 			return
 		}
-		cfg, err := getPartnerConfig(r.Context(), d.ConfigClient, claims.PartnerID)
+		cfg, _, err := getPartnerConfig(r.Context(), d.ConfigClient, claims.PartnerID)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("не удалось прочитать конфиг партнёра: %v", err), http.StatusBadGateway)
 			return
@@ -93,7 +93,7 @@ func handleCreateApplication(d Deps) http.HandlerFunc {
 			return
 		}
 
-		cfg, err := getPartnerConfig(r.Context(), d.ConfigClient, claims.PartnerID)
+		cfg, expectedVersion, err := getPartnerConfig(r.Context(), d.ConfigClient, claims.PartnerID)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("не удалось прочитать конфиг партнёра: %v", err), http.StatusBadGateway)
 			return
@@ -113,8 +113,8 @@ func handleCreateApplication(d Deps) http.HandlerFunc {
 			AllowedChannels: req.AllowedChannels,
 		})
 
-		if err := putPartnerConfig(r.Context(), d.ConfigClient, cfg, claims.Subject); err != nil {
-			http.Error(w, fmt.Sprintf("не удалось сохранить конфиг партнёра: %v", err), http.StatusBadGateway)
+		if err := putPartnerConfig(r.Context(), d.ConfigClient, cfg, claims.Subject, expectedVersion); err != nil {
+			writePutConfigError(w, err)
 			return
 		}
 
@@ -163,7 +163,7 @@ func handleUpdateApplication(d Deps) http.HandlerFunc {
 			return
 		}
 
-		cfg, err := getPartnerConfig(r.Context(), d.ConfigClient, claims.PartnerID)
+		cfg, expectedVersion, err := getPartnerConfig(r.Context(), d.ConfigClient, claims.PartnerID)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("не удалось прочитать конфиг партнёра: %v", err), http.StatusBadGateway)
 			return
@@ -181,8 +181,8 @@ func handleUpdateApplication(d Deps) http.HandlerFunc {
 		cfg.Applications[idx].AllowedChannels = req.AllowedChannels
 		cfg.Applications[idx].NotificationCallbackURL = req.NotificationCallbackURL
 
-		if err := putPartnerConfig(r.Context(), d.ConfigClient, cfg, claims.Subject); err != nil {
-			http.Error(w, fmt.Sprintf("не удалось сохранить конфиг партнёра: %v", err), http.StatusBadGateway)
+		if err := putPartnerConfig(r.Context(), d.ConfigClient, cfg, claims.Subject, expectedVersion); err != nil {
+			writePutConfigError(w, err)
 			return
 		}
 
@@ -207,7 +207,7 @@ func handleListSenders(d Deps) http.HandlerFunc {
 			http.Error(w, "нет claims в контексте", http.StatusInternalServerError)
 			return
 		}
-		cfg, err := getPartnerConfig(r.Context(), d.ConfigClient, claims.PartnerID)
+		cfg, _, err := getPartnerConfig(r.Context(), d.ConfigClient, claims.PartnerID)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("не удалось прочитать конфиг партнёра: %v", err), http.StatusBadGateway)
 			return
@@ -250,7 +250,7 @@ func handleCreateSender(d Deps) http.HandlerFunc {
 			return
 		}
 
-		cfg, err := getPartnerConfig(r.Context(), d.ConfigClient, claims.PartnerID)
+		cfg, expectedVersion, err := getPartnerConfig(r.Context(), d.ConfigClient, claims.PartnerID)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("не удалось прочитать конфиг партнёра: %v", err), http.StatusBadGateway)
 			return
@@ -266,8 +266,8 @@ func handleCreateSender(d Deps) http.HandlerFunc {
 		// PATCH ниже, как явный акт отзыва уже активного sender'а).
 		cfg.Senders = append(cfg.Senders, sender{SenderID: req.SenderID, Type: req.Type, Status: "active"})
 
-		if err := putPartnerConfig(r.Context(), d.ConfigClient, cfg, claims.Subject); err != nil {
-			http.Error(w, fmt.Sprintf("не удалось сохранить конфиг партнёра: %v", err), http.StatusBadGateway)
+		if err := putPartnerConfig(r.Context(), d.ConfigClient, cfg, claims.Subject, expectedVersion); err != nil {
+			writePutConfigError(w, err)
 			return
 		}
 
@@ -300,7 +300,7 @@ func handleUpdateSenderStatus(d Deps) http.HandlerFunc {
 			return
 		}
 
-		cfg, err := getPartnerConfig(r.Context(), d.ConfigClient, claims.PartnerID)
+		cfg, expectedVersion, err := getPartnerConfig(r.Context(), d.ConfigClient, claims.PartnerID)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("не удалось прочитать конфиг партнёра: %v", err), http.StatusBadGateway)
 			return
@@ -314,8 +314,8 @@ func handleUpdateSenderStatus(d Deps) http.HandlerFunc {
 
 		cfg.Senders[idx].Status = req.Status
 
-		if err := putPartnerConfig(r.Context(), d.ConfigClient, cfg, claims.Subject); err != nil {
-			http.Error(w, fmt.Sprintf("не удалось сохранить конфиг партнёра: %v", err), http.StatusBadGateway)
+		if err := putPartnerConfig(r.Context(), d.ConfigClient, cfg, claims.Subject, expectedVersion); err != nil {
+			writePutConfigError(w, err)
 			return
 		}
 
