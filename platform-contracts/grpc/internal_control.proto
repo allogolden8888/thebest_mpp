@@ -65,6 +65,26 @@ message CreateVersionRequest {
   string entity_id = 2;
   bytes payload_json = 3;
   string requested_by = 4;
+  // Оптимистическая блокировка (compare-and-swap) поверх read-modify-write:
+  // BACKOFFICE_ROADMAP.md, Production Readiness Review, P1 "Конкурентные
+  // изменения" — partner-self-service-api (и любой другой read-modify-write
+  // клиент этого RPC) читает текущую активную версию через GetActiveVersion,
+  // затем пишет изменённый payload обратно; без проверки версии два
+  // конкурентных read-modify-write на одну и ту же (entity_type, entity_id)
+  // молча теряют одно из двух изменений — оба читают версию N, оба пишут
+  // N+1, побеждает тот, чья транзакция взяла pg_advisory_xact_lock вторым
+  // (store.CreateImmutableVersionAndOutbox), первый результат исчезает
+  // безо всякой ошибки. 0 (proto3-default) = "без проверки", ровно текущее
+  // поведение — обратная совместимость гарантирована для КАЖДОГО
+  // существующего вызывающего этого RPC (backoffice-api/config.go
+  // (ConfigView.vue и экраны Categories/CTN/...), compliance-api/consent.go),
+  // ни один из них это поле пока не заполняет и продолжает работать как
+  // раньше. Ненулевое значение обязывает configuration-service атомарно (в
+  // той же транзакции, где определяется текущая активная версия) сверить
+  // его с реальной текущей версией и вернуть отличимую ошибку конфликта
+  // (codes.Aborted — см. grpcserver/server.go), если они разошлись, вместо
+  // безусловной записи.
+  int64 expected_version = 5;
 }
 
 message ConfigVersionResponse {

@@ -22,7 +22,7 @@ import (
 
 // Store — минимальный интерфейс от store.Store (позволяет фейковать в тестах).
 type Store interface {
-	CreateImmutableVersionAndOutbox(ctx context.Context, entityType validate.EntityType, entityID string, payloadJSON []byte, createdBy string) (store.ConfigVersion, error)
+	CreateImmutableVersionAndOutbox(ctx context.Context, entityType validate.EntityType, entityID string, payloadJSON []byte, createdBy string, expectedVersion int64) (store.ConfigVersion, error)
 	GetActiveVersion(ctx context.Context, entityType validate.EntityType, entityID string) (store.ConfigVersion, error)
 	ListVersions(ctx context.Context, entityType validate.EntityType, entityID string, pageSize int32, pageToken string) ([]store.ConfigVersion, string, error)
 	ListActiveVersionsByType(ctx context.Context, entityType validate.EntityType) ([]store.ConfigVersion, error)
@@ -141,6 +141,22 @@ func storeErrToStatus(err error) error {
 	if errors.Is(err, pgx.ErrNoRows) {
 		return status.Error(codes.NotFound, err.Error())
 	}
+	if errors.Is(err, store.ErrVersionConflict) {
+		// codes.Aborted, не codes.FailedPrecondition: этот кодогенератор уже
+		// занял FailedPrecondition под другой класс конфликта в этом же
+		// платформе — "операция отвергнута из-за одностороннего состояния
+		// сущности" (credential-issuer-service RotateCredential на уже
+		// отозванном секрете, incident-service ResolveIncident на уже закрытом
+		// инциденте: повторный вызов с теми же аргументами останется
+		// неудачным сколько ни повторяй). codes.Aborted — canonical gRPC
+		// значение именно для commit-time конфликта параллельных писателей
+		// ("the operation was aborted, typically due to a concurrency issue
+		// such as a sequencer check failure"): повторный вызов С АКТУАЛЬНЫМ
+		// expected_version (после повторного чтения) может успешно пройти —
+		// вызывающему стоит перечитать и повторить, а не считать операцию
+		// окончательно невозможной.
+		return status.Error(codes.Aborted, err.Error())
+	}
 	return status.Error(codes.Internal, err.Error())
 }
 
@@ -159,7 +175,7 @@ func (s *Server) CreateVersion(ctx context.Context, req *grpcv1.CreateVersionReq
 		return nil, storeErrToStatus(err)
 	}
 
-	version, err := s.store.CreateImmutableVersionAndOutbox(ctx, entityType, req.GetEntityId(), req.GetPayloadJson(), req.GetRequestedBy())
+	version, err := s.store.CreateImmutableVersionAndOutbox(ctx, entityType, req.GetEntityId(), req.GetPayloadJson(), req.GetRequestedBy(), req.GetExpectedVersion())
 	if err != nil {
 		return nil, storeErrToStatus(err)
 	}

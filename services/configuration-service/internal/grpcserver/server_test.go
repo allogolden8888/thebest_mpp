@@ -29,7 +29,23 @@ func newFakeStore() *fakeStore {
 	return &fakeStore{versions: map[string]store.ConfigVersion{}, payloads: map[string][]byte{}}
 }
 
-func (f *fakeStore) CreateImmutableVersionAndOutbox(ctx context.Context, entityType validate.EntityType, entityID string, payloadJSON []byte, createdBy string) (store.ConfigVersion, error) {
+// CreateImmutableVersionAndOutbox — fakeStore имитирует ту же CAS-проверку,
+// что реальный store.Store делает внутри транзакции (см. store.go
+// ErrVersionConflict): expectedVersion=0 пропускает проверку, иначе
+// сравнивается с версией текущей активной записи ЭТОГО entityID (fakeStore
+// не различает entity_type per-entityID map, как и product-код здесь ниже —
+// entityID в этих тестах всегда уникален для проверяемого сценария).
+func (f *fakeStore) CreateImmutableVersionAndOutbox(ctx context.Context, entityType validate.EntityType, entityID string, payloadJSON []byte, createdBy string, expectedVersion int64) (store.ConfigVersion, error) {
+	if expectedVersion != 0 {
+		current, ok := f.versions[entityID]
+		var currentVersion int64
+		if ok {
+			currentVersion = int64(current.Version)
+		}
+		if currentVersion != expectedVersion {
+			return store.ConfigVersion{}, store.ErrVersionConflict
+		}
+	}
 	v := store.ConfigVersion{EntityType: entityType, EntityID: entityID, Version: int32(len(f.created) + 1), Status: "active", CreatedBy: createdBy, Payload: payloadJSON}
 	f.created = append(f.created, v)
 	f.versions[entityID] = v
@@ -136,6 +152,82 @@ func TestCreateVersionSucceedsAndReturnsVersion(t *testing.T) {
 	}
 	if resp.GetEntityType() != commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER {
 		t.Fatalf("entity_type не пробросился обратно верно: %v", resp.GetEntityType())
+	}
+}
+
+// TestCreateVersionExpectedVersionMismatchReturnsAborted —
+// BACKOFFICE_ROADMAP.md, Production Readiness Review, P1 "Конкурентные
+// изменения": вызывающий (partner-self-service-api) прочитал версию 1,
+// но реальная текущая версия к моменту записи уже 2 (кто-то другой успел
+// записать между чтением и этим вызовом) — CreateVersion должен вернуть
+// отличимую ошибку конфликта (codes.Aborted, см. server.go storeErrToStatus
+// / store.ErrVersionConflict), а не молча принять устаревший payload.
+func TestCreateVersionExpectedVersionMismatchReturnsAborted(t *testing.T) {
+	fs := newFakeStore()
+	srv := New(fs, alwaysValid{})
+	ctx := context.Background()
+
+	// version 1
+	if _, err := srv.CreateVersion(ctx, &grpcv1.CreateVersionRequest{
+		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER, EntityId: "acme",
+		PayloadJson: []byte(`{"n":1}`), RequestedBy: "ops",
+	}); err != nil {
+		t.Fatalf("первая запись (версия 1) не удалась: %v", err)
+	}
+	// version 2 — конкурент, читавший другую копию, уже "выиграл".
+	if _, err := srv.CreateVersion(ctx, &grpcv1.CreateVersionRequest{
+		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER, EntityId: "acme",
+		PayloadJson: []byte(`{"n":2}`), RequestedBy: "ops",
+	}); err != nil {
+		t.Fatalf("вторая запись (версия 2) не удалась: %v", err)
+	}
+
+	// Опоздавший вызывающий всё ещё думает, что текущая версия — 1.
+	_, err := srv.CreateVersion(ctx, &grpcv1.CreateVersionRequest{
+		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER, EntityId: "acme",
+		PayloadJson: []byte(`{"n":1,"stale_edit":true}`), RequestedBy: "ops",
+		ExpectedVersion: 1,
+	})
+	if status.Code(err) != codes.Aborted {
+		t.Fatalf("ожидали codes.Aborted при устаревшем expected_version, получили %v (%v)", status.Code(err), err)
+	}
+
+	// Реальная активная версия по-прежнему версия 2 — конфликтующая запись
+	// не должна была ничего изменить.
+	active, err := srv.GetActiveVersion(ctx, &grpcv1.GetActiveVersionRequest{
+		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER, EntityId: "acme",
+	})
+	if err != nil {
+		t.Fatalf("GetActiveVersion failed: %v", err)
+	}
+	if active.GetVersion() != 2 {
+		t.Fatalf("ожидали, что активная версия останется 2 (конфликт не должен был писать), получили %d", active.GetVersion())
+	}
+}
+
+// TestCreateVersionExpectedVersionZeroSkipsCheck — 0/не задано остаётся
+// "без проверки" (обратная совместимость для всех вызывающих, которые ещё
+// не приняли CAS — backoffice-api/config.go, compliance-api/consent.go):
+// повторная безусловная запись поверх уже не первой версии обязана
+// по-прежнему проходить.
+func TestCreateVersionExpectedVersionZeroSkipsCheck(t *testing.T) {
+	fs := newFakeStore()
+	srv := New(fs, alwaysValid{})
+	ctx := context.Background()
+
+	if _, err := srv.CreateVersion(ctx, &grpcv1.CreateVersionRequest{
+		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER, EntityId: "acme",
+		PayloadJson: []byte(`{"n":1}`), RequestedBy: "ops",
+	}); err != nil {
+		t.Fatalf("первая запись не удалась: %v", err)
+	}
+
+	if _, err := srv.CreateVersion(ctx, &grpcv1.CreateVersionRequest{
+		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER, EntityId: "acme",
+		PayloadJson: []byte(`{"n":2}`), RequestedBy: "ops",
+		// ExpectedVersion не задан (proto3 default 0).
+	}); err != nil {
+		t.Fatalf("безусловная запись без expected_version должна проходить как раньше: %v", err)
 	}
 }
 

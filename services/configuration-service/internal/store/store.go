@@ -6,6 +6,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -14,6 +15,15 @@ import (
 
 	"mpp/configuration-service/internal/validate"
 )
+
+// ErrVersionConflict — compare-and-swap провалился: expectedVersion,
+// переданный CreateImmutableVersionAndOutbox, разошёлся с реальной текущей
+// версией (entity_type, entity_id) на момент записи (BACKOFFICE_ROADMAP.md,
+// Production Readiness Review, P1 "Конкурентные изменения"). Отдельный
+// sentinel, не текстовая ошибка — grpcserver/server.go должен отличить этот
+// случай от прочих ошибок транзакции и вернуть codes.Aborted, а не
+// codes.Internal.
+var ErrVersionConflict = errors.New("version conflict: текущая версия не совпадает с expected_version")
 
 // policyTemplateOrConsent — эти два entity_type не пишут в config_versions
 // (собственные таблицы policy.policy_template / policy.subscriber_consent,
@@ -53,13 +63,27 @@ func New(pool *pgxpool.Pool) *Store {
 // (entity_type, entity_id), вычислено внутри той же транзакции
 // (SELECT ... FOR UPDATE — сериализация конкурентных CRUD на одну и ту же
 // сущность).
-func (s *Store) CreateImmutableVersionAndOutbox(ctx context.Context, entityType validate.EntityType, entityID string, payloadJSON []byte, createdBy string) (ConfigVersion, error) {
+//
+// expectedVersion — оптимистическая блокировка (BACKOFFICE_ROADMAP.md,
+// Production Readiness Review, P1 "Конкурентные изменения"): 0 = без
+// проверки (текущее поведение для всех вызывающих, которые ещё не приняли
+// CAS — backoffice-api/config.go, compliance-api/consent.go). Ненулевое
+// значение сверяется с реальной текущей версией СРАЗУ ПОСЛЕ
+// pg_advisory_xact_lock, то есть внутри того же критического участка, что
+// уже сериализует конкурентные записи на (entity_type, entity_id) — без
+// этой проверки advisory-lock лишь гарантирует, что версии не потеряются
+// на уровне номеров (N+1 всегда достаётся ровно одному писателю), но не
+// мешает второму писателю молча перезаписать поля, изменённые первым,
+// собственной устаревшей копией документа.
+func (s *Store) CreateImmutableVersionAndOutbox(ctx context.Context, entityType validate.EntityType, entityID string, payloadJSON []byte, createdBy string, expectedVersion int64) (ConfigVersion, error) {
 	var result ConfigVersion
 
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if skipsConfigVersionsTable(entityType) {
-			// Нет строки в config_versions — outbox пишется напрямую,
-			// config_version_id=NULL (V003 комментарий).
+			// Эти entity_type не ведут историю версий вообще (см.
+			// skipsConfigVersionsTable) — CAS здесь структурно неприменим,
+			// expectedVersion игнорируется (ни один сегодняшний вызывающий
+			// этих entity_type его не заполняет).
 			_, err := tx.Exec(ctx, `
 				INSERT INTO config.config_outbox (config_version_id, entity_type, entity_id, payload)
 				VALUES (NULL, $1, $2, $3)
@@ -81,6 +105,25 @@ func (s *Store) CreateImmutableVersionAndOutbox(ctx context.Context, entityType 
 		// commit/rollback.
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, string(entityType)+":"+entityID); err != nil {
 			return fmt.Errorf("acquire version lock: %w", err)
+		}
+
+		if expectedVersion != 0 {
+			// currentVersion=0 означает "версий ещё нет" — тот же COALESCE(...,
+			// 0), что и ниже при вычислении nextVersion, читается ВНУТРИ уже
+			// взятого advisory-lock, поэтому не может устареть между этой
+			// проверкой и INSERT ниже: второй конкурентный вызов заблокирован
+			// на tx.Exec(pg_advisory_xact_lock) выше до commit/rollback первого.
+			var currentVersion int32
+			if err := tx.QueryRow(ctx, `
+				SELECT COALESCE(MAX(version), 0)
+				FROM config.config_versions
+				WHERE entity_type = $1 AND entity_id = $2
+			`, string(entityType), entityID).Scan(&currentVersion); err != nil {
+				return fmt.Errorf("check expected_version: %w", err)
+			}
+			if int64(currentVersion) != expectedVersion {
+				return ErrVersionConflict
+			}
 		}
 
 		var nextVersion int32

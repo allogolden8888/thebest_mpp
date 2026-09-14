@@ -267,13 +267,33 @@ func (x *DiffVersionsResponse) GetToPayloadJson() []byte {
 }
 
 type CreateVersionRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	EntityType    v1.ConfigEntityType    `protobuf:"varint,1,opt,name=entity_type,json=entityType,proto3,enum=mpp.common.v1.ConfigEntityType" json:"entity_type,omitempty"`
-	EntityId      string                 `protobuf:"bytes,2,opt,name=entity_id,json=entityId,proto3" json:"entity_id,omitempty"`
-	PayloadJson   []byte                 `protobuf:"bytes,3,opt,name=payload_json,json=payloadJson,proto3" json:"payload_json,omitempty"`
-	RequestedBy   string                 `protobuf:"bytes,4,opt,name=requested_by,json=requestedBy,proto3" json:"requested_by,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	EntityType  v1.ConfigEntityType    `protobuf:"varint,1,opt,name=entity_type,json=entityType,proto3,enum=mpp.common.v1.ConfigEntityType" json:"entity_type,omitempty"`
+	EntityId    string                 `protobuf:"bytes,2,opt,name=entity_id,json=entityId,proto3" json:"entity_id,omitempty"`
+	PayloadJson []byte                 `protobuf:"bytes,3,opt,name=payload_json,json=payloadJson,proto3" json:"payload_json,omitempty"`
+	RequestedBy string                 `protobuf:"bytes,4,opt,name=requested_by,json=requestedBy,proto3" json:"requested_by,omitempty"`
+	// Оптимистическая блокировка (compare-and-swap) поверх read-modify-write:
+	// BACKOFFICE_ROADMAP.md, Production Readiness Review, P1 "Конкурентные
+	// изменения" — partner-self-service-api (и любой другой read-modify-write
+	// клиент этого RPC) читает текущую активную версию через GetActiveVersion,
+	// затем пишет изменённый payload обратно; без проверки версии два
+	// конкурентных read-modify-write на одну и ту же (entity_type, entity_id)
+	// молча теряют одно из двух изменений — оба читают версию N, оба пишут
+	// N+1, побеждает тот, чья транзакция взяла pg_advisory_xact_lock вторым
+	// (store.CreateImmutableVersionAndOutbox), первый результат исчезает
+	// безо всякой ошибки. 0 (proto3-default) = "без проверки", ровно текущее
+	// поведение — обратная совместимость гарантирована для КАЖДОГО
+	// существующего вызывающего этого RPC (backoffice-api/config.go
+	// (ConfigView.vue и экраны Categories/CTN/...), compliance-api/consent.go),
+	// ни один из них это поле пока не заполняет и продолжает работать как
+	// раньше. Ненулевое значение обязывает configuration-service атомарно (в
+	// той же транзакции, где определяется текущая активная версия) сверить
+	// его с реальной текущей версией и вернуть отличимую ошибку конфликта
+	// (codes.Aborted — см. grpcserver/server.go), если они разошлись, вместо
+	// безусловной записи.
+	ExpectedVersion int64 `protobuf:"varint,5,opt,name=expected_version,json=expectedVersion,proto3" json:"expected_version,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *CreateVersionRequest) Reset() {
@@ -332,6 +352,13 @@ func (x *CreateVersionRequest) GetRequestedBy() string {
 		return x.RequestedBy
 	}
 	return ""
+}
+
+func (x *CreateVersionRequest) GetExpectedVersion() int64 {
+	if x != nil {
+		return x.ExpectedVersion
+	}
+	return 0
 }
 
 type ConfigVersionResponse struct {
@@ -1018,13 +1045,14 @@ const file_grpc_internal_control_proto_rawDesc = "" +
 	"\x11from_payload_json\x18\x02 \x01(\fR\x0ffromPayloadJson\x12\x1d\n" +
 	"\n" +
 	"to_version\x18\x03 \x01(\x03R\ttoVersion\x12&\n" +
-	"\x0fto_payload_json\x18\x04 \x01(\fR\rtoPayloadJson\"\xbb\x01\n" +
+	"\x0fto_payload_json\x18\x04 \x01(\fR\rtoPayloadJson\"\xe6\x01\n" +
 	"\x14CreateVersionRequest\x12@\n" +
 	"\ventity_type\x18\x01 \x01(\x0e2\x1f.mpp.common.v1.ConfigEntityTypeR\n" +
 	"entityType\x12\x1b\n" +
 	"\tentity_id\x18\x02 \x01(\tR\bentityId\x12!\n" +
 	"\fpayload_json\x18\x03 \x01(\fR\vpayloadJson\x12!\n" +
-	"\frequested_by\x18\x04 \x01(\tR\vrequestedBy\"\x86\x02\n" +
+	"\frequested_by\x18\x04 \x01(\tR\vrequestedBy\x12)\n" +
+	"\x10expected_version\x18\x05 \x01(\x03R\x0fexpectedVersion\"\x86\x02\n" +
 	"\x15ConfigVersionResponse\x12@\n" +
 	"\ventity_type\x18\x01 \x01(\x0e2\x1f.mpp.common.v1.ConfigEntityTypeR\n" +
 	"entityType\x12\x1b\n" +

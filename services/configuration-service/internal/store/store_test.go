@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -66,7 +67,7 @@ func TestCreateImmutableVersionAndOutboxFirstVersion(t *testing.T) {
 	ctx := context.Background()
 
 	entityID := uniqueEntityID("acme")
-	v, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(`{"partner_id":"acme"}`), "tester")
+	v, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(`{"partner_id":"acme"}`), "tester", 0)
 	if err != nil {
 		t.Fatalf("CreateImmutableVersionAndOutbox failed: %v", err)
 	}
@@ -94,11 +95,11 @@ func TestCreateImmutableVersionAndOutboxIncrementsVersion(t *testing.T) {
 	ctx := context.Background()
 	entityID := uniqueEntityID("beeline_uz")
 
-	v1, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityOperator, entityID, []byte(`{}`), "tester")
+	v1, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityOperator, entityID, []byte(`{}`), "tester", 0)
 	if err != nil {
 		t.Fatalf("first create failed: %v", err)
 	}
-	v2, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityOperator, entityID, []byte(`{}`), "tester")
+	v2, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityOperator, entityID, []byte(`{}`), "tester", 0)
 	if err != nil {
 		t.Fatalf("second create failed: %v", err)
 	}
@@ -126,7 +127,7 @@ func TestConcurrentCreateOnBrandNewEntitySerializesVersions(t *testing.T) {
 	errs := make(chan error, n)
 	for i := 0; i < n; i++ {
 		go func() {
-			v, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(`{}`), "tester")
+			v, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(`{}`), "tester", 0)
 			if err != nil {
 				errs <- err
 				return
@@ -154,6 +155,84 @@ func TestConcurrentCreateOnBrandNewEntitySerializesVersions(t *testing.T) {
 	}
 }
 
+// TestConcurrentCreateWithStaleExpectedVersionOneWinsOneConflicts —
+// BACKOFFICE_ROADMAP.md, Production Readiness Review, P1 "Конкурентные
+// изменения": реальная демонстрация того, что pg_advisory_xact_lock САМ ПО
+// СЕБЕ (без проверки expected_version) не спасает от потери конкурентного
+// изменения — он только не даёт двум писателям получить одинаковый номер
+// версии, но не мешает второму молча перезаписать поле, изменённое первым,
+// собственной устаревшей копией документа. Два конкурентных вызова стартуют
+// из одной и той же версии (version 1, expected_version=1) и одновременно
+// пытаются продвинуться до version 2 — ровно один должен выиграть commit,
+// второй обязан получить ErrVersionConflict, а не тихо создать version 3
+// поверх version 2 (что и было бы старым поведением при обоих expected_version=0).
+func TestConcurrentCreateWithStaleExpectedVersionOneWinsOneConflicts(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	s := New(pool)
+	ctx := context.Background()
+	entityID := uniqueEntityID("race-cas")
+
+	// version 1 — начальное состояние, которое "прочитали" оба конкурента.
+	v1, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(`{"field":"initial"}`), "tester", 0)
+	if err != nil {
+		t.Fatalf("создание начальной версии не удалось: %v", err)
+	}
+	if v1.Version != 1 {
+		t.Fatalf("ожидали версию 1, получили %d", v1.Version)
+	}
+
+	const n = 2
+	type outcome struct {
+		v   ConfigVersion
+		err error
+	}
+	results := make(chan outcome, n)
+	start := make(chan struct{})
+	payloads := []string{`{"field":"from_tab_a"}`, `{"field":"from_tab_b"}`}
+	for i := 0; i < n; i++ {
+		payload := payloads[i]
+		go func() {
+			<-start
+			v, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(payload), "tester", 1)
+			results <- outcome{v: v, err: err}
+		}()
+	}
+	close(start)
+
+	var successes, conflicts int
+	var winnerPayload string
+	for i := 0; i < n; i++ {
+		o := <-results
+		switch {
+		case o.err == nil:
+			successes++
+			if o.v.Version != 2 {
+				t.Fatalf("победитель должен получить версию 2, получил %d", o.v.Version)
+			}
+			winnerPayload = string(o.v.Payload)
+		case errors.Is(o.err, ErrVersionConflict):
+			conflicts++
+		default:
+			t.Fatalf("неожиданная ошибка (не ErrVersionConflict): %v", o.err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("ожидали ровно 1 успех и 1 конфликт из %d конкурентных CAS-записей, получили successes=%d conflicts=%d", n, successes, conflicts)
+	}
+
+	// Реальная сохранённая активная версия должна отражать победителя, не
+	// смесь и не оба изменения молча наложенными друг на друга.
+	active, err := s.GetActiveVersion(ctx, validate.EntityPartner, entityID)
+	if err != nil {
+		t.Fatalf("GetActiveVersion failed: %v", err)
+	}
+	if active.Version != 2 {
+		t.Fatalf("ожидали, что реальная активная версия = 2, получили %d", active.Version)
+	}
+	jsonEqual(t, active.Payload, winnerPayload)
+}
+
 func TestPolicyTemplateSkipsConfigVersionsTable(t *testing.T) {
 	pool := testPool(t)
 	defer pool.Close()
@@ -161,7 +240,7 @@ func TestPolicyTemplateSkipsConfigVersionsTable(t *testing.T) {
 	ctx := context.Background()
 	entityID := uniqueEntityID("tmpl")
 
-	_, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPolicyTemplate, entityID, []byte(`{}`), "tester")
+	_, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPolicyTemplate, entityID, []byte(`{}`), "tester", 0)
 	if err != nil {
 		t.Fatalf("CreateImmutableVersionAndOutbox failed: %v", err)
 	}
@@ -194,7 +273,7 @@ func TestArchiveVersionSetsStatusArchived(t *testing.T) {
 	ctx := context.Background()
 	entityID := uniqueEntityID("acme")
 
-	created, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(`{}`), "tester")
+	created, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(`{}`), "tester", 0)
 	if err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
@@ -216,7 +295,7 @@ func TestListVersionsReturnsAllCreatedVersions(t *testing.T) {
 	entityID := uniqueEntityID("acme")
 
 	for i := 0; i < 3; i++ {
-		if _, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(`{}`), "tester"); err != nil {
+		if _, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(`{}`), "tester", 0); err != nil {
 			t.Fatalf("create #%d failed: %v", i, err)
 		}
 	}
@@ -247,11 +326,11 @@ func TestListActiveVersionsByTypeReturnsLatestActivePerEntity(t *testing.T) {
 	ctx := context.Background()
 	entityID := uniqueEntityID("test-cat")
 
-	v1, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityCategory, entityID, []byte(`{"name":"x","regex":"","count_in_cdr":false}`), "tester")
+	v1, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityCategory, entityID, []byte(`{"name":"x","regex":"","count_in_cdr":false}`), "tester", 0)
 	if err != nil {
 		t.Fatalf("create v1 failed: %v", err)
 	}
-	v2, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityCategory, entityID, []byte(`{"name":"x","regex":"","count_in_cdr":true}`), "tester")
+	v2, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityCategory, entityID, []byte(`{"name":"x","regex":"","count_in_cdr":true}`), "tester", 0)
 	if err != nil {
 		t.Fatalf("create v2 failed: %v", err)
 	}
@@ -290,10 +369,10 @@ func TestGetVersionByNumberReturnsExactVersionPayload(t *testing.T) {
 	ctx := context.Background()
 	entityID := uniqueEntityID("acme")
 
-	if _, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(`{"n":1}`), "tester"); err != nil {
+	if _, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(`{"n":1}`), "tester", 0); err != nil {
 		t.Fatalf("create v1 failed: %v", err)
 	}
-	if _, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(`{"n":2}`), "tester"); err != nil {
+	if _, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(`{"n":2}`), "tester", 0); err != nil {
 		t.Fatalf("create v2 failed: %v", err)
 	}
 
@@ -317,7 +396,7 @@ func TestGetVersionByNumberUnknownVersionReturnsError(t *testing.T) {
 	ctx := context.Background()
 	entityID := uniqueEntityID("acme")
 
-	if _, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(`{}`), "tester"); err != nil {
+	if _, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, []byte(`{}`), "tester", 0); err != nil {
 		t.Fatalf("create v1 failed: %v", err)
 	}
 
@@ -340,7 +419,7 @@ func TestGetActiveVersionReturnsPayloadFromRealRow(t *testing.T) {
 	entityID := uniqueEntityID("acme")
 
 	wantPayload := []byte(`{"partner_id":"acme","applications":[]}`)
-	if _, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, wantPayload, "tester"); err != nil {
+	if _, err := s.CreateImmutableVersionAndOutbox(ctx, validate.EntityPartner, entityID, wantPayload, "tester", 0); err != nil {
 		t.Fatalf("CreateImmutableVersionAndOutbox failed: %v", err)
 	}
 
