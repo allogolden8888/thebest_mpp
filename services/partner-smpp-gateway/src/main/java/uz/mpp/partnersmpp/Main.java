@@ -110,10 +110,7 @@ public final class Main {
 
             // Судьба уже держащейся TCP-сессии на config.changes — три
             // сценария, требуемых Production Readiness Review P0#4, каждый
-            // разобран отдельно (ни один из них не был решён предыдущим
-            // проходом — PartnerConfigStore.refreshPartner документирует,
-            // что решение "забота вызывающего кода", но сам вызывающий код
-            // (здесь) этот вызов раньше не делал):
+            // разобран отдельно:
             //
             // 1. Партнёр РОТИРУЕТ credential (self-service, status остаётся
             //    "active") при уже держащейся сессии — сессия НЕ рвётся
@@ -150,13 +147,11 @@ public final class Main {
             //    что реально держит сам (TCP-сокет пришпилен к одному поду) —
             //    межподовая координация не нужна.
             // 3. Новое auth.type=SMPP_BIND приложение добавлено существующему
-            //    активному партнёру — событие приходит с тем же
-            //    entity_id=partner_id, status="active", refreshPartner делает
-            //    полный re-fetch партнёра из Redis (не только изменившийся
-            //    system_id) — новое приложение появляется в живой карте сразу,
-            //    бинд-способно без рестарта. Ничего дополнительно строить не
-            //    нужно — уже покрыто существующим "весь партнёр целиком"
-            //    re-fetch'ем в PartnerConfigStore.
+            //    активному партнёру — immutable payload события содержит весь
+            //    партнёрский snapshot и атомарно заменяет его записи. Redis не
+            //    перечитывается: независимый cache-projector может ещё не успеть
+            //    переставить current pointer. Version fence делает replay
+            //    идемпотентным и не допускает отката на старую версию.
             ChannelRegistry channelRegistryForConfigChanges = channelRegistry;
             configChangeConsumer = new ConfigChangeConsumer(
                 kafkaBrokers,
@@ -166,14 +161,22 @@ public final class Main {
                 // несколькими репликами, каждая должна видеть КАЖДОЕ событие,
                 // не получать свою партицию общей группы).
                 "partner-smpp-gateway-config-changes-" + env("HOSTNAME", "partner-smpp-gateway-0") + "-" + System.nanoTime(),
-                (partnerId, status) -> {
-                    partnerConfigStore.refreshPartner(partnerId, status);
-                    if (!"active".equals(status)) {
-                        forceDisconnectPartner(channelRegistryForConfigChanges, partnerId, status);
+                event -> {
+                    boolean changed = partnerConfigStore.applyEvent(
+                        event.getEntityId(),
+                        event.getVersion(),
+                        event.getStatus(),
+                        event.getPayloadJson().toByteArray()
+                    );
+                    if (changed && !"active".equals(event.getStatus())) {
+                        forceDisconnectPartner(channelRegistryForConfigChanges, event.getEntityId(), event.getStatus());
                     }
                 }
             );
             configChangeConsumer.start();
+            configChangeConsumer.awaitInitialReplay(Duration.ofSeconds(Long.parseLong(
+                env("CONFIG_INITIAL_REPLAY_TIMEOUT_SECONDS", "60")
+            )));
         }
 
         SessionHeartbeatScheduler heartbeatScheduler = new SessionHeartbeatScheduler(
@@ -225,6 +228,13 @@ public final class Main {
             checks.put("partner_config", () -> {
                 if (storeForCheck.currentCredentials().isEmpty()) {
                     throw new IllegalStateException("ни одного auth.type=SMPP_BIND приложения не загружено из Configuration Redis");
+                }
+                return null;
+            });
+            ConfigChangeConsumer configForCheck = configChangeConsumer;
+            checks.put("config_changes", () -> {
+                if (configForCheck == null || !configForCheck.isHealthy()) {
+                    throw new IllegalStateException("config.changes consumer не готов или застрял на неприменимом событии");
                 }
                 return null;
             });

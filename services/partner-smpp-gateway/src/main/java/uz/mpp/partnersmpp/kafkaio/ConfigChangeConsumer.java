@@ -15,10 +15,15 @@ import uz.mpp.platformcontracts.events.v1.ConfigChangeEvent;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -31,16 +36,12 @@ import java.util.logging.Logger;
  * partner-notification-service", все они на момент того README читали
  * partner-конфиг только один раз при старте).
  *
- * <p>Только {@code entity_type=PARTNER} события интересны здесь. На каждое
- * релевантное событие вызывается {@code
- * PartnerConfigStore.refreshPartner(partnerId, status)} — передаётся и
- * {@code status} самого события, не только {@code entity_id}: {@link
- * PartnerConfigStore} нуждается в нём, чтобы отличить "версия стала
- * активной, можно безопасно re-fetch'ить {@code config:current} из Redis"
- * от "версия архивная, {@code config:current} НЕ переставлен
- * config-cache-projector'ом, читать оттуда бессмысленно — убрать
- * credential'ы напрямую по сигналу из этого события" (см. её javadoc
- * "КРИТИЧНО" за полным разбором находки).
+ * <p>Только {@code entity_type=PARTNER} события интересны здесь. В
+ * production callback применяет immutable {@code payload_json} события
+ * напрямую через {@link PartnerConfigStore#applyEvent}; ждать независимый
+ * config-cache-projector нельзя — он может записать эту версию в Redis как
+ * до, так и после данного consumer. Redis используется только как быстрый
+ * стартовый snapshot, а Kafka version fencing догоняет его без rollback.
  *
  * <p><b>Каждый под — свой независимый consumer group.</b> Это не выбор
  * "для надёжного replay на рестарте" (хотя даёт и это, {@code
@@ -56,10 +57,9 @@ import java.util.logging.Logger;
  * только ОДНА реплика увидела бы ротацию конкретного партнёра, остальные
  * тихо остались бы на старом конфиге.
  *
- * <p><b>Коммит — только после успешного {@code refreshPartner}.</b>
- * Транзиентная ошибка Redis не должна тихо "проглотить" событие — офсет
- * не коммитится, тот же at-least-once принцип, что {@code billing-service
- * KafkaIo}/{@code config-cache-projector} уже применяют к своим потокам.
+ * <p><b>Коммит — только после успешного применения.</b> При ошибке consumer
+ * делает seek на упавший offset, readiness краснеет и запись повторяется в
+ * текущем процессе, а не только после restart/rebalance.
  */
 public final class ConfigChangeConsumer implements AutoCloseable {
 
@@ -76,23 +76,22 @@ public final class ConfigChangeConsumer implements AutoCloseable {
     // java.util.function.Consumer, конфликта имён нет), но сохранено, чтобы
     // не трогать лишний импорт ради минимального диффа этой правки.
     private final org.apache.kafka.clients.consumer.Consumer<String, byte[]> consumer;
-    private final BiConsumer<String, String> partnerRefresher;
+    private final Consumer<ConfigChangeEvent> partnerRefresher;
     private final AtomicBoolean running = new AtomicBoolean(true);
+    private final AtomicBoolean initialReplayReady = new AtomicBoolean(false);
+    private final CountDownLatch initialReplayFinished = new CountDownLatch(1);
+    private final Set<TopicPartition> stalledPartitions = ConcurrentHashMap.newKeySet();
+    private volatile RuntimeException terminalFailure;
     private Thread thread;
 
     /**
-     * @param partnerRefresher вызывается с {@code (entity_id, status)} каждого
-     *                         {@code entity_type=PARTNER} события — в проде это
-     *                         {@code PartnerConfigStore::refreshPartner} (см.
-     *                         {@code Main.java}, обёрнутый там дополнительно
-     *                         принудительным разъединением на неактивный
-     *                         статус); принимает функциональный интерфейс, а
-     *                         не конкретный {@code PartnerConfigStore}, чтобы
-     *                         {@code processBatch}/{@code handle} были
-     *                         тестируемы без реального Redis (см. {@code
-     *                         ConfigChangeConsumerTest}).
+     * @param partnerRefresher получает полный immutable PARTNER event; в
+     *                         production применяет payload с version fence и
+     *                         при архивации закрывает живые сессии. Функциональный
+     *                         интерфейс сохраняет batch-логику тестируемой без
+     *                         Kafka и Redis.
      */
-    public ConfigChangeConsumer(String bootstrapServers, String groupId, BiConsumer<String, String> partnerRefresher) {
+    public ConfigChangeConsumer(String bootstrapServers, String groupId, Consumer<ConfigChangeEvent> partnerRefresher) {
         Properties props = new Properties();
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         props.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
@@ -107,7 +106,7 @@ public final class ConfigChangeConsumer implements AutoCloseable {
     }
 
     /** Тестовый конструктор — принимает уже сконфигурированный/мок consumer напрямую. */
-    ConfigChangeConsumer(org.apache.kafka.clients.consumer.Consumer<String, byte[]> consumer, BiConsumer<String, String> partnerRefresher) {
+    ConfigChangeConsumer(org.apache.kafka.clients.consumer.Consumer<String, byte[]> consumer, Consumer<ConfigChangeEvent> partnerRefresher) {
         this.consumer = consumer;
         this.partnerRefresher = partnerRefresher;
     }
@@ -118,8 +117,38 @@ public final class ConfigChangeConsumer implements AutoCloseable {
         thread.start();
     }
 
+    /**
+     * Fail-closed startup barrier. The SMPP listener must not accept binds
+     * from the Redis bootstrap snapshot until every partition has been
+     * replayed through the end offset captured for this process.
+     */
+    public void awaitInitialReplay(Duration timeout) {
+        try {
+            if (!initialReplayFinished.await(timeout.toMillis(), TimeUnit.MILLISECONDS)) {
+                throw new IllegalStateException("config.changes initial replay timeout after " + timeout);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted while waiting for config.changes initial replay", e);
+        }
+        if (!initialReplayReady.get()) {
+            throw new IllegalStateException("config.changes initial replay failed", terminalFailure);
+        }
+    }
+
+    /** Readiness signal: initial replay completed and no partition is stuck. */
+    public boolean isHealthy() {
+        Thread activeThread = thread;
+        return initialReplayReady.get()
+            && terminalFailure == null
+            && stalledPartitions.isEmpty()
+            && activeThread != null
+            && activeThread.isAlive();
+    }
+
     private void run() {
         consumer.subscribe(List.of(TOPIC));
+        Map<TopicPartition, Long> replayEnds = null;
         try {
             while (running.get()) {
                 ConsumerRecords<String, byte[]> records;
@@ -132,10 +161,46 @@ public final class ConfigChangeConsumer implements AutoCloseable {
                     break;
                 }
                 processBatch(records);
+
+                if (replayEnds == null) {
+                    Set<TopicPartition> assignment = consumer.assignment();
+                    if (!assignment.isEmpty()) {
+                        replayEnds = consumer.endOffsets(assignment, Duration.ofSeconds(10));
+                    }
+                }
+                if (!initialReplayReady.get() && replayEnds != null && caughtUp(replayEnds, currentPositions(replayEnds.keySet()))) {
+                    initialReplayReady.set(true);
+                    initialReplayFinished.countDown();
+                    LOG.info("config.changes initial replay reached captured end of every partition");
+                }
             }
+        } catch (RuntimeException e) {
+            terminalFailure = e;
+            LOG.log(Level.SEVERE, "config.changes consumer stopped", e);
         } finally {
+            initialReplayFinished.countDown();
             consumer.close();
         }
+    }
+
+    private Map<TopicPartition, Long> currentPositions(Set<TopicPartition> partitions) {
+        Map<TopicPartition, Long> positions = new HashMap<>();
+        for (TopicPartition partition : partitions) {
+            positions.put(partition, consumer.position(partition, Duration.ofSeconds(10)));
+        }
+        return positions;
+    }
+
+    static boolean caughtUp(Map<TopicPartition, Long> ends, Map<TopicPartition, Long> positions) {
+        if (ends.isEmpty() || !positions.keySet().containsAll(ends.keySet())) {
+            return false;
+        }
+        for (Map.Entry<TopicPartition, Long> end : ends.entrySet()) {
+            if (positions.get(end.getKey()) < end.getValue()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Пакетная логика вынесена отдельно — тестируема без реального опроса Kafka (см. {@code ConfigChangeConsumerTest}). */
@@ -145,6 +210,7 @@ public final class ConfigChangeConsumer implements AutoCloseable {
             for (ConsumerRecord<String, byte[]> record : records.records(tp)) {
                 try {
                     handle(record);
+                    stalledPartitions.remove(tp);
                     nextCommittable = record.offset() + 1;
                 } catch (RuntimeException e) {
                     // KafkaConsumer уже сдвинул локальную position за весь
@@ -155,6 +221,9 @@ public final class ConfigChangeConsumer implements AutoCloseable {
                     // необработанный offset; успешно обработанный префикс
                     // ниже по-прежнему можно закоммитить.
                     consumer.seek(tp, record.offset());
+                    stalledPartitions.add(tp);
+                    LOG.log(Level.WARNING, e, () -> "config.changes: application failed at "
+                        + tp + " offset=" + record.offset() + "; seek для немедленного retry");
                     break;
                 }
             }
@@ -190,9 +259,15 @@ public final class ConfigChangeConsumer implements AutoCloseable {
             return;
         }
 
+        if (record.key() == null || !partnerId.equals(record.key())) {
+            LOG.warning(() -> "config.changes: Kafka key не совпадает с PARTNER entity_id=" + partnerId
+                + " offset=" + record.offset() + " — событие пропущено");
+            return;
+        }
+
         LOG.info(() -> "config.changes: partner_id=" + partnerId + " status=" + event.getStatus()
-            + " version=" + event.getVersion() + " — перечитываем SMPP-конфиг из Configuration Redis");
-        partnerRefresher.accept(partnerId, event.getStatus());
+            + " version=" + event.getVersion() + " — применяем versioned payload к живому SMPP snapshot");
+        partnerRefresher.accept(event);
     }
 
     @Override

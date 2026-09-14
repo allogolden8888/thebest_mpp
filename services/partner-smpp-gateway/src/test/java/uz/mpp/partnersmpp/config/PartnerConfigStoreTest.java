@@ -10,7 +10,6 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -113,71 +112,4 @@ class PartnerConfigStoreTest {
         assertTrue(store.currentCredentials().isEmpty());
     }
 
-    @Test
-    void refreshPartnerPicksUpNewCredentialWithoutTouchingOtherPartners() {
-        writePartner("acme", 1, smppPartnerJson("acme", "active", "acme_smpp", "vault://partners/acme/smpp/pw"));
-        writePartner("beta", 1, smppPartnerJson("beta", "active", "beta_smpp", "vault://partners/beta/smpp/pw"));
-        store.bootstrap();
-        assertEquals(2, store.currentCredentials().size());
-
-        // Партнёр ротирует credential_ref (например, новое приложение/новый бинд) —
-        // симулируем то, что config-cache-projector записал бы в ответ на config.changes:
-        // status="active" -> config:current ТОЖЕ переставляется на новую версию
-        // (см. config-cache-projector/internal/projector/projector.go WriteProjection).
-        writePartner("acme", 2, smppPartnerJson("acme", "active", "acme_smpp_v2", "vault://partners/acme/smpp/pw2"));
-        store.refreshPartner("acme", "active");
-
-        Map<String, PartnerConfigLoader.SmppBindCredential> creds = store.currentCredentials();
-        assertNull(creds.get("acme_smpp"), "старый system_id этого партнёра должен исчезнуть после refresh");
-        assertEquals("acme_smpp_v2", creds.get("acme_smpp_v2").applicationId());
-        assertEquals("beta_smpp", creds.get("beta_smpp").applicationId(), "другой партнёр не должен быть тронут");
-    }
-
-    /**
-     * Регрессия находки "КРИТИЧНО" из {@link PartnerConfigStore} javadoc:
-     * реальный {@code config-cache-projector} НЕ переставляет
-     * {@code config:current:partner:{id}} на архивную версию (см. его
-     * {@code WriteProjection}: {@code config:current} обновляется только
-     * для {@code status="active"}). Этот тест намеренно НЕ вызывает
-     * {@code writePartner} для архивной версии (что переставило бы
-     * {@code config:current} — нереалистичная симуляция, которую делал
-     * более ранний вариант этого теста) — вместо этого {@code
-     * config:current:partner:acme} остаётся на версии 1 (последней
-     * активной), ровно как оставил бы её реальный projector, и только
-     * {@code config:version:partner:acme:2} (архивный payload) пишется
-     * напрямую — просто чтобы доказать, что store НЕ читает его вообще на
-     * этой ветке. Сигнал архивации — только {@code status} аргумента
-     * {@code refreshPartner}, не Redis.
-     */
-    @Test
-    void refreshPartnerNonActiveStatusRemovesCredentialsWithoutReadingRedisCurrentPointer() {
-        writePartner("acme", 1, smppPartnerJson("acme", "active", "acme_smpp", "vault://partners/acme/smpp/pw"));
-        writePartner("beta", 1, smppPartnerJson("beta", "active", "beta_smpp", "vault://partners/beta/smpp/pw"));
-        store.bootstrap();
-
-        // config:current:partner:acme НЕ трогаем — остаётся "1" (последняя
-        // активная), как в реальности после архивации.
-        try (var conn = rawClient.connect()) {
-            conn.sync().set("config:version:partner:acme:2", smppPartnerJson("acme", "archived", "acme_smpp", "vault://partners/acme/smpp/pw"));
-        }
-        store.refreshPartner("acme", "archived");
-
-        Map<String, PartnerConfigLoader.SmppBindCredential> creds = store.currentCredentials();
-        assertNull(creds.get("acme_smpp"), "архивированный партнёр — ни одного нового bind'а, даже когда config:current всё ещё указывает на старую активную версию");
-        assertEquals("beta_smpp", creds.get("beta_smpp").applicationId(), "другой партнёр не должен быть тронут");
-    }
-
-    @Test
-    void refreshPartnerForUnknownPartnerWithActiveStatusIsNoOp() {
-        store.bootstrap();
-        store.refreshPartner("nonexistent", "active");
-        assertTrue(store.currentCredentials().isEmpty());
-    }
-
-    @Test
-    void refreshPartnerForUnknownPartnerWithArchivedStatusIsNoOp() {
-        store.bootstrap();
-        store.refreshPartner("nonexistent", "archived");
-        assertTrue(store.currentCredentials().isEmpty());
-    }
 }

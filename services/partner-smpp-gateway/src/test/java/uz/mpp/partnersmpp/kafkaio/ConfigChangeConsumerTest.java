@@ -29,8 +29,8 @@ class ConfigChangeConsumerTest {
 
     private static final TopicPartition TP = new TopicPartition(ConfigChangeConsumer.TOPIC, 0);
 
-    private static ConsumerRecords<String, byte[]> singleRecordBatch(long offset, byte[] value) {
-        ConsumerRecord<String, byte[]> record = new ConsumerRecord<>(ConfigChangeConsumer.TOPIC, 0, offset, "key", value);
+    private static ConsumerRecords<String, byte[]> singleRecordBatch(long offset, String key, byte[] value) {
+        ConsumerRecord<String, byte[]> record = new ConsumerRecord<>(ConfigChangeConsumer.TOPIC, 0, offset, key, value);
         return new ConsumerRecords<>(Map.of(TP, List.of(record)));
     }
 
@@ -65,9 +65,9 @@ class ConfigChangeConsumerTest {
     void partnerEventTriggersRefreshAndCommitsOffset() {
         MockConsumer<String, byte[]> mock = mockConsumer();
         List<Map.Entry<String, String>> refreshed = new ArrayList<>();
-        ConfigChangeConsumer consumer = new ConfigChangeConsumer(mock, (id, status) -> refreshed.add(new AbstractMap.SimpleEntry<>(id, status)));
+        ConfigChangeConsumer consumer = new ConfigChangeConsumer(mock, event -> refreshed.add(new AbstractMap.SimpleEntry<>(event.getEntityId(), event.getStatus())));
 
-        consumer.processBatch(singleRecordBatch(0, partnerEvent("acme", "active")));
+        consumer.processBatch(singleRecordBatch(0, "acme", partnerEvent("acme", "active")));
 
         assertEquals(List.of(Map.entry("acme", "active")), refreshed);
         assertEquals(1L, mock.committed(java.util.Set.of(TP)).get(TP).offset());
@@ -75,16 +75,14 @@ class ConfigChangeConsumerTest {
 
     @Test
     void archivedPartnerEventPassesArchivedStatusThrough() {
-        // PartnerConfigStore.refreshPartner нуждается в реальном status
-        // события, не только entity_id, — см. её javadoc "КРИТИЧНО"
-        // (config:current не переставляется config-cache-projector'ом на
-        // архивную версию, так что status из САМОГО события — единственный
-        // надёжный сигнал архивации).
+        // Архивация должна дойти полным событием: config:current не
+        // переставляется projector'ом на archived-версию, а tombstone с
+        // version fence должен остаться в локальном snapshot.
         MockConsumer<String, byte[]> mock = mockConsumer();
         List<Map.Entry<String, String>> refreshed = new ArrayList<>();
-        ConfigChangeConsumer consumer = new ConfigChangeConsumer(mock, (id, status) -> refreshed.add(new AbstractMap.SimpleEntry<>(id, status)));
+        ConfigChangeConsumer consumer = new ConfigChangeConsumer(mock, event -> refreshed.add(new AbstractMap.SimpleEntry<>(event.getEntityId(), event.getStatus())));
 
-        consumer.processBatch(singleRecordBatch(0, partnerEvent("acme", "archived")));
+        consumer.processBatch(singleRecordBatch(0, "acme", partnerEvent("acme", "archived")));
 
         assertEquals(List.of(Map.entry("acme", "archived")), refreshed);
         assertEquals(1L, mock.committed(java.util.Set.of(TP)).get(TP).offset());
@@ -94,9 +92,9 @@ class ConfigChangeConsumerTest {
     void nonPartnerEventIsIgnoredButOffsetStillCommitted() {
         MockConsumer<String, byte[]> mock = mockConsumer();
         List<Map.Entry<String, String>> refreshed = new ArrayList<>();
-        ConfigChangeConsumer consumer = new ConfigChangeConsumer(mock, (id, status) -> refreshed.add(new AbstractMap.SimpleEntry<>(id, status)));
+        ConfigChangeConsumer consumer = new ConfigChangeConsumer(mock, event -> refreshed.add(new AbstractMap.SimpleEntry<>(event.getEntityId(), event.getStatus())));
 
-        consumer.processBatch(singleRecordBatch(0, nonPartnerEvent()));
+        consumer.processBatch(singleRecordBatch(0, "beeline_uz", nonPartnerEvent()));
 
         assertTrue(refreshed.isEmpty());
         assertEquals(1L, mock.committed(java.util.Set.of(TP)).get(TP).offset());
@@ -106,9 +104,9 @@ class ConfigChangeConsumerTest {
     void malformedPayloadIsSkippedAndCommitted() {
         MockConsumer<String, byte[]> mock = mockConsumer();
         List<Map.Entry<String, String>> refreshed = new ArrayList<>();
-        ConfigChangeConsumer consumer = new ConfigChangeConsumer(mock, (id, status) -> refreshed.add(new AbstractMap.SimpleEntry<>(id, status)));
+        ConfigChangeConsumer consumer = new ConfigChangeConsumer(mock, event -> refreshed.add(new AbstractMap.SimpleEntry<>(event.getEntityId(), event.getStatus())));
 
-        consumer.processBatch(singleRecordBatch(0, new byte[] { (byte) 0xFF, 0x00, 0x01 }));
+        consumer.processBatch(singleRecordBatch(0, "bad", new byte[] { (byte) 0xFF, 0x00, 0x01 }));
 
         assertTrue(refreshed.isEmpty());
         assertEquals(1L, mock.committed(java.util.Set.of(TP)).get(TP).offset(),
@@ -119,9 +117,9 @@ class ConfigChangeConsumerTest {
     void tombstoneIsSkippedAndCommitted() {
         MockConsumer<String, byte[]> mock = mockConsumer();
         List<Map.Entry<String, String>> refreshed = new ArrayList<>();
-        ConfigChangeConsumer consumer = new ConfigChangeConsumer(mock, (id, status) -> refreshed.add(new AbstractMap.SimpleEntry<>(id, status)));
+        ConfigChangeConsumer consumer = new ConfigChangeConsumer(mock, event -> refreshed.add(new AbstractMap.SimpleEntry<>(event.getEntityId(), event.getStatus())));
 
-        consumer.processBatch(singleRecordBatch(0, null));
+        consumer.processBatch(singleRecordBatch(0, "acme", null));
 
         assertTrue(refreshed.isEmpty());
         assertEquals(1L, mock.committed(java.util.Set.of(TP)).get(TP).offset());
@@ -131,13 +129,13 @@ class ConfigChangeConsumerTest {
     void refreshFailureDoesNotCommitAndStopsRestOfPartitionThisBatch() {
         MockConsumer<String, byte[]> mock = mockConsumer();
         AtomicInteger calls = new AtomicInteger();
-        ConfigChangeConsumer consumer = new ConfigChangeConsumer(mock, (partnerId, status) -> {
+        ConfigChangeConsumer consumer = new ConfigChangeConsumer(mock, event -> {
             calls.incrementAndGet();
             throw new RuntimeException("Redis unreachable");
         });
 
-        ConsumerRecord<String, byte[]> first = new ConsumerRecord<>(ConfigChangeConsumer.TOPIC, 0, 0, "key", partnerEvent("acme", "active"));
-        ConsumerRecord<String, byte[]> second = new ConsumerRecord<>(ConfigChangeConsumer.TOPIC, 0, 1, "key", partnerEvent("beta", "active"));
+        ConsumerRecord<String, byte[]> first = new ConsumerRecord<>(ConfigChangeConsumer.TOPIC, 0, 0, "acme", partnerEvent("acme", "active"));
+        ConsumerRecord<String, byte[]> second = new ConsumerRecord<>(ConfigChangeConsumer.TOPIC, 0, 1, "beta", partnerEvent("beta", "active"));
         consumer.processBatch(new ConsumerRecords<>(Map.of(TP, List.of(first, second))));
 
         assertEquals(1, calls.get(), "вторая запись той же партиции не должна обрабатываться в этом поллинге после первой ошибки");
@@ -149,19 +147,29 @@ class ConfigChangeConsumerTest {
     @Test
     void partialSuccessCommitsUpToLastGoodOffset() {
         MockConsumer<String, byte[]> mock = mockConsumer();
-        ConfigChangeConsumer consumer = new ConfigChangeConsumer(mock, (partnerId, status) -> {
-            if (partnerId.equals("bad")) {
+        ConfigChangeConsumer consumer = new ConfigChangeConsumer(mock, event -> {
+            if (event.getEntityId().equals("bad")) {
                 throw new RuntimeException("boom");
             }
         });
 
-        ConsumerRecord<String, byte[]> ok1 = new ConsumerRecord<>(ConfigChangeConsumer.TOPIC, 0, 0, "key", partnerEvent("acme", "active"));
-        ConsumerRecord<String, byte[]> ok2 = new ConsumerRecord<>(ConfigChangeConsumer.TOPIC, 0, 1, "key", partnerEvent("beta", "active"));
-        ConsumerRecord<String, byte[]> bad = new ConsumerRecord<>(ConfigChangeConsumer.TOPIC, 0, 2, "key", partnerEvent("bad", "active"));
+        ConsumerRecord<String, byte[]> ok1 = new ConsumerRecord<>(ConfigChangeConsumer.TOPIC, 0, 0, "acme", partnerEvent("acme", "active"));
+        ConsumerRecord<String, byte[]> ok2 = new ConsumerRecord<>(ConfigChangeConsumer.TOPIC, 0, 1, "beta", partnerEvent("beta", "active"));
+        ConsumerRecord<String, byte[]> bad = new ConsumerRecord<>(ConfigChangeConsumer.TOPIC, 0, 2, "bad", partnerEvent("bad", "active"));
         consumer.processBatch(new ConsumerRecords<>(Map.of(TP, List.of(ok1, ok2, bad))));
 
         assertEquals(2L, mock.committed(java.util.Set.of(TP)).get(TP).offset(),
             "должны закоммититься первые две успешные записи (offset двух записей = следующий offset после второй)");
         assertEquals(2L, mock.position(TP), "следующий poll обязан начаться с первой упавшей записи");
+    }
+
+    @Test
+    void initialReplayRequiresEveryCapturedPartitionAtItsEnd() {
+        TopicPartition second = new TopicPartition(ConfigChangeConsumer.TOPIC, 1);
+        Map<TopicPartition, Long> ends = Map.of(TP, 10L, second, 4L);
+
+        assertTrue(ConfigChangeConsumer.caughtUp(ends, Map.of(TP, 10L, second, 4L)));
+        assertTrue(!ConfigChangeConsumer.caughtUp(ends, Map.of(TP, 10L, second, 3L)));
+        assertTrue(!ConfigChangeConsumer.caughtUp(ends, Map.of(TP, 10L)));
     }
 }

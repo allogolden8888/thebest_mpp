@@ -11,19 +11,17 @@ import java.util.Map;
 
 /**
  * Загружает реальный партнёрский конфиг-снапшот ({@code
- * config_schemas/partner.schema.json} форма, {@code PARTNER_CONFIG_PATH})
+ * config_schemas/partner.schema.json} форма)
  * и строит {@code system_id -> credential} карту для приложений с
  * {@code auth.type == "SMPP_BIND"} — раньше (см. {@link
  * uz.mpp.partnersmpp.server.StaticAuthenticator} докстринг/README "Что НЕ
  * реализовано") этот сервис вообще не читал реальный partner-конфиг,
  * только пять env vars на один захардкоженный system_id.
  *
- * <p>Тот же JsonNode-based приём, что {@code
- * billing-service/PartnerSendersResolver} уже использует для этого же
- * файла (не полноценный POJO databind — файл читается один раз при
- * старте, hot-reload/{@code config.changes} consumer не реализован, тот
- * же паттерн упрощения, что у Routing/Policy/partner-rest-receiver/
- * partner-notification-service — все читают один статический файл).
+ * <p>Парсер используется и стартовым Redis snapshot, и immutable payload
+ * каждого {@code config.changes} события. {@link #fromFile} оставлен только
+ * для fixture/break-glass сценариев; production hot-reload не зависит от
+ * локального файла.
  *
  * <p><b>system_id == application_id для SMPP_BIND.</b> {@code
  * partner.schema.json}'s докстринг на {@code notification_callback_url}:
@@ -44,6 +42,10 @@ public final class PartnerConfigLoader {
     public record SmppBindCredential(String partnerId, String applicationId, String credentialRef) {
     }
 
+    /** Parsed identity/status plus the SMPP credentials derived from one immutable partner version. */
+    public record ParsedPartner(String partnerId, String status, Map<String, SmppBindCredential> credentials) {
+    }
+
     private PartnerConfigLoader() {
     }
 
@@ -56,6 +58,10 @@ public final class PartnerConfigLoader {
     }
 
     public static Map<String, SmppBindCredential> fromJson(String json) {
+        return parseJson(json).credentials();
+    }
+
+    public static ParsedPartner parseJson(String json) {
         ObjectMapper mapper = new ObjectMapper();
         try {
             JsonNode root = mapper.readTree(json);
@@ -63,6 +69,7 @@ public final class PartnerConfigLoader {
             if (partnerId == null || partnerId.isEmpty()) {
                 throw new IllegalArgumentException("partner.schema.json форма обязана содержать partner_id");
             }
+            String status = root.path("status").asText("");
 
             Map<String, SmppBindCredential> bySystemId = new LinkedHashMap<>();
             // Неактивный партнёр (status != "active") — ни одного credential
@@ -70,8 +77,8 @@ public final class PartnerConfigLoader {
             // Partner.IsActive() (Go), хотя ни один из них ещё сегодня не
             // фильтрует по этому полю на уровне снапшота — здесь фильтруем
             // явно, раз это первое место в Java, где статус реально что-то решает.
-            if (!"active".equals(root.path("status").asText(""))) {
-                return bySystemId;
+            if (!"active".equals(status)) {
+                return new ParsedPartner(partnerId, status, Map.of());
             }
 
             for (JsonNode app : root.path("applications")) {
@@ -87,7 +94,7 @@ public final class PartnerConfigLoader {
                 }
                 bySystemId.put(applicationId, new SmppBindCredential(partnerId, applicationId, credentialRef));
             }
-            return bySystemId;
+            return new ParsedPartner(partnerId, status, Map.copyOf(bySystemId));
         } catch (IOException e) {
             throw new IllegalArgumentException("не удалось распарсить partner.schema.json форму", e);
         }
