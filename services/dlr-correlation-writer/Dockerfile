@@ -17,7 +17,8 @@ RUN --mount=type=secret,id=extra_ca_cert,required=false \
 COPY . .
 RUN CGO_ENABLED=0 go build -o /build/bin/dlr-correlation-writer ./cmd/dlr-correlation-writer
 
-FROM gcr.io/distroless/static-debian12
+FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /build/bin/dlr-correlation-writer /app/dlr-correlation-writer
 EXPOSE 9090
+USER nonroot:nonroot
 ENTRYPOINT ["/app/dlr-correlation-writer"]

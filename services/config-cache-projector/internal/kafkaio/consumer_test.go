@@ -90,6 +90,10 @@ func TestDecodeConfigChangeEventAcceptsAllKnownEntityTypesExceptConsent(t *testi
 		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_NUMBER_RANGE,
 		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER,
 		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_OPERATOR,
+		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_CATEGORY,
+		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_CTN,
+		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PATTERN_PLACEHOLDER,
+		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_GUIDE,
 	}
 	for _, et := range known {
 		payload, _ := proto.Marshal(&eventsv1.ConfigChangeEvent{EntityType: et, EntityId: "x"})

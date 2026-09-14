@@ -17,7 +17,8 @@ RUN --mount=type=secret,id=extra_ca_cert,required=false \
 COPY . .
 RUN CGO_ENABLED=0 go build -o /build/bin/scheduler-critical-sweep ./cmd/scheduler-critical-sweep
 
-FROM gcr.io/distroless/static-debian12
+FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /build/bin/scheduler-critical-sweep /app/scheduler-critical-sweep
 EXPOSE 9090
+USER nonroot:nonroot
 ENTRYPOINT ["/app/scheduler-critical-sweep"]

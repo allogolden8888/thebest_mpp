@@ -62,12 +62,10 @@ pub fn router(
                 }
             }),
         )
-        .route(
-            "/metrics",
-            get(|| async {
-                "# HELP partner_rest_receiver_up Service liveness placeholder\n# TYPE partner_rest_receiver_up gauge\npartner_rest_receiver_up 1\n"
-            }),
-        )
+        // BACKOFFICE_ROADMAP.md P1 "Observability": реальные счётчик/
+        // гистограмма POST /v1/messages (см. `metrics.rs`/`http.rs`'s
+        // `instrument_ingest`), не только liveness-заглушка.
+        .route("/metrics", get(|| async { crate::metrics::gather_text() }))
 }
 
 #[cfg(test)]

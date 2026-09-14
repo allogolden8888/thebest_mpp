@@ -25,7 +25,11 @@ func (s *State) SetDependencyChecks(checks map[string]func(context.Context) erro
 	s.checks = checks
 }
 
-func Router(state *State) *http.ServeMux {
+// Router — metricsHandler == nil сохраняет прежнюю заглушку ("_up 1", один
+// liveness-gauge) — тот же безопасный дефолт, что до BACKOFFICE_ROADMAP.md
+// P1 "Observability" (main.go теперь передаёт реальный promhttp.Handler(),
+// см. internal/metrics).
+func Router(state *State, metricsHandler http.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -63,10 +67,14 @@ func Router(state *State) *http.ServeMux {
 		_, _ = w.Write([]byte("ready"))
 	})
 
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("# HELP operator_http_gateway_up Service liveness placeholder\n# TYPE operator_http_gateway_up gauge\noperator_http_gateway_up 1\n"))
-	})
+	if metricsHandler != nil {
+		mux.Handle("/metrics", metricsHandler)
+	} else {
+		mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("# HELP operator_http_gateway_up Service liveness placeholder\n# TYPE operator_http_gateway_up gauge\noperator_http_gateway_up 1\n"))
+		})
+	}
 
 	return mux
 }

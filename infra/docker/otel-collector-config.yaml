@@ -1,0 +1,49 @@
+# BACKOFFICE_ROADMAP.md P1 "Observability" — до этого коммита в этом стенде
+# (ни в docker-compose, ни где-либо ещё локально) не было ни одного реально
+# работающего OTel Collector: commit 630be46 научил backoffice-api/
+# billing-self-service-api/compliance-api/partner-api/partner-self-service-api
+# реально экспортировать спаны по OTLP/gRPC (buildSpanExporter), но
+# экспортировать было некуда — при не заданном OTEL_EXPORTER_OTLP_ENDPOINT
+# они молча откатывались на no-op. Это — минимальный реальный коллектор,
+# который даёт этому пути место назначения в локальном docker-compose стенде.
+#
+# Минимальный пайплайн, намеренно: OTLP-приёмник (gRPC+HTTP) -> batch ->
+# debug-экспортёр для трейсов (полный вывод спанов в лог контейнера — этого
+# достаточно, чтобы live-верифицировать "спан реально дошёл", см.
+# BACKOFFICE_ROADMAP.md журнал) + prometheus-экспортёр для метрик, если
+# когда-нибудь появится OTLP metrics producer в этом стенде. Ни Jaeger, ни
+# Tempo, ни любой другой полноценный tracing backend НЕ разворачивается —
+# ни один из них не был найден нигде в этом репозитории, и задача явно не
+# требует полноценного UI для трейсов, только реальный экспорт вместо
+# отбрасывания.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  # verbosity: detailed — печатает атрибуты/события каждого спана целиком в
+  # stdout контейнера, не только счётчик "получено N спанов". Это то, что
+  # проверяется живьём как доказательство "спан реально дошёл до коллектора"
+  # (`docker compose logs otel-collector`), а не просто "процесс поднялся".
+  debug:
+    verbosity: detailed
+  prometheus:
+    endpoint: 0.0.0.0:8889
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus]

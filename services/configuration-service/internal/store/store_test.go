@@ -285,6 +285,25 @@ func TestArchiveVersionSetsStatusArchived(t *testing.T) {
 	if archived.Status != "archived" {
 		t.Fatalf("ожидали status=archived, получили %s", archived.Status)
 	}
+
+	var archiveOutboxCount int
+	err = pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM config.config_outbox o
+		JOIN config.config_versions v ON v.id = o.config_version_id
+		WHERE o.entity_type = $1 AND o.entity_id = $2 AND v.version = $3 AND v.status = 'archived'
+	`, string(validate.EntityPartner), entityID, created.Version).Scan(&archiveOutboxCount)
+	if err != nil {
+		t.Fatalf("read archive outbox: %v", err)
+	}
+	// One row came from CreateVersion and one is the terminal transition.
+	if archiveOutboxCount != 2 {
+		t.Fatalf("expected create + archive outbox rows, got %d", archiveOutboxCount)
+	}
+
+	if _, err := s.ArchiveVersion(ctx, validate.EntityPartner, entityID, created.Version); err == nil {
+		t.Fatal("duplicate archive must not publish another terminal event")
+	}
 }
 
 func TestListVersionsReturnsAllCreatedVersions(t *testing.T) {

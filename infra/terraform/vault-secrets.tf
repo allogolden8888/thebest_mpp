@@ -186,6 +186,25 @@ resource "vault_kv_secret_v2" "postgresql" {
   })
 }
 
+# Per-domain PostgreSQL credentials (Production Readiness Review P1
+# "Security") — тот же for_each-паттерн, что уже используется для трёх
+# Redis-кластеров чуть ниже (vault_kv_secret_v2.redis), один Vault KV entry
+# на домен вместо одного общего "postgresql" на все ~17 сервисов.
+# yandex_mdb_postgresql_user.service (postgresql.tf) создаёт саму роль;
+# migrations/V036__per_service_postgresql_grants.sql — её реальные права.
+resource "vault_kv_secret_v2" "postgresql_service" {
+  for_each = local.postgresql_service_users
+  mount    = vault_mount.mpp.path
+  name     = "postgresql-${replace(each.key, "_", "-")}"
+  data_json = jsonencode({
+    POSTGRES_HOST     = yandex_mdb_postgresql_cluster.mpp.host[0].fqdn
+    POSTGRES_PORT     = "6432"
+    POSTGRES_DB       = yandex_mdb_postgresql_database.mpp.name
+    POSTGRES_USER     = yandex_mdb_postgresql_user.service[each.key].name
+    POSTGRES_PASSWORD = var.postgresql_service_passwords[each.key]
+  })
+}
+
 resource "vault_kv_secret_v2" "redis" {
   for_each = local.redis_clusters
   mount    = vault_mount.mpp.path
@@ -206,6 +225,29 @@ resource "vault_kv_secret_v2" "clickhouse" {
     CLICKHOUSE_DB       = yandex_mdb_clickhouse_database.mpp_analytics.name
     CLICKHOUSE_USER     = "admin"
     CLICKHOUSE_PASSWORD = var.clickhouse_password
+  })
+}
+
+# Per-service ClickHouse credentials (Production Readiness Review P1
+# "Security") — тот же for_each-паттерн, что redis/postgresql_service выше.
+# yandex_mdb_clickhouse_user.service (clickhouse.tf) создаёт саму роль (без
+# permission{} — см. комментарий там); реальные табличные GRANT —
+# infra/clickhouse/production_grants.sql (нет управляемого раннера для
+# ClickHouse в этом репозитории, в отличие от Postgres — см. README там).
+# CLICKHOUSE_DB = "analytics" буквально, не через ресурс
+# yandex_mdb_clickhouse_database.mpp_analytics.name ("mpp_analytics") — см.
+# комментарий в clickhouse.tf про расхождение реального имени базы,
+# используемого приложениями, и Terraform-ресурса.
+resource "vault_kv_secret_v2" "clickhouse_service" {
+  for_each = local.clickhouse_service_users
+  mount    = vault_mount.mpp.path
+  name     = "clickhouse-${replace(each.key, "_", "-")}"
+  data_json = jsonencode({
+    CLICKHOUSE_HOST     = values(yandex_mdb_clickhouse_cluster_v2.mpp.hosts)[0].fqdn
+    CLICKHOUSE_PORT     = "9440"
+    CLICKHOUSE_DB       = "analytics"
+    CLICKHOUSE_USER     = yandex_mdb_clickhouse_user.service[each.key].name
+    CLICKHOUSE_PASSWORD = var.clickhouse_service_passwords[each.key]
   })
 }
 

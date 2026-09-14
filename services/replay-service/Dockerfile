@@ -19,7 +19,8 @@ RUN --mount=type=secret,id=extra_ca_cert,required=false \
 COPY . .
 RUN CGO_ENABLED=0 go build -o /build/bin/replay-service ./cmd/replay-service
 
-FROM gcr.io/distroless/static-debian12
+FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /build/bin/replay-service /app/replay-service
 EXPOSE 9090 9000
+USER nonroot:nonroot
 ENTRYPOINT ["/app/replay-service"]

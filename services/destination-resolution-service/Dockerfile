@@ -46,4 +46,10 @@ WORKDIR /app
 COPY --from=builder /build/target/release/destination-resolution-service /app/
 COPY --from=builder /build/data /app/data
 EXPOSE 9090
+# Non-root — same UID:GID convention as the Java (eclipse-temurin) and
+# nginx (frontend) Dockerfiles in this repo; distroless Go images use
+# their own baked-in :nonroot tag (uid 65532) instead.
+RUN groupadd --system --gid 10001 mpp \
+    && useradd --system --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin mpp
+USER 10001:10001
 ENTRYPOINT ["/app/destination-resolution-service"]

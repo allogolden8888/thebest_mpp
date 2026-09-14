@@ -7,9 +7,9 @@
 // изменённый через partner-self-service-api после старта процесса, был
 // структурно невидим этому сервису до рестарта. Теперь (см.
 // redis_source.go/Store) снапшот либо грузится один раз из статического
-// файла (PARTNER_CONFIG_PATH, явно заданный — local dev без Configuration
-// Redis), либо строится bootstrap-чтением из Configuration Redis + живьём
-// обновляется через config.changes-консьюмер
+// файла только в явном PARTNER_CONFIG_MODE=file (локальная отладка),
+// либо строится bootstrap-чтением из Configuration Redis + живьём
+// обновляется из прямого full replay config.changes
 // (internal/kafkaio/configchanges.go) — тот же
 // config:current:partner:{id}/config:version:partner:{id}:{version},
 // который уже пишет config-cache-projector, реально работающий в проде.
@@ -49,7 +49,7 @@ func (p Partner) IsActive() bool {
 // временный/обратимый — partner_id остаётся в живом снапшоте, чтобы запросы
 // от него получали осмысленный отказ, а не "неизвестный партнёр"). Только
 // archived означает "удалить из живого состояния", см.
-// internal/kafkaio/configchanges.go::HandleConfigChangeRecord.
+// internal/kafkaio/configchanges.go.
 func (p Partner) IsArchived() bool {
 	return p.Status == "archived"
 }
@@ -59,14 +59,26 @@ func (p Partner) IsArchived() bool {
 // partner-rest-receiver).
 type Snapshot struct {
 	partners map[string]Partner
+	// versions also retains archived tombstones, so an older active event
+	// from a full Kafka replay cannot revive a removed partner.
+	versions map[string]int64
+	// archived distinguishes an active version N from the terminal transition
+	// that Configuration Service currently represents by changing status on
+	// that same version N. This lets ApplyArchive accept active(N)->archive(N)
+	// once while still rejecting all later duplicate/old events.
+	archived map[string]bool
 }
 
 func NewSnapshot(partners []Partner) Snapshot {
 	m := make(map[string]Partner, len(partners))
+	versions := make(map[string]int64, len(partners))
+	archived := make(map[string]bool, len(partners))
 	for _, p := range partners {
 		m[p.PartnerID] = p
+		versions[p.PartnerID] = int64(p.Version)
+		archived[p.PartnerID] = false
 	}
-	return Snapshot{partners: m}
+	return Snapshot{partners: m, versions: versions, archived: archived}
 }
 
 // Len — number of partners currently in the snapshot (bootstrap logging).
@@ -111,26 +123,43 @@ func (s Snapshot) FirstApplication(partnerID string) (Partner, Application, bool
 // live update builds a new map instead of mutating the one readers may
 // currently be iterating/looking up concurrently.
 
-func (s Snapshot) withPartner(p Partner) Snapshot {
+func (s Snapshot) withPartner(version int64, p Partner) Snapshot {
 	m := make(map[string]Partner, len(s.partners)+1)
 	for k, v := range s.partners {
 		m[k] = v
 	}
 	m[p.PartnerID] = p
-	return Snapshot{partners: m}
+	versions := make(map[string]int64, len(s.versions)+1)
+	for k, v := range s.versions {
+		versions[k] = v
+	}
+	versions[p.PartnerID] = version
+	archived := make(map[string]bool, len(s.archived)+1)
+	for k, v := range s.archived {
+		archived[k] = v
+	}
+	archived[p.PartnerID] = false
+	return Snapshot{partners: m, versions: versions, archived: archived}
 }
 
-func (s Snapshot) withoutPartner(partnerID string) Snapshot {
-	if _, ok := s.partners[partnerID]; !ok {
-		return s
-	}
+func (s Snapshot) withoutPartner(version int64, partnerID string) Snapshot {
 	m := make(map[string]Partner, len(s.partners))
 	for k, v := range s.partners {
 		if k != partnerID {
 			m[k] = v
 		}
 	}
-	return Snapshot{partners: m}
+	versions := make(map[string]int64, len(s.versions)+1)
+	for k, v := range s.versions {
+		versions[k] = v
+	}
+	versions[partnerID] = version
+	archived := make(map[string]bool, len(s.archived)+1)
+	for k, v := range s.archived {
+		archived[k] = v
+	}
+	archived[partnerID] = true
+	return Snapshot{partners: m, versions: versions, archived: archived}
 }
 
 type Channel int

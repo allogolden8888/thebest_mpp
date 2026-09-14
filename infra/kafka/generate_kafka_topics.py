@@ -218,7 +218,45 @@ def build_kafka_cluster_crd() -> dict:
                 "listeners": [
                     {"name": "plain", "port": 9092, "type": "internal", "tls": False},
                     {"name": "tls", "port": 9093, "type": "internal", "tls": True},
+                    # BACKOFFICE_ROADMAP.md P1 "Kafka — plaintext listener без
+                    # SASL/ACL, хотя HLD требует ACL": добавлен АДДИТИВНО —
+                    # рядом с двумя листенерами выше, не вместо них. Реальное
+                    # dual-listener migration-окно: ~40 существующих
+                    # Kafka-клиентов продолжают подключаться к "plain"/"tls"
+                    # без единой правки, пока сервисы по одному переводятся на
+                    # этот листенер (см. k8s/generate_manifests.py
+                    # KAFKA_SASL_DEMO_SERVICES — на сегодня 3 пилотных
+                    # клиента, по одному на язык). TLS обязателен здесь: SCRAM
+                    # сам по себе не защищает proof от активного MITM на
+                    # внутримешевом сегменте без шифрования канала.
+                    {
+                        "name": "sasl",
+                        "port": 9094,
+                        "type": "internal",
+                        "tls": True,
+                        "authentication": {"type": "scram-sha-512"},
+                    },
                 ],
+                # simple (native Kafka ACL) — без него KafkaUser.spec.authorization
+                # ниже (infra/kafka/generate_kafka_users.py) ничего не значил бы:
+                # Strimzi User Operator создавал бы ACL-записи, но брокер их
+                # никогда бы не проверял. superUsers=[User:ANONYMOUS] — единственная
+                # причина, по которой включение authorization не ломает
+                # оставшиеся ~37 сервисов: анонимные (неаутентифицированные)
+                # подключения через "plain"/"tls" листенеры маппятся Kafka в
+                # principal User:ANONYMOUS, и без явного superuser-статуса им бы
+                # ВНЕЗАПНО потребовались explicit ACL на каждый топик/группу,
+                # которых для них никто не заводил — вся platform-plaintext-часть
+                # была бы полностью заблокирована в момент этого коммита. Реальный
+                # ACL enforcement сегодня применяется ТОЛЬКО к principal'ам,
+                # аутентифицированным через новый "sasl" листенер (KafkaUser'ы,
+                # у ANONYMOUS есть суперправа). Снятие ANONYMOUS из superUsers —
+                # последний шаг миграции, только после того как оставшиеся ~37
+                # сервисов переведены на SASL; не сделано в этом заходе.
+                "authorization": {
+                    "type": "simple",
+                    "superUsers": ["User:ANONYMOUS"],
+                },
                 "config": {
                     "default.replication.factor": REPLICATION_FACTOR,
                     "min.insync.replicas": MIN_INSYNC_REPLICAS,

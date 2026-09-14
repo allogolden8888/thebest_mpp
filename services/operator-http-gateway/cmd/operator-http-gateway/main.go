@@ -24,6 +24,7 @@ import (
 	"mpp/operator-http-gateway/internal/health"
 	"mpp/operator-http-gateway/internal/httpio"
 	"mpp/operator-http-gateway/internal/kafkaio"
+	"mpp/operator-http-gateway/internal/metrics"
 	"mpp/operator-http-gateway/internal/opconfig"
 	"mpp/operator-http-gateway/internal/registry"
 	vaultpkg "mpp/operator-http-gateway/internal/vault"
@@ -80,7 +81,7 @@ func (r *redisEndpointResolver) ResolveEndpoint(operatorID, routeID string) (str
 
 func main() {
 	healthState := &health.State{}
-	healthSrv := &http.Server{Addr: ":9090", Handler: health.Router(healthState)}
+	healthSrv := &http.Server{Addr: ":9090", Handler: health.Router(healthState, metrics.Handler())}
 	go func() {
 		if err := healthSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("health server failed: %v", err)
@@ -174,7 +175,7 @@ func main() {
 		}
 	})
 	webhookMux := http.NewServeMux()
-	webhookMux.HandleFunc("/webhook/dlr/{operator_id}", webhookHandler)
+	webhookMux.HandleFunc("/webhook/dlr/{operator_id}", metrics.InstrumentWebhookHandler(webhookHandler))
 	// CODE_REVIEW.md CRITICAL finding: этот сервер обязан быть доступен из
 	// интернета (реальные операторы шлют DLR сюда) и раньше не имел ни
 	// ReadTimeout/WriteTimeout/IdleTimeout, ни MaxHeaderBytes — тривиальный

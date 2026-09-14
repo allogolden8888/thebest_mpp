@@ -15,7 +15,8 @@ RUN --mount=type=secret,id=extra_ca_cert,required=false \
 COPY . .
 RUN CGO_ENABLED=0 go build -o /build/bin/operator-http-gateway ./cmd/operator-http-gateway
 
-FROM gcr.io/distroless/static-debian12
+FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /build/bin/operator-http-gateway /app/operator-http-gateway
 EXPOSE 9090 9000 8080
+USER nonroot:nonroot
 ENTRYPOINT ["/app/operator-http-gateway"]

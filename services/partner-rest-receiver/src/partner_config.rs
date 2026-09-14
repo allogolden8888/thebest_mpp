@@ -184,10 +184,10 @@ impl PartnerSnapshot {
 
     pub(crate) fn apply_archived(&self, config_version: i64, partner_id: &str) {
         let mut state = self.write();
-        let should_apply = state
-            .partners
-            .get(partner_id)
-            .is_none_or(|current| config_version > current.config_version);
+        let should_apply = state.partners.get(partner_id).is_none_or(|current| {
+            config_version > current.config_version
+                || (config_version == current.config_version && current.partner.is_some())
+        });
         if should_apply {
             state.partners.insert(
                 partner_id.to_string(),
@@ -256,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_config_version_cannot_overwrite_or_archive_newer_partner() {
+    fn same_version_archive_dominates_and_stale_active_cannot_revive_partner() {
         let snapshot = PartnerSnapshot::from_partners(vec![real_partner()]);
         let mut newer = real_partner();
         newer.status = "suspended".into();
@@ -266,7 +266,16 @@ mod tests {
 
         snapshot.apply_archived(9, "click_uz");
         assert!(snapshot.get("click_uz").is_some());
-        snapshot.apply_archived(11, "click_uz");
+        snapshot.apply_archived(10, "click_uz");
         assert!(snapshot.get("click_uz").is_none());
+
+        // Duplicate archive and an already published active event for the same
+        // immutable version cannot revive the terminal tombstone.
+        snapshot.apply_archived(10, "click_uz");
+        snapshot.apply_active(10, real_partner());
+        assert!(snapshot.get("click_uz").is_none());
+
+        snapshot.apply_active(11, real_partner());
+        assert!(snapshot.get("click_uz").is_some());
     }
 }

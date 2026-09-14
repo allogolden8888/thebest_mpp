@@ -12,6 +12,7 @@ from network_policies import (
     KAFKA_BROKER_LABELS,
     KAFKA_CLIENTS,
     KAFKA_PORT,
+    KAFKA_SASL_PORT,
     MONITORING_NAMESPACE,
     NAMESPACE_NAME_LABEL,
     PRIVATE_RANGES_EXCEPT,
@@ -206,7 +207,15 @@ def test_kafka_egress_is_limited_to_explicit_clients_and_broker_pods():
     rule = policy["spec"]["egress"][0]
     assert rule == {
         "to": [{"podSelector": {"matchLabels": KAFKA_BROKER_LABELS}}],
-        "ports": [{"protocol": "TCP", "port": KAFKA_PORT}],
+        # BACKOFFICE_ROADMAP.md P1 — KAFKA_SASL_PORT (9094, SASL_SCRAM+TLS)
+        # добавлен АДДИТИВНО рядом с исходным plaintext KAFKA_PORT (9092),
+        # не вместо него. NetworkPolicy L3/L4 не видит различий между
+        # листенерами — открыт всем KAFKA_CLIENTS одинаково, реальную
+        # авторизацию делает Kafka ACL (KafkaUser), не эта policy.
+        "ports": [
+            {"protocol": "TCP", "port": KAFKA_PORT},
+            {"protocol": "TCP", "port": KAFKA_SASL_PORT},
+        ],
     }
     assert KAFKA_CLIENTS <= {service.name for service in SERVICES}
 

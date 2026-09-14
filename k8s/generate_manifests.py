@@ -33,16 +33,54 @@ HEALTH_PORT = 9090  # /metrics (Prometheus), /healthz, /readyz — новая п
 # infra/kafka/generate_kafka_topics.py создаёт Kafka/mpp-kafka, поэтому
 # короткое kafka-bootstrap.mpp.svc никогда не существует.
 KAFKA_BOOTSTRAP_SERVERS = "mpp-kafka-kafka-bootstrap.mpp.svc:9092"
+# BACKOFFICE_ROADMAP.md P1 "Kafka — plaintext listener без SASL/ACL, хотя HLD
+# требует ACL": infra/kafka/generate_kafka_topics.py build_kafka_cluster_crd
+# добавляет ВТОРОЙ листенер (SASL_SCRAM+TLS, порт 9094) АДДИТИВНО рядом с уже
+# существующим plaintext 9092 — реальное окно dual-listener миграции, не
+# breaking cutover одним коммитом. Это bootstrap-адрес именно этого второго
+# листенера.
+KAFKA_SASL_BOOTSTRAP_SERVERS = "mpp-kafka-kafka-bootstrap.mpp.svc:9094"
+
+# Пилотная демонстрация нового SASL-листенера — по ОДНОМУ сервису на язык
+# (Go/Rust/Java), явно выбранные как чистые single-topic/single-consumer-group
+# consumer'ы БЕЗ producer-стороны: ACL, сгенерированные
+# infra/kafka/generate_kafka_users.py, переиспользуют KEDA_KAFKA_TRIGGERS
+# (Read на топик + Read на consumer group), в котором нет write-разрешений —
+# продюсер с этими credentials работать не смог бы. Остальные ~37
+# Kafka-клиентов платформы остаются на plaintext 9092 БЕЗ ИЗМЕНЕНИЙ — это не
+# платформенная миграция, см. BACKOFFICE_ROADMAP.md P1 за точным списком
+# оставшихся сервисов.
+KAFKA_SASL_DEMO_SERVICES = (
+    "dlr-correlation-writer",        # Go / franz-go
+    "template-management-service",   # Rust / rdkafka
+    "billing-ledger-writer",         # Java / kafka-clients
+)
+
+
+def kafka_user_name(service_name: str) -> str:
+    """Strimzi KafkaUser.metadata.name -> тоже реальный SASL-username, под
+    которым сервис аутентифицируется (Strimzi ставит это по умолчанию для
+    scram-sha-512). infra/kafka/generate_kafka_users.py и container env ниже
+    ОБА зовут эту функцию — не две копии одной строки."""
+    return f"{service_name}-kafka-user"
+
+
+# Strimzi User Operator создаёт K8s Secret с именем kafka_user_name(...) на
+# каждый KafkaUser (ключ "password" — SCRAM-пароль в открытом виде). Это НЕ
+# идёт через ExternalSecret/Vault, как SECRET_K8S_NAME ниже — источник этого
+# конкретного креденшла не Vault, а сам Strimzi (Kafka выпускает и ротирует
+# его сам), Vault никогда им не владел.
+KAFKA_CLUSTER_CA_SECRET = "mpp-kafka-cluster-ca-cert"  # автоматический Strimzi cluster CA secret (cluster=mpp-kafka)
+KAFKA_TLS_MOUNT_DIR = "/etc/mpp/kafka-tls"
 PROMETHEUS_URL = "http://prometheus-operated.monitoring.svc:9090"
 
 # HIGH находка кодревью (PART 2, partner-rest-receiver #4) — см. полный
-# комментарий у SECRET_DEPENDENCIES ниже. Оба сервиса, читающие статический
-# partner-конфиг (partner-rest-receiver для auth, partner-notification-service
-# для callback-роутинга — тот же файл, два разных потребителя), получают его
-# из одного и того же ConfigMap вместо несуществующего relative dev-пути.
+# комментарий у SECRET_DEPENDENCIES ниже. Оставшиеся bootstrap-only consumers
+# получают один fixture ConfigMap. partner-notification-service здесь
+# намеренно нет: production-режим — Configuration Redis + full replay
+# config.changes в каждой реплике, а файл остался только local-only fallback.
 PARTNER_CONFIG_SERVICES = [
     "billing-service",
-    "partner-notification-service",
     "partner-rest-receiver",
     "partner-smpp-gateway",
 ]
@@ -112,6 +150,96 @@ CONTROL_PLANE_RESOURCES = {
 }
 
 MIN_REPLICAS = 2  # HA floor — ни один сервис не должен работать в единственном экземпляре
+
+# BACKOFFICE_ROADMAP.md P1 "Security": "ни один Dockerfile не задаёт USER, нет
+# pod security context" — оба закрыты этим шагом. UID:GID matches what each
+# Dockerfile family actually runs as (verified live with `docker run` for one
+# service per family, see BACKOFFICE_ROADMAP.md журнал):
+#   * Go control-plane services -> gcr.io/distroless/static-debian12:nonroot,
+#     which bakes in uid:gid 65532:65532 itself (distroless convention) —
+#     the Dockerfile's `USER nonroot:nonroot` just makes that explicit.
+#   * Java (eclipse-temurin) / Rust (debian:bookworm-slim) / frontend
+#     (nginx:1.27-alpine) final stages all `groupadd`/`useradd` (or Alpine's
+#     `addgroup`/`adduser`) the same 10001:10001 explicitly, since none of
+#     those base images ship a non-root user at a fixed, predictable uid.
+DISTROLESS_NONROOT_UID = 65532
+NONROOT_UID = 10001
+
+
+def _pod_security_uid_gid(svc: Service) -> int:
+    """uid:gid the service's actual final-stage container image runs as.
+
+    Checked by workload_class before lang deliberately: `backoffice-ui` and
+    `partner-portal-ui` carry lang="go" only so `node_pool_for` schedules them
+    on the go-pool (see Service.lang docstring) — their real final-stage image
+    is nginx:1.27-alpine, not a Go distroless binary, so they get the shared
+    10001 uid like the other non-distroless families, not distroless's 65532.
+    """
+    if svc.workload_class == "frontend":
+        return NONROOT_UID
+    if svc.lang == "go":
+        return DISTROLESS_NONROOT_UID
+    return NONROOT_UID
+
+
+def _writable_paths(svc: Service) -> list[str]:
+    """Absolute paths this service's container actually needs to write to at
+    runtime, despite `readOnlyRootFilesystem: true` (see
+    `_container_security_context`) — each backed by its own `emptyDir` so the
+    root filesystem stays read-only. Every entry here is a verified finding,
+    not a defensive guess:
+
+    * Java (all 11 eclipse-temurin services, not just the 4 with an explicit
+      `-XX:StartFlightRecording`): the JVM's Attach API unconditionally
+      creates `/tmp/.java_pid<pid>` on first attach-capable operation
+      regardless of any explicit flag, so every JVM needs a writable /tmp,
+      not only the ones with JFR wired up today. Verified live:
+      `services/billing-service`'s container (uid 10001) wrote
+      `/tmp/billing.jfr` successfully with no permission error.
+    * frontend (nginx:1.27-alpine, both `backoffice-ui`/`partner-portal-ui`):
+      verified live that the stock image's own `/var/cache/nginx` (proxy/
+      client temp buffers) and default pid path (`/run/nginx.pid`) are
+      root-owned 755 and NOT writable by any non-root uid, including its own
+      built-in "nginx" user — `docker run nginx:1.27-alpine id nginx; ls -ld
+      /var/cache/nginx /run` shows this directly. The Dockerfile repoints the
+      pid file at /tmp (see nginx.conf `sed`) and chowns /var/cache/nginx at
+      build time, but a fresh `emptyDir` mount at runtime would be recreated
+      root-owned by the kubelet on every pod start regardless of that
+      build-time chown — `fsGroup` (see `_pod_security_context`) is what
+      actually makes the mounted emptyDir group-writable by this uid.
+    * Go (distroless) and Rust (debian:bookworm-slim) services: none found —
+      `grep`'d for os.Create/os.WriteFile/os.Mkdir* across every Go service
+      and for File::create/OpenOptions/tempfile across every Rust service,
+      no hits outside _test.go/tests. No writable paths needed.
+    """
+    if svc.workload_class == "frontend":
+        return ["/tmp", "/var/cache/nginx"]
+    if svc.lang == "java":
+        return ["/tmp"]
+    return []
+
+
+def _pod_security_context(svc: Service) -> dict:
+    uid = _pod_security_uid_gid(svc)
+    return {
+        "runAsNonRoot": True,
+        "runAsUser": uid,
+        "runAsGroup": uid,
+        # Group-owns every emptyDir/PVC volume mounted into this pod (RocksDB
+        # state PVC, /tmp, nginx cache) so the non-root uid above can actually
+        # write to them — dynamically provisioned volumes are root-owned by
+        # default until the kubelet applies fsGroup on mount.
+        "fsGroup": uid,
+        "seccompProfile": {"type": "RuntimeDefault"},
+    }
+
+
+def _container_security_context() -> dict:
+    return {
+        "allowPrivilegeEscalation": False,
+        "readOnlyRootFilesystem": True,
+        "capabilities": {"drop": ["ALL"]},
+    }
 
 
 @dataclass
@@ -346,8 +474,16 @@ KEDA_KAFKA_TRIGGERS: dict[str, list[tuple[str, str]]] = {
 # PostgreSQL (dlr.dlr_correlation), а кэш "ожидающих корреляции" DLR
 # (см. README сервиса — реальный пробел контракта SchedulerBackgroundTask,
 # закрытый локальным кэшем) живёт в Runtime Redis.
+# Production Readiness Review P1 "Security" ("один Postgres-юзер на все
+# сервисы, ClickHouse — admin") — "postgresql"/"clickhouse" ниже replaced с
+# per-domain вариантами (postgresql-<domain>/clickhouse-<service>), каждый
+# сервис получает только свою схему/таблицы (см.
+# migrations/V036__per_service_postgresql_grants.sql,
+# infra/clickhouse/production_grants.sql, и полный разбор владения в
+# infra/terraform/postgresql.tf/clickhouse.tf). Домены выведены чтением
+# реальных SQL-запросов каждого сервиса, не из имени сервиса.
 SECRET_DEPENDENCIES: dict[str, list[str]] = {
-    "dlr-manager": ["postgresql", "redis-runtime"],
+    "dlr-manager": ["postgresql-dlr", "redis-runtime"],
     "partner-rest-receiver": ["redis-runtime", "redis-configuration"],
     "partner-smpp-gateway": ["redis-runtime", "redis-configuration"],
     "operator-smpp-session-manager": ["redis-runtime", "redis-configuration"],
@@ -369,7 +505,7 @@ SECRET_DEPENDENCIES: dict[str, list[str]] = {
     "billing-service": ["redis-billing", "redis-configuration"],
     "routing-service": ["redis-configuration"],
     "delivery-service": ["redis-runtime", "redis-configuration"],
-    "delivery-reconciliation-service": ["redis-runtime", "redis-configuration", "postgresql"],
+    "delivery-reconciliation-service": ["redis-runtime", "redis-configuration", "postgresql-reconciliation"],
     "scheduler-critical-sweep": ["redis-runtime"],
     "scheduler-standard-lane": ["redis-runtime", "redis-configuration"],
     "scheduler-background-lane": ["redis-runtime", "redis-configuration"],
@@ -379,12 +515,12 @@ SECRET_DEPENDENCIES: dict[str, list[str]] = {
     # 2 выхода (message.lifecycle, message-state.changelog), ни один не
     # Redis. Убрано как стороннее/скопированное значение, не додуманное
     # заново — реального использования Redis в этом сервисе нет.
-    "execution-control-service": ["postgresql", "redis-configuration"],
+    "execution-control-service": ["postgresql-control", "redis-configuration"],
     # services/iam-service/cmd/iam-service/main.go: только pgxpool.Pool
     # (buildPostgresDSN -> POSTGRES_*) — нет Redis-клиента, нет Kafka
     # consumer/producer, нет ClickHouse; CheckPermission синхронно идёт в
     # Postgres на каждый вызов (явно, без кеша — см. README.md сервиса).
-    "iam-service": ["postgresql"],
+    "iam-service": ["postgresql-iam"],
     # services/credential-issuer-service/cmd/credential-issuer-service/main.go:
     # только pgxpool.Pool (buildPostgresDSN -> POSTGRES_*) — нет Redis/Kafka/
     # ClickHouse. Сознательно НЕТ записи для Vault: этот сервис ходит в
@@ -397,11 +533,11 @@ SECRET_DEPENDENCIES: dict[str, list[str]] = {
     # VAULT_ADDR), и main.go уже дефолтит его на то же самое значение
     # (http://vault.vault-system.svc:8200), поэтому ничего дополнительно
     # инжектить здесь не нужно.
-    "credential-issuer-service": ["postgresql"],
+    "credential-issuer-service": ["postgresql-credentials"],
     # services/incident-service/cmd/incident-service/main.go: только
     # pgxpool.Pool (buildPostgresDSN -> POSTGRES_*) — своя схема incident.*
     # (migrations/V028__incident.sql), никакого Redis/Kafka/ClickHouse.
-    "incident-service": ["postgresql"],
+    "incident-service": ["postgresql-incident"],
     # services/ops-visibility-service/cmd/ops-visibility-service/main.go:
     # REDIS_RUNTIME_* (снапшот-хранилище, короткий TTL, см. README.md) +
     # KAFKA_BOOTSTRAP_SERVERS — но Kafka bootstrap-адрес нигде в этом
@@ -412,25 +548,32 @@ SECRET_DEPENDENCIES: dict[str, list[str]] = {
     # этой таблице). Никакого Postgres — эта фаза явно не заводит таблицу
     # трендов (ops.health_snapshots отложена планом).
     "ops-visibility-service": ["redis-runtime"],
-    "chat-service": ["postgresql"],
-    "configuration-service": ["postgresql"],
+    "chat-service": ["postgresql-support"],
+    "configuration-service": ["postgresql-config"],
     "config-cache-projector": ["redis-configuration"],
-    "consent-cache-projector": ["redis-runtime"],
-    "dlr-correlation-writer": ["postgresql"],
+    # consent-cache-projector: RESYNC_ON_START (default true, см.
+    # infra/docker/docker-compose.yml комментарий) читает
+    # policy.subscriber_consent целиком на старте — до этого изменения здесь
+    # не было НИ ОДНОЙ postgres-записи вообще, то есть в k8s (в отличие от
+    # локального docker-compose) startup-ресинку было неоткуда взять
+    # POSTGRES_*; найдено при построении этой же per-domain грант-таблицы,
+    # закрыто заодно, а не молча оставлено.
+    "consent-cache-projector": ["redis-runtime", "postgresql-policy-read"],
+    "dlr-correlation-writer": ["postgresql-dlr"],
     "billing-outbox-publisher": ["redis-billing"],
-    "billing-ledger-writer": ["postgresql"],
-    "billing-reconciliation": ["redis-billing", "postgresql"],
-    "billing-self-service-api": ["postgresql", "partner-oidc-verification"],
+    "billing-ledger-writer": ["postgresql-billing-write"],
+    "billing-reconciliation": ["redis-billing", "postgresql-billing-write"],
+    "billing-self-service-api": ["postgresql-billing-read", "partner-oidc-verification"],
     "compliance-api": ["redis-runtime", "partner-oidc-verification"],
-    "partner-api": ["postgresql", "clickhouse", "partner-oidc-verification"],
-    "backoffice-api": ["postgresql", "clickhouse", "backoffice-jwt-keypair"],
+    "partner-api": ["postgresql-messaging-read", "clickhouse-partner-api-reader", "partner-oidc-verification"],
+    "backoffice-api": ["postgresql-backoffice-read", "clickhouse-analytics-reader", "backoffice-jwt-keypair"],
     "partner-self-service-api": ["partner-oidc-verification"],
-    "replay-service": ["postgresql"],
-    "lifecycle-writer": ["postgresql"],
-    "analytics-writer": ["clickhouse"],
-    "pdu-log-writer": ["clickhouse"],
-    "partner-notification-service": ["redis-runtime"],
-    "template-management-service": ["postgresql"],
+    "replay-service": ["postgresql-messaging"],
+    "lifecycle-writer": ["postgresql-messaging"],
+    "analytics-writer": ["clickhouse-analytics-writer"],
+    "pdu-log-writer": ["clickhouse-pdu-log-writer"],
+    "partner-notification-service": ["redis-runtime", "redis-configuration"],
+    "template-management-service": ["postgresql-policy-write"],
 }
 
 # HIGH находка кодревью (PART 2, partner-rest-receiver #4): EnvAuthVerifier
@@ -495,11 +638,44 @@ def _probes() -> dict:
 # (infra/secrets/generate_external_secrets.py) — единственное место, где эта связь
 # зафиксирована, оба генератора читают её.
 SECRET_K8S_NAME = {
+    # "postgresql"/"clickhouse" — старые, ещё-не-удалённые shared credentials
+    # (mpp_app/admin). Ни один сервис в SECRET_DEPENDENCIES больше на них не
+    # ссылается (см. per-domain "postgresql-*"/"clickhouse-*" ниже) — оставлены
+    # только для infra/migrations/migrate.py и ручных операторских
+    # действий, которым нужны схема-владеющие/полные права. Удаление —
+    # отдельный, сознательный шаг после подтверждения, что все потребители
+    # мигрировали (BACKOFFICE_ROADMAP.md).
     "postgresql": "postgresql-credentials",
     "redis-runtime": "redis-runtime-credentials",
     "redis-configuration": "redis-configuration-credentials",
     "redis-billing": "redis-billing-credentials",
     "clickhouse": "clickhouse-credentials",
+    # Per-domain PostgreSQL credentials (Production Readiness Review P1
+    # "Security") — соответствуют local.postgresql_service_users в
+    # infra/terraform/postgresql.tf 1:1 (mpp_<domain> роль), реальные права —
+    # migrations/V036__per_service_postgresql_grants.sql.
+    "postgresql-config": "postgresql-config-credentials",
+    "postgresql-billing-write": "postgresql-billing-write-credentials",
+    "postgresql-billing-read": "postgresql-billing-read-credentials",
+    "postgresql-dlr": "postgresql-dlr-credentials",
+    "postgresql-policy-write": "postgresql-policy-write-credentials",
+    "postgresql-policy-read": "postgresql-policy-read-credentials",
+    "postgresql-reconciliation": "postgresql-reconciliation-credentials",
+    "postgresql-control": "postgresql-control-credentials",
+    "postgresql-iam": "postgresql-iam-credentials",
+    "postgresql-incident": "postgresql-incident-credentials",
+    "postgresql-credentials": "postgresql-credentials-domain-credentials",
+    "postgresql-support": "postgresql-support-credentials",
+    "postgresql-messaging": "postgresql-messaging-credentials",
+    "postgresql-messaging-read": "postgresql-messaging-read-credentials",
+    "postgresql-backoffice-read": "postgresql-backoffice-read-credentials",
+    # Per-service ClickHouse credentials — соответствуют
+    # local.clickhouse_service_users в infra/terraform/clickhouse.tf 1:1,
+    # реальные права — infra/clickhouse/production_grants.sql.
+    "clickhouse-analytics-writer": "clickhouse-analytics-writer-credentials",
+    "clickhouse-pdu-log-writer": "clickhouse-pdu-log-writer-credentials",
+    "clickhouse-analytics-reader": "clickhouse-analytics-reader-credentials",
+    "clickhouse-partner-api-reader": "clickhouse-partner-api-reader-credentials",
     # Два разных trust domain: локальный временный issuer backoffice и
     # внешний IdP partner portal нельзя сводить в один RSA keypair.
     "backoffice-jwt-keypair": "backoffice-jwt-keypair",
@@ -528,6 +704,7 @@ def _container(svc: Service) -> dict:
         "image": f"{IMAGE_REGISTRY}/{svc.name}:latest",
         "ports": ports,
         "resources": _resources(svc, guaranteed),
+        "securityContext": _container_security_context(),
         **_probes(),
     }
     volume_mounts = []
@@ -535,6 +712,10 @@ def _container(svc: Service) -> dict:
         volume_mounts.append({"name": "rocksdb-state", "mountPath": "/var/lib/rocksdb"})
     if svc.name in PARTNER_CONFIG_SERVICES:
         volume_mounts.append({"name": "partner-config", "mountPath": PARTNER_CONFIG_MOUNT_DIR, "readOnly": True})
+    if svc.name in KAFKA_SASL_DEMO_SERVICES:
+        volume_mounts.append({"name": "kafka-tls-ca", "mountPath": KAFKA_TLS_MOUNT_DIR, "readOnly": True})
+    for i, path in enumerate(_writable_paths(svc)):
+        volume_mounts.append({"name": f"writable-{i}", "mountPath": path})
     if volume_mounts:
         container["volumeMounts"] = volume_mounts
     if svc.secrets:
@@ -552,6 +733,20 @@ def _container(svc: Service) -> dict:
         # нет — тот путь в реальном образе не существует (см. комментарий у
         # PARTNER_CONFIG_SERVICES выше).
         env_vars.append({"name": "PARTNER_CONFIG_PATH", "value": f"{PARTNER_CONFIG_MOUNT_DIR}/{PARTNER_CONFIG_FIXTURE}"})
+    if svc.name in KAFKA_SASL_DEMO_SERVICES:
+        # Опциональные для клиента переменные — KAFKA_BOOTSTRAP_SERVERS (plaintext,
+        # выше) остаётся заданной и сервис им пользуется, если этот блок вообще
+        # убрать; сам клиентский код (kafkaio.go/projector.rs/Main.java) переходит
+        # на SASL_SSL только когда ВСЕ KAFKA_SASL_*/KAFKA_TLS_CA_PATH присутствуют —
+        # реальный dual-path, не просто "объявленный, но не используемый" env.
+        env_vars.append({"name": "KAFKA_SASL_BOOTSTRAP_SERVERS", "value": KAFKA_SASL_BOOTSTRAP_SERVERS})
+        env_vars.append({"name": "KAFKA_SASL_USERNAME", "value": kafka_user_name(svc.name)})
+        env_vars.append({"name": "KAFKA_SASL_MECHANISM", "value": "SCRAM-SHA-512"})
+        env_vars.append({"name": "KAFKA_TLS_CA_PATH", "value": f"{KAFKA_TLS_MOUNT_DIR}/ca.crt"})
+        env_vars.append({
+            "name": "KAFKA_SASL_PASSWORD",
+            "valueFrom": {"secretKeyRef": {"name": kafka_user_name(svc.name), "key": "password"}},
+        })
     if env_vars:
         container["env"] = env_vars
     return container
@@ -597,6 +792,7 @@ def _pod_template(svc: Service) -> dict:
     node_pool = node_pool_for(svc)
     spec = {
         "serviceAccountName": svc.name,
+        "securityContext": _pod_security_context(svc),
         "containers": [_container(svc)],
         "terminationGracePeriodSeconds": 60 if svc.workload_class != "kafka-streams-statefulset" else 120,
         # infra/terraform/k8s-cluster.tf taint'ит ВСЕ node pool через
@@ -618,8 +814,17 @@ def _pod_template(svc: Service) -> dict:
             "whenUnsatisfiable": "ScheduleAnyway",
             "labelSelector": {"matchLabels": {"app": svc.name}},
         }]
+    volumes = []
     if svc.name in PARTNER_CONFIG_SERVICES:
-        spec["volumes"] = [{"name": "partner-config", "configMap": {"name": PARTNER_CONFIG_CONFIGMAP_NAME}}]
+        volumes.append({"name": "partner-config", "configMap": {"name": PARTNER_CONFIG_CONFIGMAP_NAME}})
+    if svc.name in KAFKA_SASL_DEMO_SERVICES:
+        volumes.append({"name": "kafka-tls-ca", "secret": {"secretName": KAFKA_CLUSTER_CA_SECRET}})
+    for i, _ in enumerate(_writable_paths(svc)):
+        # emptyDir, not the container's writable layer — see _writable_paths
+        # for exactly which finding justifies each mounted path per family.
+        volumes.append({"name": f"writable-{i}", "emptyDir": {"sizeLimit": "256Mi"}})
+    if volumes:
+        spec["volumes"] = volumes
     return {
         "metadata": {"labels": {"app": svc.name, "mpp.io/workload-class": svc.workload_class}},
         "spec": spec,

@@ -17,6 +17,7 @@ import (
 	eventsv1 "mpp/platformcontracts/events/v1"
 
 	"mpp/partner-notification-service/internal/config"
+	"mpp/partner-notification-service/internal/metrics"
 	"mpp/partner-notification-service/internal/msgctx"
 	"mpp/partner-notification-service/internal/notify"
 	"mpp/partner-notification-service/internal/pending"
@@ -30,10 +31,8 @@ const (
 	TopicSchedulerBackground  = "scheduler.background.commands"
 	TopicNotificationArchived = "notification.archived"
 	// TopicConfigChanges — same compacted topic config-cache-projector
-	// consumes (services/config-cache-projector/internal/kafkaio/consumer.go),
-	// filtered here to entity_type=PARTNER only (see configchanges.go).
-	// Only subscribed to when running against Configuration Redis
-	// (PARTNER_CONFIG_PATH unset) — see cmd/partner-notification-service/main.go.
+	// consumes. It is deliberately read by a separate per-process full-mirror
+	// client (configchanges.go), never by this shared delivery consumer group.
 	TopicConfigChanges = "config.changes"
 )
 
@@ -41,16 +40,13 @@ type Consumer struct {
 	client *kgo.Client
 }
 
-// NewConsumer — extraTopics lets callers opt this same consumer/consumer
-// group into config.changes (BACKOFFICE_ROADMAP.md P0 #4) without standing
-// up a second Kafka client: reuses the existing wiring, PollOnce loop just
-// branches on record.Topic (see HandleConfigChangeRecord vs HandleRecord).
-func NewConsumer(brokers []string, groupID string, extraTopics ...string) (*Consumer, error) {
-	topics := append([]string{TopicLifecycle, TopicNotificationRetry}, extraTopics...)
+// NewConsumer is only for work-queue topics: replicas may share these
+// partitions because every lifecycle notification is processed once.
+func NewConsumer(brokers []string, groupID string) (*Consumer, error) {
 	client, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
 		kgo.ConsumerGroup(groupID),
-		kgo.ConsumeTopics(topics...),
+		kgo.ConsumeTopics(TopicLifecycle, TopicNotificationRetry),
 		kgo.DisableAutoCommit(),
 	)
 	if err != nil {
@@ -63,6 +59,17 @@ func (c *Consumer) Close() { c.client.Close() }
 
 func (c *Consumer) CommitRecords(ctx context.Context, records ...*kgo.Record) error {
 	return c.client.CommitRecords(ctx, records...)
+}
+
+// Rewind makes a transiently failed record eligible for the next poll in the
+// same process. Merely withholding the group commit is not sufficient:
+// franz-go has already advanced its in-memory fetch position.
+func (c *Consumer) Rewind(record *kgo.Record) {
+	c.client.SetOffsets(map[string]map[int32]kgo.EpochOffset{
+		record.Topic: {
+			record.Partition: {Epoch: record.LeaderEpoch, Offset: record.Offset},
+		},
+	})
 }
 
 func (c *Consumer) PollOnce(ctx context.Context, onRecord func(*kgo.Record), errHandler func(error)) {
@@ -212,9 +219,13 @@ func HandleRecord(ctx context.Context, deps Deps, record *kgo.Record) error {
 		return nil
 	}
 
-	_, app, found := deps.Snapshot.FirstApplication(partnerID)
+	partner, app, found := deps.Snapshot.FirstApplication(partnerID)
 	if !found {
 		log.Printf("партнёр %s не найден в снапшоте конфигурации", partnerID)
+		return nil
+	}
+	if !partner.IsActive() {
+		log.Printf("партнёр %s status=%s — уведомление не доставляется", partnerID, partner.Status)
 		return nil
 	}
 
@@ -266,26 +277,40 @@ func attemptDelivery(ctx context.Context, deps Deps, channel config.Channel, par
 		endpoint, found, err := deps.RegistryStore.Lookup(ctx, partnerID, app.ApplicationID)
 		if err != nil {
 			log.Printf("registry lookup: %v", err)
+			metrics.DeliveryAttemptsTotal.WithLabelValues("smpp", "failed").Inc()
 			return false
 		}
 		if !found {
 			log.Printf("нет активной SMPP-сессии для partner_id=%s system_id=%s", partnerID, app.ApplicationID)
+			metrics.DeliveryAttemptsTotal.WithLabelValues("smpp", "failed").Inc()
 			return false
 		}
 		outcome, err := deps.SmppClient.DeliverSm(ctx, endpoint, event.GetMessageId(), partnerID, app.ApplicationID, statusText(event), nil)
 		if err != nil {
 			log.Printf("DeliverSm: %v", err)
 		}
-		return outcome == notify.OutcomeDelivered
+		delivered := outcome == notify.OutcomeDelivered
+		metrics.DeliveryAttemptsTotal.WithLabelValues("smpp", deliveryOutcomeLabel(delivered)).Inc()
+		return delivered
 	case config.ChannelREST:
 		outcome, err := deps.RestClient.SendCallback(ctx, app.NotificationCallbackURL, event)
 		if err != nil {
 			log.Printf("SendCallback: %v", err)
 		}
-		return outcome == notify.OutcomeDelivered
+		delivered := outcome == notify.OutcomeDelivered
+		metrics.DeliveryAttemptsTotal.WithLabelValues("rest", deliveryOutcomeLabel(delivered)).Inc()
+		return delivered
 	default:
+		metrics.DeliveryAttemptsTotal.WithLabelValues("unknown", "failed").Inc()
 		return false
 	}
+}
+
+func deliveryOutcomeLabel(delivered bool) string {
+	if delivered {
+		return "delivered"
+	}
+	return "failed"
 }
 
 func statusText(event *eventsv1.MessageLifecycleEvent) string {

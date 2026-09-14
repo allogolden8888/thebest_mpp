@@ -10,6 +10,7 @@ import uz.mpp.partnersmpp.core.IncomingMessageBuilder;
 import uz.mpp.partnersmpp.core.SubmitValidator;
 import uz.mpp.partnersmpp.core.TokenBucket;
 import uz.mpp.partnersmpp.kafkaio.IncomingPublishFunction;
+import uz.mpp.partnersmpp.metrics.SmppMetrics;
 import uz.mpp.platformcontracts.events.v1.IncomingMessage;
 
 import java.time.Instant;
@@ -152,21 +153,26 @@ public final class SmppServerHandler extends SimpleChannelInboundHandler<ByteBuf
     }
 
     private void handleSubmitSm(ChannelHandlerContext ctx, ShortMessagePdu body, int seq) {
+        long startNanos = System.nanoTime();
         if (!bound) {
             respond(ctx, CommandId.SUBMIT_SM_RESP, CommandStatus.ESME_RINVBNDSTS, seq, null);
+            SmppMetrics.recordSubmit("invalid_bind_state", System.nanoTime() - startNanos);
             return;
         }
         SubmitValidator.ValidationResult validation = SubmitValidator.validate(body);
         if (!validation.valid()) {
             respond(ctx, CommandId.SUBMIT_SM_RESP, CommandStatus.ESME_RINVMSGLEN, seq, null);
+            SmppMetrics.recordSubmit("invalid_message", System.nanoTime() - startNanos);
             return;
         }
         if (!admissionGate.admit(partnerId)) {
             respond(ctx, CommandId.SUBMIT_SM_RESP, CommandStatus.ESME_RTHROTTLED, seq, null);
+            SmppMetrics.recordSubmit("throttled", System.nanoTime() - startNanos);
             return;
         }
         if (!rateLimiter.tryAcquire(System.currentTimeMillis())) {
             respond(ctx, CommandId.SUBMIT_SM_RESP, CommandStatus.ESME_RTHROTTLED, seq, null);
+            SmppMetrics.recordSubmit("throttled", System.nanoTime() - startNanos);
             return;
         }
 
@@ -184,8 +190,10 @@ public final class SmppServerHandler extends SimpleChannelInboundHandler<ByteBuf
         incomingSink.publish(incoming, (ignored, error) -> {
             if (error != null) {
                 respond(ctx, CommandId.SUBMIT_SM_RESP, CommandStatus.ESME_RSYSERR, seq, null);
+                SmppMetrics.recordSubmit("publish_failed", System.nanoTime() - startNanos);
             } else {
                 respond(ctx, CommandId.SUBMIT_SM_RESP, CommandStatus.ESME_ROK, seq, new ShortMessagePduResp(smscMessageId));
+                SmppMetrics.recordSubmit("ok", System.nanoTime() - startNanos);
             }
         });
     }

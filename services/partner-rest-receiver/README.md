@@ -49,11 +49,19 @@ rate/credential_ref меняются live; при потере Kafka сохра�
 валидная версия.
 
 Config Service version используется для защиты от out-of-order delivery;
-archive хранится как versioned tombstone, поэтому поздний старый `active` не
-воскресит партнёра. Kafka key, entity_id и payload.partner_id сверяются;
+same-version `active(N) -> archived(N)` хранится как terminal tombstone,
+поэтому повторный/поздний `active(N)` не воскресит партнёра, а новая версия
+`active(N+1)` сможет реактивировать его. Kafka key, entity_id и
+payload.partner_id сверяются;
 невалидная версия логируется и не заменяет последний snapshot, но не блокирует
 более новые записи партиции. Проверено тестами active/archive/revival,
 key/payload mismatch, readiness и fail-closed bootstrap.
+
+Дополнение 2026-09-14: targeted config-набор (`config_reload` +
+`partner_config`) — 8/8. Полный прогон собрал сервис и прошёл 125/128 тестов;
+три live-Vault теста не смогли выполнить seed из-за `403 invalid token` уже
+поднятого локального Vault. Это отдельное состояние test environment, не сбой
+same-version archive логики.
 
 Открытый межсервисный риск: Config Event Publisher всё ещё ключует compacted
 topic только по `entity_id`, а не `(entity_type, entity_id)`. Совпавшие ID

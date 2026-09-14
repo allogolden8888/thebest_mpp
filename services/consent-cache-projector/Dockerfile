@@ -15,7 +15,8 @@ RUN --mount=type=secret,id=extra_ca_cert,required=false \
 COPY . .
 RUN CGO_ENABLED=0 go build -o /build/bin/consent-cache-projector ./cmd/consent-cache-projector
 
-FROM gcr.io/distroless/static-debian12
+FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /build/bin/consent-cache-projector /app/consent-cache-projector
 EXPOSE 9090
+USER nonroot:nonroot
 ENTRYPOINT ["/app/consent-cache-projector"]

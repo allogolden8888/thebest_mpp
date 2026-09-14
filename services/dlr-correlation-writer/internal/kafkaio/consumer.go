@@ -5,11 +5,15 @@ package kafkaio
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/sasl/scram"
 	"google.golang.org/protobuf/proto"
 
 	eventsv1 "mpp/platformcontracts/events/v1"
@@ -69,13 +73,83 @@ type Consumer struct {
 	client *kgo.Client
 }
 
+// SaslConfig — SASL_SCRAM+TLS креды для этого сервиса, одного из трёх
+// пилотных клиентов нового листенера (BACKOFFICE_ROADMAP.md P1 "Kafka —
+// plaintext listener без SASL/ACL, хотя HLD требует ACL"; порт 9094,
+// infra/kafka/generate_kafka_topics.py::build_kafka_cluster_crd). По одному
+// сервису на язык (Go/Rust/Java) —
+// k8s/generate_manifests.py::KAFKA_SASL_DEMO_SERVICES; остальные ~37
+// Kafka-клиентов платформы, включая все локальные docker-compose дефолты, не
+// задают ни одну из этих переменных и продолжают работать через
+// KAFKA_BOOTSTRAP_SERVERS (порт 9092) без изменений.
+type SaslConfig struct {
+	BootstrapServers string
+	Username         string
+	Password         string
+	Mechanism        string
+	CAPath           string
+}
+
+// SaslConfigFromEnv — nil, если хоть одна обязательная переменная не задана:
+// вызывающая сторона тогда остаётся на plaintext bootstrap, тот же
+// fail-safe принцип, что getenv-с-fallback в cmd/dlr-correlation-writer/main.go.
+func SaslConfigFromEnv() *SaslConfig {
+	bootstrap := os.Getenv("KAFKA_SASL_BOOTSTRAP_SERVERS")
+	username := os.Getenv("KAFKA_SASL_USERNAME")
+	password := os.Getenv("KAFKA_SASL_PASSWORD")
+	caPath := os.Getenv("KAFKA_TLS_CA_PATH")
+	if bootstrap == "" || username == "" || password == "" || caPath == "" {
+		return nil
+	}
+	mechanism := os.Getenv("KAFKA_SASL_MECHANISM")
+	if mechanism == "" {
+		mechanism = "SCRAM-SHA-512"
+	}
+	return &SaslConfig{BootstrapServers: bootstrap, Username: username, Password: password, Mechanism: mechanism, CAPath: caPath}
+}
+
+// saslClientOpts — читает Strimzi cluster CA сертификат (смонтированный
+// k8s/generate_manifests.py как файл, KAFKA_TLS_CA_PATH) и собирает kgo.Opt
+// для SASL_SSL. Вынесено отдельно от NewConsumer, чтобы разбор PEM
+// покрывался unit-тестом без живого брокера — в отличие от rdkafka
+// (template-management-service), franz-go/crypto-tls требует собранный в
+// памяти x509.CertPool, путь к файлу самостоятельно не читает.
+func saslClientOpts(cfg *SaslConfig) ([]kgo.Opt, error) {
+	if cfg.Mechanism != "SCRAM-SHA-512" {
+		return nil, fmt.Errorf("неподдерживаемый KAFKA_SASL_MECHANISM: %q (поддерживается только SCRAM-SHA-512)", cfg.Mechanism)
+	}
+	caPEM, err := os.ReadFile(cfg.CAPath)
+	if err != nil {
+		return nil, fmt.Errorf("чтение KAFKA_TLS_CA_PATH (%s): %w", cfg.CAPath, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("KAFKA_TLS_CA_PATH (%s) не содержит валидный PEM-сертификат", cfg.CAPath)
+	}
+	auth := scram.Auth{User: cfg.Username, Pass: cfg.Password}
+	return []kgo.Opt{
+		kgo.SASL(auth.AsSha512Mechanism()),
+		kgo.DialTLSConfig(&tls.Config{RootCAs: pool}),
+	}, nil
+}
+
 func NewConsumer(brokers []string, groupID string) (*Consumer, error) {
-	client, err := kgo.NewClient(
-		kgo.SeedBrokers(brokers...),
+	opts := []kgo.Opt{
 		kgo.ConsumerGroup(groupID),
 		kgo.ConsumeTopics(Topic),
 		kgo.DisableAutoCommit(),
-	)
+	}
+	if sasl := SaslConfigFromEnv(); sasl != nil {
+		extra, err := saslClientOpts(sasl)
+		if err != nil {
+			return nil, fmt.Errorf("SASL-конфигурация (KAFKA_SASL_*/KAFKA_TLS_CA_PATH): %w", err)
+		}
+		opts = append(opts, kgo.SeedBrokers(sasl.BootstrapServers))
+		opts = append(opts, extra...)
+	} else {
+		opts = append(opts, kgo.SeedBrokers(brokers...))
+	}
+	client, err := kgo.NewClient(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("kgo.NewClient: %w", err)
 	}

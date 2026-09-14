@@ -98,10 +98,9 @@ fn apply_bootstrap(partners: &mut HashMap<String, (i64, Option<Partner>)>, updat
             version,
             partner_id,
         } => {
-            if partners
-                .get(&partner_id)
-                .is_none_or(|(current, _)| version > *current)
-            {
+            if partners.get(&partner_id).is_none_or(|(current, partner)| {
+                version > *current || (version == *current && partner.is_some())
+            }) {
                 partners.insert(partner_id, (version, None));
             }
         }
@@ -243,7 +242,7 @@ mod tests {
             &mut bootstrap,
             decode_update(
                 Some(b"acme"),
-                Some(&event(11, "archived", partner_json("archived"))),
+                Some(&event(10, "archived", partner_json("archived"))),
             )
             .unwrap(),
         );
@@ -263,7 +262,7 @@ mod tests {
             &snapshot,
             decode_update(
                 Some(b"acme"),
-                Some(&event(12, "active", partner_json("active"))),
+                Some(&event(11, "active", partner_json("active"))),
             )
             .unwrap(),
         );

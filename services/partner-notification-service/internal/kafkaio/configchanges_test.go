@@ -1,11 +1,11 @@
 package kafkaio
 
 import (
-	"context"
+	"errors"
+	"strconv"
 	"testing"
 
-	"github.com/alicebob/miniredis/v2"
-	"github.com/redis/go-redis/v9"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"google.golang.org/protobuf/proto"
 
@@ -15,197 +15,162 @@ import (
 	"mpp/partner-notification-service/internal/config"
 )
 
-func TestDecodeConfigChangeEventSkipsNonPartnerEntityTypes(t *testing.T) {
-	payload, err := proto.Marshal(&eventsv1.ConfigChangeEvent{
-		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_BILLING_TARIFF,
-		EntityId:   "some-tariff",
-	})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	event, err := DecodeConfigChangeEvent(payload)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if event != nil {
-		t.Fatal("ожидали nil для entity_type != PARTNER — не наш путь")
-	}
+func partnerPayload(id string, version int64, status string) []byte {
+	return []byte(`{"partner_id":"` + id + `","version":` + strconv.FormatInt(version, 10) + `,"status":"` + status + `","applications":[{"application_id":"` + id + `_app"}]}`)
 }
 
-func TestDecodeConfigChangeEventRejectsMissingEntityId(t *testing.T) {
-	payload, err := proto.Marshal(&eventsv1.ConfigChangeEvent{
-		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER,
-		EntityId:   "",
-	})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	if _, err := DecodeConfigChangeEvent(payload); err == nil {
-		t.Fatal("ожидали ошибку для PARTNER-события без entity_id")
-	}
-}
-
-func TestDecodeConfigChangeEventRejectsGarbageBytes(t *testing.T) {
-	if _, err := DecodeConfigChangeEvent([]byte("not a protobuf message, definitely")); err == nil {
-		t.Fatal("ожидали ошибку разбора мусорных байт")
-	}
-}
-
-func TestDecodeConfigChangeEventAcceptsPartner(t *testing.T) {
-	payload, err := proto.Marshal(&eventsv1.ConfigChangeEvent{
-		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER,
-		EntityId:   "acme",
-		Version:    2,
-	})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	event, err := DecodeConfigChangeEvent(payload)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if event == nil || event.GetEntityId() != "acme" {
-		t.Fatalf("event = %+v, want entity_id=acme", event)
-	}
-}
-
-func newTestRedisSource(t *testing.T) (*config.RedisSource, *redis.Client) {
-	t.Helper()
-	mr := miniredis.RunT(t)
-	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	return config.NewRedisSourceFromClient(rdb), rdb
-}
-
-func recordFor(t *testing.T, event *eventsv1.ConfigChangeEvent) *kgo.Record {
+func configRecord(t *testing.T, key string, event *eventsv1.ConfigChangeEvent) *kgo.Record {
 	t.Helper()
 	payload, err := proto.Marshal(event)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	return &kgo.Record{Topic: TopicConfigChanges, Value: payload}
+	return &kgo.Record{Topic: TopicConfigChanges, Key: []byte(key), Value: payload}
 }
 
-func TestHandleConfigChangeRecordUpsertsActivePartner(t *testing.T) {
-	source, rdb := newTestRedisSource(t)
-	ctx := context.Background()
-	if err := rdb.Set(ctx, "config:version:partner:acme:1", `{"partner_id":"acme","version":1,"status":"active","applications":[{"application_id":"acme_app"}]}`, 0).Err(); err != nil {
-		t.Fatalf("seed version: %v", err)
-	}
-	if err := rdb.Set(ctx, "config:current:partner:acme", 1, 0).Err(); err != nil {
-		t.Fatalf("seed current: %v", err)
-	}
-
-	store := config.NewStore(config.NewSnapshot(nil))
-	record := recordFor(t, &eventsv1.ConfigChangeEvent{
+func partnerEvent(id string, version int64, eventStatus, payloadStatus string) *eventsv1.ConfigChangeEvent {
+	event := &eventsv1.ConfigChangeEvent{
 		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER,
-		EntityId:   "acme",
-		Version:    1,
-	})
-
-	if err := HandleConfigChangeRecord(ctx, store, source, record); err != nil {
-		t.Fatalf("HandleConfigChangeRecord failed: %v", err)
+		EntityId:   id,
+		Version:    version,
+		Status:     eventStatus,
 	}
-
-	if _, _, found := store.Application("acme", "acme_app"); !found {
-		t.Fatal("ожидали, что acme появится в живом Store после config.changes события")
+	if eventStatus == "active" {
+		event.PayloadJson = partnerPayload(id, version, payloadStatus)
 	}
+	return event
 }
 
-func TestHandleConfigChangeRecordRemovesArchivedPartner(t *testing.T) {
-	source, rdb := newTestRedisSource(t)
-	ctx := context.Background()
-	if err := rdb.Set(ctx, "config:version:partner:acme:2", `{"partner_id":"acme","version":2,"status":"archived","applications":[]}`, 0).Err(); err != nil {
-		t.Fatalf("seed version: %v", err)
-	}
-	if err := rdb.Set(ctx, "config:current:partner:acme", 2, 0).Err(); err != nil {
-		t.Fatalf("seed current: %v", err)
-	}
-
-	initial := config.NewSnapshot([]config.Partner{{
-		PartnerID: "acme", Version: 1, Status: "active",
-		Applications: []config.Application{{ApplicationID: "acme_app"}},
-	}})
-	store := config.NewStore(initial)
-
-	record := recordFor(t, &eventsv1.ConfigChangeEvent{
-		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER,
-		EntityId:   "acme",
-		Version:    2,
-	})
-
-	if err := HandleConfigChangeRecord(ctx, store, source, record); err != nil {
-		t.Fatalf("HandleConfigChangeRecord failed: %v", err)
-	}
-
-	if _, _, found := store.Application("acme", "acme_app"); found {
-		t.Fatal("archived partner должен быть удалён из живого Store, не остаться со старой активной версией")
-	}
-}
-
-func TestHandleConfigChangeRecordRemovesPartnerMissingFromConfigurationRedis(t *testing.T) {
-	source, _ := newTestRedisSource(t) // ничего не засеяно — config:current:partner:acme отсутствует
-
-	initial := config.NewSnapshot([]config.Partner{{
-		PartnerID: "acme", Version: 1, Status: "active",
-		Applications: []config.Application{{ApplicationID: "acme_app"}},
-	}})
-	store := config.NewStore(initial)
-
-	record := recordFor(t, &eventsv1.ConfigChangeEvent{
-		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER,
-		EntityId:   "acme",
-		Version:    1,
-	})
-
-	if err := HandleConfigChangeRecord(context.Background(), store, source, record); err != nil {
-		t.Fatalf("HandleConfigChangeRecord failed: %v", err)
-	}
-
-	if _, _, found := store.Application("acme", "acme_app"); found {
-		t.Fatal("partner отсутствующий в Configuration Redis должен быть удалён из живого Store")
-	}
-}
-
-func TestHandleConfigChangeRecordSkipsNonPartnerEventsWithoutError(t *testing.T) {
-	source, _ := newTestRedisSource(t)
-	store := config.NewStore(config.NewSnapshot(nil))
-	record := recordFor(t, &eventsv1.ConfigChangeEvent{
+func TestDecodeSkipsNonPartnerAndUntypedTombstone(t *testing.T) {
+	nonPartner := configRecord(t, "tariff", &eventsv1.ConfigChangeEvent{
 		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_BILLING_TARIFF,
-		EntityId:   "some-tariff",
+		EntityId:   "tariff",
 	})
-
-	if err := HandleConfigChangeRecord(context.Background(), store, source, record); err != nil {
-		t.Fatalf("unexpected error for non-partner entity_type: %v", err)
+	if got, err := DecodeConfigChangeEvent(nonPartner.Key, nonPartner.Value); err != nil || got != nil {
+		t.Fatalf("non-partner: got=%+v err=%v", got, err)
+	}
+	if got, err := DecodeConfigChangeEvent([]byte("acme"), nil); err != nil || got != nil {
+		t.Fatalf("Kafka tombstone: got=%+v err=%v", got, err)
 	}
 }
 
-func TestHandleConfigChangeRecordSkipsPoisonMessageWithoutError(t *testing.T) {
-	source, _ := newTestRedisSource(t)
-	store := config.NewStore(config.NewSnapshot(nil))
-	record := &kgo.Record{Topic: TopicConfigChanges, Value: []byte("garbage")}
-
-	if err := HandleConfigChangeRecord(context.Background(), store, source, record); err != nil {
-		t.Fatalf("poison message should be skipped (commit), not retried: %v", err)
+func TestDecodeRejectsMalformedIdentityAndPayload(t *testing.T) {
+	mismatchedID := partnerEvent("acme", 1, "active", "active")
+	mismatchedID.PayloadJson = partnerPayload("other", 1, "active")
+	mismatchedVersion := partnerEvent("acme", 2, "active", "active")
+	mismatchedVersion.PayloadJson = partnerPayload("acme", 1, "active")
+	cases := []struct {
+		name  string
+		key   string
+		event *eventsv1.ConfigChangeEvent
+		value []byte
+	}{
+		{name: "missing entity id", key: "", event: partnerEvent("", 1, "active", "active")},
+		{name: "missing version", key: "acme", event: partnerEvent("acme", 0, "active", "active")},
+		{name: "key mismatch", key: "other", event: partnerEvent("acme", 1, "active", "active")},
+		{name: "unsupported lifecycle status", key: "acme", event: partnerEvent("acme", 1, "draft", "active")},
+		{name: "payload id mismatch", key: "acme", event: mismatchedID},
+		{name: "payload version mismatch", key: "acme", event: mismatchedVersion},
+		{name: "garbage", key: "acme", value: []byte("not-protobuf")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			value := tc.value
+			if tc.event != nil {
+				value = configRecord(t, tc.key, tc.event).Value
+			}
+			if _, err := DecodeConfigChangeEvent([]byte(tc.key), value); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
 	}
 }
 
-func TestHandleConfigChangeRecordPropagatesRedisErrorAsRetriable(t *testing.T) {
-	source, rdb := newTestRedisSource(t)
-	ctx := context.Background()
-	// config:current указывает на версию, для которой нет config:version —
-	// это FetchPartner-ошибка, должна дойти до вызывающей стороны как
-	// retriable (не коммитить оффсет).
-	if err := rdb.Set(ctx, "config:current:partner:acme", 9, 0).Err(); err != nil {
-		t.Fatalf("seed: %v", err)
+func TestDecodeAcceptsSuspendedPayloadInsideActiveConfigVersion(t *testing.T) {
+	record := configRecord(t, "acme", partnerEvent("acme", 2, "active", "suspended"))
+	update, err := DecodeConfigChangeEvent(record.Key, record.Value)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
 	}
-	store := config.NewStore(config.NewSnapshot(nil))
-	record := recordFor(t, &eventsv1.ConfigChangeEvent{
-		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER,
-		EntityId:   "acme",
-		Version:    9,
-	})
+	if update.partner.Status != "suspended" || update.eventStatus != "active" {
+		t.Fatalf("update=%+v", update)
+	}
+}
 
-	if err := HandleConfigChangeRecord(ctx, store, source, record); err == nil {
-		t.Fatal("ожидали ошибку — несогласованная проекция должна быть retriable, не тихо проигнорирована")
+func TestApplyUsesDirectPayloadAndVersionFence(t *testing.T) {
+	store := config.NewStore(config.NewSnapshot(nil))
+	active := configRecord(t, "acme", partnerEvent("acme", 2, "active", "active"))
+	if err := applyConfigChangeRecord(store, active); err != nil {
+		t.Fatalf("apply active: %v", err)
+	}
+	partner, _, found := store.FirstApplication("acme")
+	if !found || partner.Version != 2 {
+		t.Fatalf("active partner not applied: found=%v partner=%+v", found, partner)
+	}
+
+	stale := configRecord(t, "acme", partnerEvent("acme", 1, "active", "active"))
+	if err := applyConfigChangeRecord(store, stale); err != nil {
+		t.Fatalf("stale replay: %v", err)
+	}
+	partner, _, _ = store.FirstApplication("acme")
+	if partner.Version != 2 {
+		t.Fatalf("stale replay rolled state back to version %d", partner.Version)
+	}
+}
+
+func TestArchiveSameVersionAndOldReplayCannotRevive(t *testing.T) {
+	initial := config.Partner{
+		PartnerID: "acme", Version: 2, Status: "active",
+		Applications: []config.Application{{ApplicationID: "acme_app"}},
+	}
+	store := config.NewStore(config.NewSnapshot([]config.Partner{initial}))
+	archive := configRecord(t, "acme", partnerEvent("acme", 2, "archived", ""))
+	if err := applyConfigChangeRecord(store, archive); err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+	if _, _, found := store.FirstApplication("acme"); found {
+		t.Fatal("archive did not remove partner")
+	}
+
+	oldActive := configRecord(t, "acme", partnerEvent("acme", 2, "active", "active"))
+	if err := applyConfigChangeRecord(store, oldActive); err != nil {
+		t.Fatalf("old active replay: %v", err)
+	}
+	if _, _, found := store.FirstApplication("acme"); found {
+		t.Fatal("same-version active replay revived archived partner")
+	}
+}
+
+func TestCapturedReplayRangeAndCaughtUp(t *testing.T) {
+	starts := kadm.ListedOffsets{TopicConfigChanges: {
+		0: {Topic: TopicConfigChanges, Partition: 0, Offset: 4},
+		1: {Topic: TopicConfigChanges, Partition: 1, Offset: 8},
+	}}
+	ends := kadm.ListedOffsets{TopicConfigChanges: {
+		0: {Topic: TopicConfigChanges, Partition: 0, Offset: 10},
+		1: {Topic: TopicConfigChanges, Partition: 1, Offset: 8},
+	}}
+	positions, replayEnds, err := capturedReplayRange(starts, ends)
+	if err != nil {
+		t.Fatalf("capturedReplayRange: %v", err)
+	}
+	if caughtUp(replayEnds, positions) {
+		t.Fatal("partition 0 has not reached captured EOF")
+	}
+	positions[0] = 10
+	if !caughtUp(replayEnds, positions) {
+		t.Fatal("all partitions reached captured EOF")
+	}
+}
+
+func TestCapturedReplayRangeRejectsMissingOrBrokenPartition(t *testing.T) {
+	starts := kadm.ListedOffsets{TopicConfigChanges: {0: {Offset: 0}}}
+	ends := kadm.ListedOffsets{TopicConfigChanges: {0: {Offset: 1}, 1: {Offset: 2}}}
+	if _, _, err := capturedReplayRange(starts, ends); err == nil {
+		t.Fatal("missing start partition must fail")
+	}
+	ends = kadm.ListedOffsets{TopicConfigChanges: {0: {Offset: 1, Err: errors.New("offline")}}}
+	if _, _, err := capturedReplayRange(starts, ends); err == nil {
+		t.Fatal("partition error must fail")
 	}
 }

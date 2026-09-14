@@ -19,78 +19,82 @@ func testPartner(id string) Partner {
 
 func TestStoreGetReturnsInitialSnapshot(t *testing.T) {
 	store := NewStore(NewSnapshot([]Partner{testPartner("acme")}))
-	_, _, found := store.Application("acme", "acme_app")
-	if !found {
-		t.Fatal("ожидали найденное приложение из bootstrap-снапшота")
+	if _, _, found := store.Application("acme", "acme_app"); !found {
+		t.Fatal("expected application from bootstrap snapshot")
 	}
 }
 
-func TestStoreUpsertAddsNewPartnerWithoutAffectingOldSnapshot(t *testing.T) {
+func TestApplyPartnerPreservesPublishedSnapshotAndOtherPartners(t *testing.T) {
 	store := NewStore(NewSnapshot([]Partner{testPartner("acme")}))
 	old := store.Get()
 
-	store.Upsert(testPartner("beta"))
-
+	beta := testPartner("beta")
+	if !store.ApplyPartner(1, beta) {
+		t.Fatal("new partner version was not applied")
+	}
 	if _, _, found := old.Application("beta", "beta_app"); found {
-		t.Fatal("старый снапшот, полученный ДО Upsert, не должен видеть новый partner_id — Snapshot обязан быть неизменяемым")
+		t.Fatal("an already published snapshot must remain immutable")
 	}
 	if _, _, found := store.Application("beta", "beta_app"); !found {
-		t.Fatal("Store.Get() после Upsert должен видеть новый partner_id")
+		t.Fatal("live store does not contain the new partner")
 	}
 	if _, _, found := store.Application("acme", "acme_app"); !found {
-		t.Fatal("Upsert нового партнёра не должен терять существующих")
+		t.Fatal("applying another partner lost existing state")
 	}
 }
 
-func TestStoreUpsertReplacesExistingPartnerVersion(t *testing.T) {
+func TestApplyPartnerReplacesOnlyWithNewerVersion(t *testing.T) {
 	store := NewStore(NewSnapshot([]Partner{testPartner("acme")}))
-
 	updated := testPartner("acme")
 	updated.Version = 2
 	updated.Applications[0].NotificationCallbackURL = "https://example.com/acme-v2"
-	store.Upsert(updated)
+	if !store.ApplyPartner(2, updated) {
+		t.Fatal("newer version was not applied")
+	}
 
+	stale := testPartner("acme")
+	stale.Applications[0].NotificationCallbackURL = "https://stale.example.com"
+	if store.ApplyPartner(1, stale) {
+		t.Fatal("stale replay must be ignored")
+	}
 	partner, app, found := store.Application("acme", "acme_app")
-	if !found {
-		t.Fatal("ожидали найденное приложение после Upsert")
-	}
-	if partner.Version != 2 {
-		t.Fatalf("Version = %d, want 2 (Upsert должен заменить, не дублировать)", partner.Version)
-	}
-	if app.NotificationCallbackURL != "https://example.com/acme-v2" {
-		t.Fatalf("NotificationCallbackURL не обновился: %s", app.NotificationCallbackURL)
+	if !found || partner.Version != 2 || app.NotificationCallbackURL != "https://example.com/acme-v2" {
+		t.Fatalf("unexpected current partner: found=%v partner=%+v app=%+v", found, partner, app)
 	}
 }
 
-func TestStoreRemoveDropsPartnerFromLiveMap(t *testing.T) {
-	store := NewStore(NewSnapshot([]Partner{testPartner("acme"), testPartner("beta")}))
-
-	store.Remove("acme")
-
-	if _, _, found := store.Application("acme", "acme_app"); found {
-		t.Fatal("acme должен быть удалён из живого снапшота")
-	}
-	if _, _, found := store.Application("beta", "beta_app"); !found {
-		t.Fatal("Remove одного партнёра не должен затрагивать остальных")
-	}
-}
-
-func TestStoreRemoveUnknownPartnerIsNoop(t *testing.T) {
+func TestApplyArchiveAcceptsSameVersionTerminalTransition(t *testing.T) {
 	store := NewStore(NewSnapshot([]Partner{testPartner("acme")}))
-	store.Remove("unknown") // не должно паниковать/зависать
-	if _, _, found := store.Application("acme", "acme_app"); !found {
-		t.Fatal("Remove неизвестного partner_id не должен трогать существующие записи")
+	if !store.ApplyArchive(1, "acme") {
+		t.Fatal("active(1) -> archived(1) must be accepted")
+	}
+	if _, _, found := store.Application("acme", "acme_app"); found {
+		t.Fatal("archived partner remained in live snapshot")
+	}
+	if store.ApplyArchive(1, "acme") {
+		t.Fatal("duplicate archive must be ignored")
 	}
 }
 
-// TestStoreConcurrentUpsertsDoNotLoseUpdates — Store.Upsert используется
-// из одного consumer-цикла (config.changes партиции обрабатываются
-// последовательно в HandleConfigChangeRecord), но CompareAndSwap-цикл
-// обязан быть корректен и под настоящей конкуренцией — это не гипотетика,
-// это ровно тот примитив (atomic.Pointer + CAS retry), который защищает
-// от гонки читателей (HandleRecord на каждое message.lifecycle) с
-// писателем (config.changes consumer) при активной живой доставке.
-func TestStoreConcurrentUpsertsDoNotLoseUpdates(t *testing.T) {
+func TestArchiveTombstonePreventsReplayRevival(t *testing.T) {
+	store := NewStore(NewSnapshot([]Partner{testPartner("acme")}))
+	if !store.ApplyArchive(2, "acme") {
+		t.Fatal("archive was not applied")
+	}
+	activeV2 := testPartner("acme")
+	activeV2.Version = 2
+	if store.ApplyPartner(2, activeV2) {
+		t.Fatal("same-version active replay revived an archived partner")
+	}
+	if store.ApplyPartner(1, testPartner("acme")) {
+		t.Fatal("older active replay revived an archived partner")
+	}
+	if _, _, found := store.Application("acme", "acme_app"); found {
+		t.Fatal("archive tombstone was lost")
+	}
+}
+
+func TestConcurrentApplyPartnerDoesNotLoseUpdates(t *testing.T) {
 	store := NewStore(NewSnapshot(nil))
 	var wg sync.WaitGroup
 	const n = 100
@@ -98,13 +102,12 @@ func TestStoreConcurrentUpsertsDoNotLoseUpdates(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			store.Upsert(testPartner("partner_" + strconv.Itoa(i)))
+			partner := testPartner("partner_" + strconv.Itoa(i))
+			store.ApplyPartner(1, partner)
 		}(i)
 	}
 	wg.Wait()
-
-	snapshot := store.Get()
-	if snapshot.Len() != n {
-		t.Fatalf("Len() = %d, want %d — конкурентные Upsert потеряли обновления", snapshot.Len(), n)
+	if got := store.Get().Len(); got != n {
+		t.Fatalf("Len() = %d, want %d", got, n)
 	}
 }

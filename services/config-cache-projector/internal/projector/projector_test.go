@@ -53,7 +53,7 @@ func TestWriteProjectionWritesVersionAndCurrentForActive(t *testing.T) {
 	}
 }
 
-func TestWriteProjectionDoesNotUpdateCurrentForArchived(t *testing.T) {
+func TestWriteProjectionSameVersionArchiveDeletesCurrentAndBlocksRevival(t *testing.T) {
 	c := newTestClient(t)
 	ctx := context.Background()
 
@@ -67,27 +67,68 @@ func TestWriteProjectionDoesNotUpdateCurrentForArchived(t *testing.T) {
 
 	archived := &eventsv1.ConfigChangeEvent{
 		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_OPERATOR, EntityId: "beeline_uz",
-		Version: 2, PayloadJson: []byte(`{"v":2}`), Status: "archived",
+		Version: 1, PayloadJson: []byte(`{}`), Status: "archived",
 	}
 	if err := c.WriteProjection(ctx, archived); err != nil {
 		t.Fatalf("WriteProjection (archived) failed: %v", err)
 	}
 
-	current, err := c.CurrentVersion(ctx, "operator", "beeline_uz")
-	if err != nil {
-		t.Fatalf("CurrentVersion failed: %v", err)
+	if _, err := c.CurrentVersion(ctx, "operator", "beeline_uz"); err != redis.Nil {
+		t.Fatalf("same-version archive должен удалить current pointer, err=%v", err)
 	}
-	if current != 1 {
-		t.Fatalf("archived-версия не должна становиться current, ожидали 1, получили %d", current)
+
+	// Duplicate active delivery for the same immutable version cannot revive
+	// the terminal state.
+	if err := c.WriteProjection(ctx, active); err != nil {
+		t.Fatalf("WriteProjection (duplicate active) failed: %v", err)
+	}
+	if _, err := c.CurrentVersion(ctx, "operator", "beeline_uz"); err != redis.Nil {
+		t.Fatalf("same-version active не должен оживлять archive tombstone, err=%v", err)
 	}
 
 	// Но version-запись для архивной версии всё равно должна быть доступна.
-	payload, err := c.VersionPayload(ctx, "operator", "beeline_uz", 2)
+	payload, err := c.VersionPayload(ctx, "operator", "beeline_uz", 1)
 	if err != nil {
-		t.Fatalf("VersionPayload(2) failed: %v", err)
+		t.Fatalf("VersionPayload(1) failed: %v", err)
 	}
-	if string(payload) != `{"v":2}` {
+	if string(payload) != `{}` {
 		t.Fatalf("archived payload не совпадает: %s", payload)
+	}
+
+	newer := &eventsv1.ConfigChangeEvent{
+		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_OPERATOR, EntityId: "beeline_uz",
+		Version: 2, PayloadJson: []byte(`{"v":2}`), Status: "active",
+	}
+	if err := c.WriteProjection(ctx, newer); err != nil {
+		t.Fatalf("WriteProjection (newer active) failed: %v", err)
+	}
+	current, err := c.CurrentVersion(ctx, "operator", "beeline_uz")
+	if err != nil || current != 2 {
+		t.Fatalf("новая версия должна реактивировать entity, current=%d err=%v", current, err)
+	}
+}
+
+func TestWriteProjectionStaleArchiveCannotDeleteNewerCurrent(t *testing.T) {
+	c := newTestClient(t)
+	ctx := context.Background()
+
+	newer := &eventsv1.ConfigChangeEvent{
+		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER, EntityId: "acme",
+		Version: 7, PayloadJson: []byte(`{"partner_id":"acme"}`), Status: "active",
+	}
+	staleArchive := &eventsv1.ConfigChangeEvent{
+		EntityType: commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER, EntityId: "acme",
+		Version: 6, PayloadJson: []byte(`{"partner_id":"acme"}`), Status: "archived",
+	}
+	if err := c.WriteProjection(ctx, newer); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.WriteProjection(ctx, staleArchive); err != nil {
+		t.Fatal(err)
+	}
+	current, err := c.CurrentVersion(ctx, "partner", "acme")
+	if err != nil || current != 7 {
+		t.Fatalf("stale archive не должен удалить current=7, current=%d err=%v", current, err)
 	}
 }
 
@@ -311,15 +352,19 @@ func TestWriteProjectionDoesNotWriteSenderOwnersForNonPartnerEntity(t *testing.T
 
 func TestEntityTypeStringMatchesPostgresConvention(t *testing.T) {
 	cases := map[commonv1.ConfigEntityType]string{
-		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PIPELINE:           "pipeline",
-		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_POLICY_RULESET:     "policy_ruleset",
-		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_POLICY_TEMPLATE:    "policy_template",
-		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_BILLING_TARIFF:     "billing_tariff",
-		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_ROUTING_TABLE:      "routing_table",
-		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_NUMBER_RANGE:       "number_range",
-		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER:            "partner",
-		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_OPERATOR:           "operator",
-		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_SUBSCRIBER_CONSENT: "subscriber_consent",
+		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PIPELINE:            "pipeline",
+		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_POLICY_RULESET:      "policy_ruleset",
+		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_POLICY_TEMPLATE:     "policy_template",
+		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_BILLING_TARIFF:      "billing_tariff",
+		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_ROUTING_TABLE:       "routing_table",
+		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_NUMBER_RANGE:        "number_range",
+		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER:             "partner",
+		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_OPERATOR:            "operator",
+		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_SUBSCRIBER_CONSENT:  "subscriber_consent",
+		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_CATEGORY:            "category",
+		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_CTN:                 "ctn",
+		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PATTERN_PLACEHOLDER: "pattern_placeholder",
+		commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_GUIDE:               "guide",
 	}
 	for proto, want := range cases {
 		if got := entityTypeString(proto); got != want {

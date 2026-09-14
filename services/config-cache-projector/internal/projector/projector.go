@@ -47,6 +47,14 @@ func entityTypeString(e commonv1.ConfigEntityType) string {
 		return "operator"
 	case commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_SUBSCRIBER_CONSENT:
 		return "subscriber_consent"
+	case commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_CATEGORY:
+		return "category"
+	case commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_CTN:
+		return "ctn"
+	case commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PATTERN_PLACEHOLDER:
+		return "pattern_placeholder"
+	case commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_GUIDE:
+		return "guide"
 	default:
 		return "unspecified"
 	}
@@ -76,6 +84,10 @@ func currentKey(entityType, entityID string) string {
 
 func versionKey(entityType, entityID string, version int64) string {
 	return fmt.Sprintf("config:version:%s:%s:%d", entityType, entityID, version)
+}
+
+func stateKey(entityType, entityID string) string {
+	return fmt.Sprintf("config:state:%s:%s", entityType, entityID)
 }
 
 func senderOwnerKey(senderID string) string {
@@ -139,11 +151,73 @@ func parseSenderOwners(payloadJSON []byte, entityID string) map[string]string {
 	return owners
 }
 
+// applyProjectionScript atomically stores immutable history and advances a
+// per-entity lifecycle fence. The fence is required because an archive keeps
+// the same config version number: active(N) -> archived(N). A repeated/late
+// active(N) must not recreate config:current after the terminal transition.
+// Existing installations without config:state are bootstrapped from the old
+// config:current pointer inside the same script.
+var applyProjectionScript = redis.NewScript(`
+local incoming_version = tonumber(ARGV[1])
+local incoming_status = ARGV[2]
+local stored_version = redis.call('HGET', KEYS[3], 'version')
+local stored_status = redis.call('HGET', KEYS[3], 'status')
+local state_was_missing = false
+
+local function write_sender_owners()
+    for index = 4, #KEYS do
+        redis.call('SET', KEYS[index], ARGV[index])
+    end
+end
+
+if not stored_version then
+    state_was_missing = true
+    local current_version = redis.call('GET', KEYS[2])
+    if current_version then
+        stored_version = current_version
+        stored_status = 'active'
+    else
+        stored_version = '0'
+        stored_status = ''
+    end
+end
+
+local last_version = tonumber(stored_version)
+redis.call('SETNX', KEYS[1], ARGV[3])
+
+if incoming_version < last_version then
+    return 0
+end
+
+if incoming_version == last_version then
+    if stored_status == 'archived' then
+        return 0
+    end
+    if incoming_status == 'archived' then
+        redis.call('DEL', KEYS[2])
+        redis.call('HSET', KEYS[3], 'version', ARGV[1], 'status', incoming_status)
+        return 1
+    end
+    if state_was_missing then
+        redis.call('HSET', KEYS[3], 'version', ARGV[1], 'status', incoming_status)
+    end
+    write_sender_owners()
+    return 0
+end
+
+if incoming_status == 'active' then
+    redis.call('SET', KEYS[2], ARGV[1])
+    write_sender_owners()
+else
+    redis.call('DEL', KEYS[2])
+end
+redis.call('HSET', KEYS[3], 'version', ARGV[1], 'status', incoming_status)
+return 1
+`)
+
 // WriteProjection — write_projection: всегда пишет config:version:... (для
-// истории/бутстрапа явно запрошенной версии), и обновляет config:current
-// только для status="active" — архивная версия не должна становиться
-// текущей для bootstrap hot-path сервисов (data_infrastructure_spec.md
-// §2.2: "Только bootstrap/cache-miss").
+// истории/бутстрапа явно запрошенной версии), а config:current и
+// config:state обновляет атомарно за monotonic lifecycle fence.
 //
 // CODE_REVIEW.md finding #2: entityTypeString возвращает "unspecified" по
 // умолчанию для незнакомых значений — раньше это тихо принималось и
@@ -168,6 +242,13 @@ func (c *Client) WriteProjection(ctx context.Context, event *eventsv1.ConfigChan
 	}
 	entityID := event.GetEntityId()
 	version := event.GetVersion()
+	status := event.GetStatus()
+	if version <= 0 {
+		return fmt.Errorf("write_projection: version должна быть > 0 для entity_type=%s entity_id=%q", entityType, entityID)
+	}
+	if status != "active" && status != "archived" {
+		return fmt.Errorf("write_projection: неизвестный status=%q для entity_type=%s entity_id=%q", status, entityType, entityID)
+	}
 
 	// Ф2 плана (luminous-hugging-charm.md, "Реестр отправителей"): для
 	// entity_type=partner + status=active (то же гейтирование, что и у
@@ -181,18 +262,25 @@ func (c *Client) WriteProjection(ctx context.Context, event *eventsv1.ConfigChan
 		senderOwners = parseSenderOwners(event.GetPayloadJson(), entityID)
 	}
 
-	_, err := c.rdb.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-		pipe.Set(ctx, versionKey(entityType, entityID, version), event.GetPayloadJson(), 0)
-		if event.GetStatus() == "active" {
-			pipe.Set(ctx, currentKey(entityType, entityID), version, 0)
-		}
-		for senderID, partnerID := range senderOwners {
-			pipe.Set(ctx, senderOwnerKey(senderID), partnerID, 0)
-		}
-		return nil
-	})
+	scriptKeys := []string{
+		versionKey(entityType, entityID, version),
+		currentKey(entityType, entityID),
+		stateKey(entityType, entityID),
+	}
+	scriptArgs := []interface{}{version, status, event.GetPayloadJson()}
+	for senderID, partnerID := range senderOwners {
+		scriptKeys = append(scriptKeys, senderOwnerKey(senderID))
+		scriptArgs = append(scriptArgs, partnerID)
+	}
+
+	_, err := applyProjectionScript.Run(
+		ctx,
+		c.rdb,
+		scriptKeys,
+		scriptArgs...,
+	).Result()
 	if err != nil {
-		return fmt.Errorf("write_projection tx pipeline (entity_type=%s entity_id=%s version=%d): %w", entityType, entityID, version, err)
+		return fmt.Errorf("write_projection script (entity_type=%s entity_id=%s version=%d): %w", entityType, entityID, version, err)
 	}
 	return nil
 }

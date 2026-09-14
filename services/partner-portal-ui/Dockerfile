@@ -20,3 +20,12 @@ FROM nginx:1.27-alpine
 COPY --from=builder /build/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 8080
+# Non-root — see services/backoffice-ui/Dockerfile for the full rationale
+# (verified live: nginx:alpine's /var/cache/nginx and /run/nginx.pid are not
+# writable by its own non-root "nginx" user, fixed by repointing pid at /tmp
+# and chown'ing the cache dir).
+RUN addgroup -g 10001 -S mpp \
+    && adduser -u 10001 -S -D -H -G mpp mpp \
+    && sed -i 's#/run/nginx.pid#/tmp/nginx.pid#' /etc/nginx/nginx.conf \
+    && chown -R mpp:mpp /var/cache/nginx
+USER 10001:10001

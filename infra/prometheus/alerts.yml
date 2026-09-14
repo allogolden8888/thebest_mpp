@@ -1,0 +1,104 @@
+# BACKOFFICE_ROADMAP.md P1 "Observability" — первый набор alert-правил для
+# этой платформы (ни здесь, ни в infra/terraform/observability.tf их не
+# было: тот файл явно откладывал alerting rules/дашборды до после
+# нагрузочного тестирования, см. его package doc). Нагрузочное тестирование
+# с тех пор проведено многократно (LATENCY_INVESTIGATION*.md), так что
+# ниже — небольшой, специально заземлённый набор, а не готовые SLO:
+# конкретные пороги (10%/5%/50%) не откалиброваны по реальному инциденту
+# или perf-прогону, это разумные дефолты, которые стоит пересмотреть по
+# факту первого реального срабатывания/false positive.
+#
+# Осознанно НЕ включено: consumer lag / stuck consumer group. Ни один
+# сервис в этой сессии не экспортирует lag ни через JMX (Kafka JMX_PORT
+# открыт внутри docker_default, но никакой kafka-lag-exporter/JMX exporter
+# здесь не поднят), ни через собственные метрики — добавлять alert на
+# метрику, которой не существует, было бы ровно той спекулятивной
+# тревогой, которую эта задача просит не делать. Понадобится отдельный
+# kafka-lag-exporter (или JMX exporter sidecar на самой Kafka) прежде чем
+# эта строка сможет появиться здесь как что-то большее, чем комментарий.
+groups:
+  - name: mpp-platform-availability
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }}/{{ $labels.instance }} недоступен"
+          description: "Prometheus не смог заскрейпить {{ $labels.instance }} (job={{ $labels.job }}) последние 2 минуты подряд — см. infra/prometheus/prometheus.yml за списком целей."
+
+  - name: mpp-hot-path-error-rates
+    rules:
+      # operator-http-gateway — handle_dlr_webhook (см.
+      # internal/metrics/metrics.go). "other" покрывает необработанные
+      # коды (500-класс от паники — сам handler их не производит нормально,
+      # но статус-код "other" реалистичнее, чем предполагать конкретный код).
+      - alert: OperatorHttpGatewayWebhookErrorRateHigh
+        expr: >
+          sum(rate(operator_http_gateway_webhook_requests_total{status=~"401|other"}[5m]))
+          /
+          sum(rate(operator_http_gateway_webhook_requests_total[5m]))
+          > 0.10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "operator-http-gateway: высокая доля 401/other на /webhook/dlr"
+          description: ">10% ответов /webhook/dlr/{operator_id} за 5 минут — 401 (см. internal/webhookauth per-operator credential resolution) или необработанный код. Проверить ротацию webhook-токенов в Vault и здоровье конкретного оператора."
+
+      # partner-rest-receiver — POST /v1/messages (см. metrics.rs).
+      - alert: PartnerRestReceiverIngestErrorRateHigh
+        expr: >
+          sum(rate(partner_rest_receiver_ingest_requests_total{status=~"5.."}[5m]))
+          /
+          sum(rate(partner_rest_receiver_ingest_requests_total[5m]))
+          > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "partner-rest-receiver: высокая доля 5xx на POST /v1/messages"
+          description: ">5% ответов на приём сообщений за 5 минут — 5xx (PUBLISH_FAILED/PUBLISH_TIMEOUT/TOO_MANY_CONCURRENT_REQUESTS, см. http.rs::handle_send_message) обычно означает деградацию Kafka producer-пути."
+
+      # partner-smpp-gateway — handleSubmitSm (см. metrics/SmppMetrics.java).
+      - alert: PartnerSmppGatewaySubmitFailureRateHigh
+        expr: >
+          sum(rate(partner_smpp_gateway_submit_sm_total{outcome="publish_failed"}[5m]))
+          /
+          sum(rate(partner_smpp_gateway_submit_sm_total[5m]))
+          > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "partner-smpp-gateway: высокая доля publish_failed на submit_sm"
+          description: ">5% submit_sm PDU за 5 минут получают ESME_RSYSERR (Kafka publish не подтвердился, см. SmppServerHandler::handleSubmitSm) — реальные, отправленные партнёром сообщения теряются, не только throttled."
+
+      # partner-notification-service — HandleRecord (processing) и
+      # attemptDelivery (доставка партнёру), см. metrics/metrics.go.
+      - alert: PartnerNotificationServiceProcessingErrorRateHigh
+        expr: >
+          sum(rate(partner_notification_records_processed_total{result="error"}[5m]))
+          /
+          sum(rate(partner_notification_records_processed_total[5m]))
+          > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "partner-notification-service: высокая доля ошибок обработки Kafka-записей"
+          description: ">5% вызовов HandleRecord за 5 минут возвращают инфраструктурную ошибку (офсет не коммитится, at-least-once redelivery) — обычно означает деградацию Redis (msgctx/pending/registry) или Kafka producer-пути (PublishRetryTask/PublishArchived)."
+
+      - alert: PartnerNotificationServiceDeliveryFailureRateHigh
+        expr: >
+          sum(rate(partner_notification_delivery_attempts_total{outcome="failed"}[5m]))
+          /
+          sum(rate(partner_notification_delivery_attempts_total[5m]))
+          > 0.50
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "partner-notification-service: высокая доля неудачных доставок партнёру"
+          description: ">50% попыток доставки уведомления партнёру (SMPP DeliverSm / REST callback) за 10 минут заканчиваются неудачей — либо партнёрский endpoint недоступен, либо нет активной SMPP-сессии (см. attemptDelivery в kafkaio.go). Не обязательно баг платформы, но требует внимания при устойчивом уровне."

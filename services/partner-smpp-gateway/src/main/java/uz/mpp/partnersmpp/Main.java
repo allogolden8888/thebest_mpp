@@ -168,8 +168,9 @@ public final class Main {
                         event.getStatus(),
                         event.getPayloadJson().toByteArray()
                     );
-                    if (changed && !"active".equals(event.getStatus())) {
-                        forceDisconnectPartner(channelRegistryForConfigChanges, event.getEntityId(), event.getStatus());
+                    String effectivePartnerStatus = partnerConfigStore.partnerStatus(event.getEntityId());
+                    if (changed && !"active".equals(effectivePartnerStatus)) {
+                        forceDisconnectPartner(channelRegistryForConfigChanges, event.getEntityId(), effectivePartnerStatus);
                     }
                 }
             );

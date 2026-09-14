@@ -1,9 +1,11 @@
 package uz.mpp.partnersmpp.health;
 
 import com.sun.net.httpserver.HttpServer;
+import uz.mpp.partnersmpp.metrics.SmppMetrics;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -68,9 +70,11 @@ public final class HealthServer {
             exchange.close();
         });
 
+        // BACKOFFICE_ROADMAP.md P1 "Observability": реальные счётчик/
+        // гистограмма handleSubmitSm (см. SmppMetrics/SmppServerHandler),
+        // не только liveness-заглушка.
         server.createContext("/metrics", exchange -> {
-            byte[] body = ("# HELP partner_smpp_gateway_up Service liveness placeholder\n"
-                + "# TYPE partner_smpp_gateway_up gauge\npartner_smpp_gateway_up 1\n").getBytes();
+            byte[] body = SmppMetrics.scrape().getBytes(StandardCharsets.UTF_8);
             exchange.sendResponseHeaders(200, body.length);
             exchange.getResponseBody().write(body);
             exchange.close();

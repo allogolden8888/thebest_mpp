@@ -18,7 +18,8 @@ RUN --mount=type=secret,id=extra_ca_cert,required=false \
 COPY . .
 RUN CGO_ENABLED=0 go build -o /build/bin/backoffice-api ./cmd/backoffice-api
 
-FROM gcr.io/distroless/static-debian12
+FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /build/bin/backoffice-api /app/backoffice-api
 EXPOSE 9090 8080
+USER nonroot:nonroot
 ENTRYPOINT ["/app/backoffice-api"]

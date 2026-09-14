@@ -19,6 +19,16 @@ from external_hosts import load_external_hosts
 from generate_manifests import HEALTH_PORT, NAMESPACE, SECRET_DEPENDENCIES, SERVICES
 
 KAFKA_PORT = 9092
+# BACKOFFICE_ROADMAP.md P1 — SASL_SCRAM+TLS листенер, добавлен АДДИТИВНО в
+# generate_kafka_topics.py::build_kafka_cluster_crd рядом с KAFKA_PORT выше,
+# не вместо него. NetworkPolicy работает на L3/L4 и не знает про
+# Kafka-листенеры/аутентификацию — сегодня только 3 сервиса
+# (k8s/generate_manifests.py KAFKA_SASL_DEMO_SERVICES) реально используют
+# этот порт, но открывать его тем же общим правилом всем KAFKA_CLIENTS
+# безопаснее, чем заводить второе per-service правило только на 3 сервиса —
+# сам Kafka broker (SASL_SCRAM ACL) остаётся единственной реальной границей
+# авторизации на этом порту.
+KAFKA_SASL_PORT = 9094
 DNS_PORT = 53
 VAULT_PORT = 8200
 MONITORING_NAMESPACE = "monitoring"
@@ -271,7 +281,10 @@ def build_common_kafka_egress() -> dict:
             "policyTypes": ["Egress"],
             "egress": [{
                 "to": [{"podSelector": {"matchLabels": KAFKA_BROKER_LABELS}}],
-                "ports": [{"protocol": "TCP", "port": KAFKA_PORT}],
+                "ports": [
+                    {"protocol": "TCP", "port": KAFKA_PORT},
+                    {"protocol": "TCP", "port": KAFKA_SASL_PORT},
+                ],
             }],
         },
     }

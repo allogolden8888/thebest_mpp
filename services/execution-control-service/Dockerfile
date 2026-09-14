@@ -21,7 +21,8 @@ RUN --mount=type=secret,id=extra_ca_cert,required=false \
 COPY . .
 RUN CGO_ENABLED=0 go build -o /build/bin/execution-control-service ./cmd/execution-control-service
 
-FROM gcr.io/distroless/static-debian12
+FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /build/bin/execution-control-service /app/execution-control-service
 EXPOSE 9090 9000
+USER nonroot:nonroot
 ENTRYPOINT ["/app/execution-control-service"]

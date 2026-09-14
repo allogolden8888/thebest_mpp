@@ -25,7 +25,7 @@ func NewStore(initial Snapshot) *Store {
 }
 
 // Get — a consistent, immutable point-in-time view. Safe to call
-// concurrently with Upsert/Remove from any number of goroutines.
+// concurrently with ApplyPartner/ApplyArchive from any number of goroutines.
 func (s *Store) Get() Snapshot {
 	return *s.ptr.Load()
 }
@@ -41,33 +41,32 @@ func (s *Store) FirstApplication(partnerID string) (Partner, Application, bool) 
 	return s.Get().FirstApplication(partnerID)
 }
 
-// Upsert — atomically publishes partner p as the new live version (add or
-// replace). Retries the compare-and-swap on concurrent writers (config.changes
-// consumer is effectively single-threaded per partition in practice, but
-// this makes Store correct regardless of caller concurrency).
-func (s *Store) Upsert(p Partner) {
+// ApplyPartner atomically publishes a newer active/suspended partner version.
+// Returns false for a stale/duplicate replay.
+func (s *Store) ApplyPartner(version int64, p Partner) bool {
 	for {
 		old := s.ptr.Load()
-		next := old.withPartner(p)
+		if version <= old.versions[p.PartnerID] {
+			return false
+		}
+		next := old.withPartner(version, p)
 		if s.ptr.CompareAndSwap(old, &next) {
-			return
+			return true
 		}
 	}
 }
 
-// Remove — atomically drops partner_id from the live snapshot. Used both
-// for genuine removal (config:current missing in Configuration Redis) and
-// for archival (Partner.IsArchived(), see partner.go) — either way the
-// partner must stop resolving to a delivery channel without a restart.
-func (s *Store) Remove(partnerID string) {
+// ApplyArchive drops the partner but retains its version as a tombstone.
+func (s *Store) ApplyArchive(version int64, partnerID string) bool {
 	for {
 		old := s.ptr.Load()
-		if _, ok := old.partners[partnerID]; !ok {
-			return // already absent — nothing to publish
+		installedVersion := old.versions[partnerID]
+		if version < installedVersion || (version == installedVersion && old.archived[partnerID]) {
+			return false
 		}
-		next := old.withoutPartner(partnerID)
+		next := old.withoutPartner(version, partnerID)
 		if s.ptr.CompareAndSwap(old, &next) {
-			return
+			return true
 		}
 	}
 }

@@ -73,25 +73,28 @@ def test_partner_rest_receiver_gets_partner_credentials_secret():
     assert "partner-credentials" in secret_refs
 
 
-def test_partner_notification_service_also_mounts_config_but_not_credentials():
-    # partner-notification-service читает тот же файл для callback-роутинга,
-    # но не верифицирует входящий partner auth — PARTNER_CRED_* ему не нужен.
+def test_partner_notification_service_uses_live_config_not_static_fixture():
+    # Production notification pods bootstrap from Configuration Redis and
+    # replay config.changes. Static-file mode is local-only and explicit.
     docs = _load_docs("partner-notification-service.yaml")
     deployment = next(d for d in docs if d["kind"] == "Deployment")
-    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    pod_spec = deployment["spec"]["template"]["spec"]
+    container = pod_spec["containers"][0]
     env = {e["name"]: e["value"] for e in container.get("env", [])}
-    assert env.get("PARTNER_CONFIG_PATH") == f"{PARTNER_CONFIG_MOUNT_DIR}/{PARTNER_CONFIG_FIXTURE}"
+    assert "PARTNER_CONFIG_PATH" not in env
+    assert "partner-config" not in {v["name"] for v in pod_spec.get("volumes", [])}
+    assert "partner-config" not in {m["name"] for m in container.get("volumeMounts", [])}
     secret_refs = {ef["secretRef"]["name"] for ef in container.get("envFrom", [])}
+    assert "redis-configuration-credentials" in secret_refs
     assert "partner-credentials" not in secret_refs
 
 
 def test_every_partner_config_consumer_mounts_the_same_config():
-    # Эти четыре сервиса вызывают загрузчик PARTNER_CONFIG_PATH при старте или
+    # Эти три сервиса вызывают загрузчик PARTNER_CONFIG_PATH при старте или
     # используют его для runtime routing/auth. Пропуск любого из них означает
     # либо crash-loop (billing), либо пустой/неработающий runtime-контур.
     assert set(PARTNER_CONFIG_SERVICES) == {
         "billing-service",
-        "partner-notification-service",
         "partner-rest-receiver",
         "partner-smpp-gateway",
     }

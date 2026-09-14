@@ -9,11 +9,15 @@ import re
 from pathlib import Path
 
 from generate_manifests import (
+    DISTROLESS_NONROOT_UID,
     KAFKA_BOOTSTRAP_SERVERS,
     KEDA_KAFKA_TRIGGERS,
     KAFKA_NON_CONSUMER_CLIENTS,
+    NONROOT_UID,
     PROMETHEUS_URL,
     SERVICES,
+    _pod_security_uid_gid,
+    _writable_paths,
     build_workload,
     node_pool_for,
     render_service,
@@ -173,7 +177,10 @@ def test_runtime_infrastructure_addresses_match_installed_resources():
     assert PROMETHEUS_URL == "http://prometheus-operated.monitoring.svc:9090"
 
     for svc in SERVICES:
-        env = {item["name"]: item["value"] for item in _container(svc).get("env", [])}
+        # KAFKA_SASL_PASSWORD (KAFKA_SASL_DEMO_SERVICES pilot, BACKOFFICE_ROADMAP.md
+        # P1) is the one env entry that is a secretKeyRef, not a plain "value" —
+        # skip those here, checked separately below.
+        env = {item["name"]: item["value"] for item in _container(svc).get("env", []) if "value" in item}
         if svc.kafka_consumer or svc.name in KAFKA_NON_CONSUMER_CLIENTS:
             assert env.get("KAFKA_BOOTSTRAP_SERVERS") == KAFKA_BOOTSTRAP_SERVERS, svc.name
         if svc.name == "execution-control-service":
@@ -218,6 +225,88 @@ def test_container_port_names_and_numbers_are_unique():
         numbers = [port["containerPort"] for port in ports]
         assert len(names) == len(set(names)), f"{svc.name}: duplicate container port name"
         assert len(numbers) == len(set(numbers)), f"{svc.name}: duplicate container port number"
+
+
+# BACKOFFICE_ROADMAP.md P1 "Security": "ни один Dockerfile не задаёт USER,
+# нет pod security context". Every Dockerfile now runs its final stage as a
+# verified non-root uid (`grep -L "^USER " services/*/Dockerfile` — 0 hits);
+# these tests catch the generator regressing back to an implicit-root pod,
+# independent of whatever the Dockerfiles say (a test that only re-read
+# Dockerfiles would not catch the generator dropping the field).
+def test_every_pod_runs_as_the_verified_non_root_uid_from_its_dockerfile():
+    for svc in SERVICES:
+        pod_spec = _pod_spec(svc)
+        pod_sc = pod_spec["securityContext"]
+        expected_uid = _pod_security_uid_gid(svc)
+        # frontend (nginx:alpine) and non-Go (eclipse-temurin/debian:bookworm-slim)
+        # families all explicitly groupadd/useradd (or Alpine's addgroup/adduser)
+        # the same 10001:10001 in their Dockerfile; only distroless Go images use
+        # the baked-in 65532 nonroot convention instead.
+        assert expected_uid in (DISTROLESS_NONROOT_UID, NONROOT_UID), svc.name
+        assert pod_sc == {
+            "runAsNonRoot": True,
+            "runAsUser": expected_uid,
+            "runAsGroup": expected_uid,
+            "fsGroup": expected_uid,
+            "seccompProfile": {"type": "RuntimeDefault"},
+        }, f"{svc.name}: unexpected pod securityContext {pod_sc}"
+
+        container_sc = _container(svc)["securityContext"]
+        assert container_sc == {
+            "allowPrivilegeEscalation": False,
+            "readOnlyRootFilesystem": True,
+            "capabilities": {"drop": ["ALL"]},
+        }, f"{svc.name}: unexpected container securityContext {container_sc}"
+
+
+def test_frontend_gets_the_shared_nonroot_uid_not_distroless():
+    # backoffice-ui/partner-portal-ui carry lang="go" purely to select the
+    # go-pool (node_pool_for) — their actual final-stage image is
+    # nginx:1.27-alpine, not a Go distroless binary. A generator that
+    # naively branched on svc.lang instead of workload_class would give them
+    # uid 65532, which the Dockerfile's own `useradd -u 10001` does not
+    # produce — this catches exactly that class of drift.
+    frontends = [svc for svc in SERVICES if svc.workload_class == "frontend"]
+    assert frontends, "expected at least one frontend service in the catalog"
+    for svc in frontends:
+        assert svc.lang == "go", svc.name  # sanity: still true today, see docstring above
+        assert _pod_security_uid_gid(svc) == NONROOT_UID, svc.name
+
+
+def test_writable_paths_are_backed_by_dedicated_read_write_empty_dirs():
+    # readOnlyRootFilesystem: true (see test above) means every path a
+    # service actually writes to (see _writable_paths' docstring for the
+    # live-verified finding behind each one — JVM Attach API .java_pid
+    # socket/JFR under /tmp, nginx's own /var/cache/nginx + pid file) must
+    # have its own emptyDir volume mounted read-write, and nothing else
+    # should silently gain a writable mount.
+    for svc in SERVICES:
+        pod_spec = _pod_spec(svc)
+        container = _container(svc)
+        volumes_by_name = {v["name"]: v for v in pod_spec.get("volumes", [])}
+        mounts_by_name = {m["name"]: m for m in container.get("volumeMounts", [])}
+
+        expected_paths = _writable_paths(svc)
+        writable_mount_names = {name for name in mounts_by_name if name.startswith("writable-")}
+        assert len(writable_mount_names) == len(expected_paths), svc.name
+
+        for i, path in enumerate(expected_paths):
+            name = f"writable-{i}"
+            mount = mounts_by_name[name]
+            assert mount["mountPath"] == path, f"{svc.name}: {name} mountPath"
+            assert not mount.get("readOnly"), f"{svc.name}: {name} must be read-write"
+            volume = volumes_by_name[name]
+            assert "emptyDir" in volume, f"{svc.name}: {name} must be an emptyDir, got {volume}"
+
+        if not expected_paths:
+            # Go (distroless) and Rust (debian:bookworm-slim) services: verified
+            # no on-disk writes (grep across every service's source, see
+            # _writable_paths docstring) — readOnlyRootFilesystem: true holds
+            # with zero extra volumes, not papered over with a wildcard mount.
+            assert svc.lang in ("go", "rust"), (
+                f"{svc.name}: lang={svc.lang} has no writable path but isn't go/rust — "
+                "was a real write requirement missed?"
+            )
 
 
 if __name__ == "__main__":

@@ -13,7 +13,8 @@ RUN --mount=type=secret,id=extra_ca_cert,required=false \
 COPY . .
 RUN CGO_ENABLED=0 go build -o /build/bin/compliance-api ./cmd/compliance-api
 
-FROM gcr.io/distroless/static-debian12
+FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /build/bin/compliance-api /app/compliance-api
 EXPOSE 9090
+USER nonroot:nonroot
 ENTRYPOINT ["/app/compliance-api"]

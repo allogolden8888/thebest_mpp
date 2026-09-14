@@ -18,10 +18,9 @@ import (
 //	config:current:partner:{partner_id}            STRING  active version number
 //	config:version:partner:{partner_id}:{version}  STRING  partner.schema.json payload
 //
-// This is the platform's live source of truth for partner config
-// (BACKOFFICE_ROADMAP.md P0 #4) — reading it directly (bootstrap SCAN +
-// per-event GET on config.changes) replaces the old load-once-from-file
-// design without needing a new write path or a new schema.
+// This is the bootstrap source for partner config. Live changes are applied
+// from the immutable config.changes payload itself: the projector is an
+// independent consumer and must not be raced by a per-event Redis re-read.
 type RedisSource struct {
 	client *redis.Client
 }
@@ -57,15 +56,7 @@ func versionKey(partnerID string, version int64) string {
 	return fmt.Sprintf("config:version:%s:%s:%d", entityTypePartner, partnerID, version)
 }
 
-// FetchPartner — re-fetch a single partner_id's current version from
-// Configuration Redis. Used both by LoadAll (bootstrap) and by
-// internal/kafkaio.HandleConfigChangeRecord (live refresh on
-// config.changes, entity_type=PARTNER): we deliberately re-read from
-// Redis rather than trusting the Kafka event's own payload_json, because
-// Redis (via config-cache-projector's active-only gating on config:current)
-// is what actually decides which version is "current" — an event alone
-// doesn't tell us that an older, already-superseded active version isn't
-// still what config:current points to under reordering/replay.
+// FetchPartner reads one exact current version for LoadAll bootstrap.
 //
 // found=false means partner_id has no config:current:partner:* entry at
 // all (never projected, or config-cache-projector hasn't caught up yet) —
@@ -92,6 +83,15 @@ func (s *RedisSource) FetchPartner(ctx context.Context, partnerID string) (Partn
 	if err := json.Unmarshal(payload, &partner); err != nil {
 		return Partner{}, false, fmt.Errorf("partner.schema.json unmarshal (partner_id=%s version=%d): %w", partnerID, version, err)
 	}
+	if partner.PartnerID != partnerID {
+		return Partner{}, false, fmt.Errorf("partner payload partner_id=%q не совпадает с Redis key partner_id=%q", partner.PartnerID, partnerID)
+	}
+	if int64(partner.Version) != version {
+		return Partner{}, false, fmt.Errorf("partner payload version=%d не совпадает с Redis current version=%d для partner_id=%s", partner.Version, version, partnerID)
+	}
+	if partner.Status != "active" && partner.Status != "suspended" && partner.Status != "archived" {
+		return Partner{}, false, fmt.Errorf("config:current указывает на partner_id=%s с неизвестным payload status=%q", partnerID, partner.Status)
+	}
 	return partner, true, nil
 }
 
@@ -104,7 +104,7 @@ func (s *RedisSource) FetchPartner(ctx context.Context, partnerID string) (Partn
 //
 // Archived partners are intentionally excluded from the bootstrap
 // snapshot for the same reason config.changes-driven updates remove them
-// live (see Partner.IsArchived / internal/kafkaio.HandleConfigChangeRecord) —
+// live (see Partner.IsArchived / internal/kafkaio/configchanges.go) —
 // an archived partner should not resolve to a delivery channel, whether
 // that's discovered at startup or via a later event.
 func (s *RedisSource) LoadAll(ctx context.Context) (Snapshot, error) {

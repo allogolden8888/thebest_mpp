@@ -107,6 +107,7 @@ jobs:
         run: |
           cd infra/kafka
           python3 generate_kafka_topics.py --profile production
+          python3 generate_kafka_users.py
       - name: kubeconform (strict Kubernetes 1.34 + published CRD schemas; no skipped resources)
         run: |
           kubeconform -strict -summary -kubernetes-version 1.34.0 \
@@ -137,10 +138,11 @@ jobs:
         run: |
           curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz | tar xz
           sudo mv kubeconform /usr/local/bin/
-      - name: Generate Strimzi CRDs
+      - name: Generate Strimzi CRDs (Kafka cluster + KafkaTopic + KafkaUser/ACL)
         run: |
           cd infra/kafka
           python3 generate_kafka_topics.py
+          python3 generate_kafka_users.py
       - name: kubeconform (strict Strimzi CRD schema)
         run: |
           cd infra/kafka
@@ -148,6 +150,12 @@ jobs:
             -schema-location default \
             -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
             rendered/*.yaml
+      - name: Install pytest
+        run: pip install pytest pyyaml
+      - name: Kafka SASL/ACL regression tests (dual-listener + KafkaUser mapping)
+        run: |
+          cd infra/kafka
+          python3 -m pytest -q test_kafka_sasl_and_acl.py
 
   destination-resolution-service:
     name: Destination Resolution Service (cargo build + test, real platform-contracts)

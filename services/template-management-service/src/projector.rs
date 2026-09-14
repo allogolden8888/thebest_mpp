@@ -27,11 +27,67 @@ use serde::Deserialize;
 
 pub const CONFIG_CHANGES_TOPIC: &str = "config.changes";
 
+/// BACKOFFICE_ROADMAP.md P1 "Kafka — plaintext listener без SASL/ACL, хотя
+/// HLD требует ACL": этот сервис — один из трёх пилотных клиентов нового
+/// SASL_SCRAM+TLS листенера (порт 9094,
+/// infra/kafka/generate_kafka_topics.py::build_kafka_cluster_crd), по
+/// одному на язык (Go/Rust/Java) —
+/// k8s/generate_manifests.py::KAFKA_SASL_DEMO_SERVICES. Заполняется ТОЛЬКО
+/// когда ВСЕ четыре переменные заданы (реальный под этого сервиса, если он
+/// не входит в KAFKA_SASL_DEMO_SERVICES, не задаёт ни одну из них) — при их
+/// отсутствии сервис продолжает byte-for-byte работать через старый
+/// plaintext-листенер (9092), как и остальные ~37 сервисов платформы.
+#[derive(Debug, Clone, PartialEq)]
+struct KafkaSaslConfig {
+    bootstrap_servers: String,
+    username: String,
+    password: String,
+    mechanism: String,
+    ca_path: String,
+}
+
+fn sasl_config_from_env() -> Option<KafkaSaslConfig> {
+    let bootstrap_servers = std::env::var("KAFKA_SASL_BOOTSTRAP_SERVERS").ok()?;
+    let username = std::env::var("KAFKA_SASL_USERNAME").ok()?;
+    let password = std::env::var("KAFKA_SASL_PASSWORD").ok()?;
+    let ca_path = std::env::var("KAFKA_TLS_CA_PATH").ok()?;
+    let mechanism = std::env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "SCRAM-SHA-512".to_string());
+    Some(KafkaSaslConfig { bootstrap_servers, username, password, mechanism, ca_path })
+}
+
+/// Вынесено отдельно от `build_consumer`, чтобы конструирование конфига
+/// покрывалось unit-тестом без живого брокера (`ClientConfig::create` в
+/// тестовом окружении CI не может подключиться ни к какому Kafka).
+/// `ssl.ca.location` принимает путь к PEM-файлу напрямую — librdkafka сам
+/// читает и парсит сертификат при первом подключении, разбор PEM в Rust-коде
+/// здесь не нужен (в отличие от Go/franz-go, где `crypto/tls` требует
+/// собранный в памяти `x509.CertPool`).
+fn build_client_config(bootstrap_servers: &str, group_id: &str) -> ClientConfig {
+    let mut config = ClientConfig::new();
+    match sasl_config_from_env() {
+        Some(sasl) => {
+            config
+                .set("bootstrap.servers", sasl.bootstrap_servers.as_str())
+                .set("group.id", group_id)
+                .set("enable.auto.commit", "false")
+                .set("security.protocol", "SASL_SSL")
+                .set("sasl.mechanisms", sasl.mechanism.as_str())
+                .set("sasl.username", sasl.username.as_str())
+                .set("sasl.password", sasl.password.as_str())
+                .set("ssl.ca.location", sasl.ca_path.as_str());
+        }
+        None => {
+            config
+                .set("bootstrap.servers", bootstrap_servers)
+                .set("group.id", group_id)
+                .set("enable.auto.commit", "false");
+        }
+    }
+    config
+}
+
 pub fn build_consumer(bootstrap_servers: &str, group_id: &str) -> StreamConsumer {
-    ClientConfig::new()
-        .set("bootstrap.servers", bootstrap_servers)
-        .set("group.id", group_id)
-        .set("enable.auto.commit", "false")
+    build_client_config(bootstrap_servers, group_id)
         .create()
         .expect("не удалось создать Kafka consumer для config.changes")
 }
@@ -146,6 +202,90 @@ pub async fn run_loop(consumer: StreamConsumer, store: Store) {
             }
             Err(e) => tracing::error!("config.changes: consumer.recv() ошибка: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod sasl_config_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // env::set_var — глобальное состояние процесса; тот же mutex-паттерн,
+    // что redis_url.rs (partner-rest-receiver/pipeline-engine) использует
+    // по той же причине — тесты этого модуля не должны выполняться
+    // параллельно друг с другом.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const KEYS: [&str; 5] = [
+        "KAFKA_SASL_BOOTSTRAP_SERVERS",
+        "KAFKA_SASL_USERNAME",
+        "KAFKA_SASL_PASSWORD",
+        "KAFKA_SASL_MECHANISM",
+        "KAFKA_TLS_CA_PATH",
+    ];
+
+    fn clear_env() {
+        for key in KEYS {
+            unsafe { std::env::remove_var(key) };
+        }
+    }
+
+    #[test]
+    fn falls_back_to_plaintext_bootstrap_when_no_sasl_env_is_set() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+
+        let config = build_client_config("plaintext-broker:9092", "template-management-service");
+
+        clear_env();
+        assert_eq!(config.get("bootstrap.servers"), Some("plaintext-broker:9092"));
+        assert_eq!(config.get("group.id"), Some("template-management-service"));
+        assert_eq!(config.get("security.protocol"), None, "не должно переключаться на SASL_SSL без явных env");
+        assert_eq!(config.get("sasl.username"), None);
+    }
+
+    #[test]
+    fn switches_to_sasl_ssl_only_when_every_required_var_is_present() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        unsafe {
+            std::env::set_var("KAFKA_SASL_BOOTSTRAP_SERVERS", "sasl-broker:9094");
+            std::env::set_var("KAFKA_SASL_USERNAME", "template-management-service-kafka-user");
+            std::env::set_var("KAFKA_SASL_PASSWORD", "s3cr3t");
+            std::env::set_var("KAFKA_TLS_CA_PATH", "/etc/mpp/kafka-tls/ca.crt");
+            // KAFKA_SASL_MECHANISM intentionally left unset — must default to SCRAM-SHA-512.
+        }
+
+        let config = build_client_config("plaintext-broker:9092", "template-management-service");
+
+        clear_env();
+        assert_eq!(config.get("bootstrap.servers"), Some("sasl-broker:9094"), "SASL bootstrap must override the plaintext one, not merge with it");
+        assert_eq!(config.get("security.protocol"), Some("SASL_SSL"));
+        assert_eq!(config.get("sasl.mechanisms"), Some("SCRAM-SHA-512"));
+        assert_eq!(config.get("sasl.username"), Some("template-management-service-kafka-user"));
+        assert_eq!(config.get("sasl.password"), Some("s3cr3t"));
+        assert_eq!(config.get("ssl.ca.location"), Some("/etc/mpp/kafka-tls/ca.crt"));
+    }
+
+    #[test]
+    fn stays_on_plaintext_when_only_some_sasl_vars_are_present() {
+        // Partial config (e.g. a rollout typo dropping one env var) must not
+        // silently half-authenticate — falling back to the known-good
+        // plaintext path is the safer failure mode than a broker rejecting a
+        // malformed SASL handshake at runtime.
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        unsafe {
+            std::env::set_var("KAFKA_SASL_BOOTSTRAP_SERVERS", "sasl-broker:9094");
+            std::env::set_var("KAFKA_SASL_USERNAME", "template-management-service-kafka-user");
+            // KAFKA_SASL_PASSWORD and KAFKA_TLS_CA_PATH left unset.
+        }
+
+        let config = build_client_config("plaintext-broker:9092", "template-management-service");
+
+        clear_env();
+        assert_eq!(config.get("bootstrap.servers"), Some("plaintext-broker:9092"));
+        assert_eq!(config.get("security.protocol"), None);
     }
 }
 

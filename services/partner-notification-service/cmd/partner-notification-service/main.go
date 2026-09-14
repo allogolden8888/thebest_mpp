@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"mpp/partner-notification-service/internal/config"
 	"mpp/partner-notification-service/internal/health"
 	"mpp/partner-notification-service/internal/kafkaio"
+	"mpp/partner-notification-service/internal/metrics"
 	"mpp/partner-notification-service/internal/msgctx"
 	"mpp/partner-notification-service/internal/notify"
 	"mpp/partner-notification-service/internal/pending"
@@ -30,6 +32,15 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func positiveSecondsEnv(key string, fallback int) time.Duration {
+	raw := getenv(key, strconv.Itoa(fallback))
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds <= 0 {
+		log.Fatalf("%s must be a positive integer, got %q", key, raw)
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 // buildRedisRuntimeURL — тот же реальный, ранее найденный и исправленный
@@ -86,7 +97,7 @@ func main() {
 	defer stop()
 
 	healthState := &health.State{}
-	healthServer := &http.Server{Addr: ":9090", Handler: health.Router(healthState)}
+	healthServer := &http.Server{Addr: ":9090", Handler: health.Router(healthState, metrics.Handler())}
 	go func() {
 		if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("health server: %v", err)
@@ -94,21 +105,23 @@ func main() {
 	}()
 
 	// BACKOFFICE_ROADMAP.md "Production Readiness Review" P0 #4: partner
-	// config used to load exactly once from PARTNER_CONFIG_PATH at
-	// startup and never again. Now that's an opt-in fallback for local
-	// dev without Configuration Redis (PARTNER_CONFIG_PATH set
-	// explicitly) — the default path bootstraps from Configuration Redis
-	// (the same store config-cache-projector already projects into) and
-	// stays live via a config.changes consumer (see configStore/
-	// configSource below and kafkaio.HandleConfigChangeRecord).
+	// config used to load exactly once from PARTNER_CONFIG_PATH at startup.
+	// Static-file loading is now possible only via explicit
+	// PARTNER_CONFIG_MODE=file. The default bootstraps from Configuration
+	// Redis and then waits for a complete per-process config.changes replay.
 	var (
 		configStore  *config.Store
 		configSource *config.RedisSource
 	)
-	if partnerPath := os.Getenv("PARTNER_CONFIG_PATH"); partnerPath != "" {
-		log.Printf("PARTNER_CONFIG_PATH=%s задан явно — партнёрский снапшот грузится один раз из статического файла (local dev без Configuration Redis), config.changes НЕ отслеживается", partnerPath)
+	configMode := getenv("PARTNER_CONFIG_MODE", "redis")
+	if configMode == "file" {
+		partnerPath := os.Getenv("PARTNER_CONFIG_PATH")
+		if partnerPath == "" {
+			log.Fatal("PARTNER_CONFIG_MODE=file requires PARTNER_CONFIG_PATH")
+		}
+		log.Printf("PARTNER_CONFIG_MODE=file: snapshot=%s; live config.changes mirror disabled", partnerPath)
 		configStore = config.NewStore(loadPartnerSnapshotFromFile(partnerPath))
-	} else {
+	} else if configMode == "redis" {
 		var err error
 		configSource, err = config.NewRedisSource(buildRedisConfigurationURL())
 		if err != nil {
@@ -122,6 +135,8 @@ func main() {
 		}
 		configStore = config.NewStore(snapshot)
 		log.Printf("bootstrap: партнёрский снапшот загружен из Configuration Redis (%d партнёров)", snapshot.Len())
+	} else {
+		log.Fatalf("unsupported PARTNER_CONFIG_MODE=%q (expected redis or file)", configMode)
 	}
 
 	redisRuntimeURL := buildRedisRuntimeURL()
@@ -148,21 +163,26 @@ func main() {
 	restClient := notify.NewRestClient(5 * time.Second)
 
 	brokers := strings.Split(getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap.mpp.svc:9092"), ",")
-	// configSource == nil means the static-file fallback is in effect
-	// (PARTNER_CONFIG_PATH was set explicitly) — no live config source to
-	// refresh from, so config.changes isn't worth subscribing to.
-	var consumer *kafkaio.Consumer
-	if configSource != nil {
-		consumer, err = kafkaio.NewConsumer(brokers, "partner-notification-service", kafkaio.TopicConfigChanges)
-	} else {
-		consumer, err = kafkaio.NewConsumer(brokers, "partner-notification-service")
-	}
+	consumer, err := kafkaio.NewConsumer(brokers, "partner-notification-service")
 	if err != nil {
 		log.Fatalf("kafkaio.NewConsumer: %v", err)
 	}
 	defer consumer.Close()
+	configHealthy := func() bool { return true }
 	if configSource != nil {
 		defer configSource.Close()
+		configConsumer := kafkaio.NewConfigConsumer(brokers, configStore)
+		configHealthy = configConsumer.Healthy
+		healthState.SetDependencyCheck(configConsumer.Healthy)
+		go configConsumer.Run(ctx)
+
+		replayCtx, replayCancel := context.WithTimeout(ctx, positiveSecondsEnv("CONFIG_INITIAL_REPLAY_TIMEOUT_SECONDS", 60))
+		if err := configConsumer.AwaitReady(replayCtx); err != nil {
+			replayCancel()
+			log.Fatalf("notification config mirror is not ready: %v", err)
+		}
+		replayCancel()
+		log.Printf("config.changes initial full replay complete; notification routing is live")
 	}
 
 	producer, err := kafkaio.NewProducer(brokers)
@@ -204,27 +224,43 @@ func main() {
 			return
 		default:
 		}
+		if !configHealthy() {
+			// /readyz alone does not stop a Kafka group consumer. Do not poll
+			// delivery work while the authoritative config mirror is stale.
+			timer := time.NewTimer(500 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				_ = healthServer.Close()
+				return
+			case <-timer.C:
+			}
+			continue
+		}
 
 		pollCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		failedPartitions := make(map[string]bool)
 		consumer.PollOnce(pollCtx, func(record *kgo.Record) {
-			if record.Topic == kafkaio.TopicConfigChanges {
-				// BACKOFFICE_ROADMAP.md P0 #4 — live refresh path,
-				// distinct from the message-delivery orchestration below
-				// (same consumer/consumer group, branched by topic so no
-				// second Kafka client is needed).
-				if err := kafkaio.HandleConfigChangeRecord(ctx, configStore, configSource, record); err != nil {
-					errHandler(err)
-					return // не коммитим — at-least-once, переобработается
-				}
-				if err := consumer.CommitRecords(ctx, record); err != nil {
-					errHandler(err)
-				}
+			partitionKey := fmt.Sprintf("%s/%d", record.Topic, record.Partition)
+			if failedPartitions[partitionKey] {
 				return
 			}
-			if err := kafkaio.HandleRecord(ctx, deps, record); err != nil {
-				errHandler(err)
-				return // не коммитим — at-least-once, переобработается
+			if !configHealthy() {
+				consumer.Rewind(record)
+				failedPartitions[partitionKey] = true
+				return
 			}
+			start := time.Now()
+			err := kafkaio.HandleRecord(ctx, deps, record)
+			metrics.RecordProcessingDuration.WithLabelValues(record.Topic).Observe(time.Since(start).Seconds())
+			if err != nil {
+				metrics.RecordsProcessedTotal.WithLabelValues(record.Topic, "error").Inc()
+				errHandler(err)
+				consumer.Rewind(record)
+				failedPartitions[partitionKey] = true
+				return
+			}
+			metrics.RecordsProcessedTotal.WithLabelValues(record.Topic, "ok").Inc()
 			if err := consumer.CommitRecords(ctx, record); err != nil {
 				errHandler(err)
 			}

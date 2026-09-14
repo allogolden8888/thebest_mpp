@@ -24,6 +24,14 @@ services:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Production Readiness Review P1 "Security" — per-domain roles
+      # (mpp_config/mpp_iam/...), локальный аналог
+      # infra/terraform/postgresql.tf's yandex_mdb_postgresql_user.service.
+      # Официальный образ выполняет *.sql из этой директории один раз, при
+      # первой инициализации ПУСТОГО тома — на уже существующем
+      # postgres_data volume ничего не произойдёт, роли нужно завести вручную
+      # (см. infra/docker/postgres-init/01-create-service-roles.sql).
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U mpp -d mpp"]
       interval: 5s
@@ -223,6 +231,50 @@ services:
       timeout: 10s
       retries: 15
 
+  # BACKOFFICE_ROADMAP.md P1 "Observability" — раньше в этом стенде не было
+  # ни одного реально работающего OTel Collector: commit 630be46 научил
+  # 5 self-service API (backoffice-api/billing-self-service-api/
+  # compliance-api/partner-api/partner-self-service-api) реально
+  # экспортировать спаны по OTLP/gRPC вместо no-op заглушки, но
+  # экспортировать было некуда без заданного OTEL_EXPORTER_OTLP_ENDPOINT.
+  # Официальный otel/opentelemetry-collector-contrib, минимальный пайплайн
+  # (см. otel-collector-config.yaml): OTLP-приём -> debug-экспортёр для
+  # трейсов (реальная verification-точка — "спан дошёл" проверяется через
+  # `docker compose logs otel-collector`, не через полноценный tracing UI,
+  # которого в этом репозитории нигде нет) + prometheus-экспортёр на 8889
+  # для метрик, если появится OTLP metrics producer.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.160.0
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "8889:8889"
+
+  # BACKOFFICE_ROADMAP.md P1 "Observability" — раньше ни один реальный
+  # Prometheus не был поднят в ЭТОМ (docker-compose) стенде — K8s-стороне
+  # уже есть kube-prometheus-stack (infra/terraform/observability.tf,
+  # "Фаза 1.10") + PodMonitor (infra/observability/pod-monitor.yaml), но это
+  # отдельная, k8s-only установка, локальному docker-compose она никак не
+  # помогает. infra/prometheus/prometheus.yml скрейпит otel-collector's
+  # собственные метрики + forwarded OTLP-метрики + все сервисы этого стенда
+  # на их health-порту 9090 (та же "скрейпим всех" философия, что и
+  # PodMonitor) — большинство по-прежнему отдают только "_up 1", но
+  # алерт up == 0 (см. alerts.yml) работает на них уже сейчас.
+  prometheus:
+    image: prom/prometheus:v3.14.0
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    volumes:
+      - ../prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - otel-collector
+
   # Публикует config.changes из config.config_outbox (PostgreSQL) — реальный
   # источник для проверки config-hot-reload в destination-resolution-service
   # (config_reload.rs), не синтетическая заглушка. Мигрирует не сам —
@@ -235,7 +287,7 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: mpp
-      POSTGRES_USER: mpp
+      POSTGRES_USER: mpp_config
       POSTGRES_PASSWORD: mpp_local_dev
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       POLL_INTERVAL_MS: "500"
@@ -267,7 +319,7 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: mpp
-      POSTGRES_USER: mpp
+      POSTGRES_USER: mpp_control
       POSTGRES_PASSWORD: mpp_local_dev
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     depends_on:
@@ -740,7 +792,7 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: mpp
-      POSTGRES_USER: mpp
+      POSTGRES_USER: mpp_reconciliation
       POSTGRES_PASSWORD: mpp_local_dev
     # 2026-09-04: MaxRAMPercentage=75 от щедрого лимита давал JVM право
     # растить heap до сбора — на четырёх Java-сервисах это 2.3ГБ RSS при
@@ -784,13 +836,13 @@ services:
 
   # Десятый хоп — слушает message.lifecycle (девятый хоп) + notification.retry,
   # резолвит канал уведомления партнёра (SMPP/REST) через msgctx.partner_id.
-  # PARTNER_CONFIG_PATH указывает на тот же partner.valid.json, что уже
-  # запечён в partner-rest-receiver (единственный тестовый партнёр click_uz,
-  # notification_callback_url — настоящий внешний домен, не слушающий в этой
-  # песочнице) — доставка ожидаемо уходит в retry-петлю (schedule.go, 30с база
+  # Конфигурация партнёров берётся из Configuration Redis и config.changes;
+  # каждая реплика делает полный replay до ready=true. У тестового click_uz
+  # notification_callback_url — внешний домен, не слушающий в этой
+  # песочнице: доставка ожидаемо уходит в retry-петлю (schedule.go, 30с база
   # / 5мин потолок) до NotificationTTL (24ч), это штатное поведение локального
-  # прогона, не баг. SMPP-канал тоже недостижим: Partner SMPP Gateway не
-  # реализован ни в одном репозитории, smpp:partner_session:* в Redis пуст.
+  # прогона, не баг. SMPP-доставка требует активной partner session,
+  # зарегистрированной Partner SMPP Gateway в Runtime Redis.
   partner-notification-service:
     image: mpp/partner-notification-service:test
     ports:
@@ -800,12 +852,15 @@ services:
       REDIS_RUNTIME_HOST: redis-runtime
       REDIS_RUNTIME_PORT: "6379"
       REDIS_RUNTIME_PASSWORD: mpp_local_dev
-    volumes:
-      - ../../config_schemas/examples/partner.valid.json:/config/partner.valid.json:ro
+      REDIS_CONFIGURATION_HOST: redis-configuration
+      REDIS_CONFIGURATION_PORT: "6379"
+      REDIS_CONFIGURATION_PASSWORD: mpp_local_dev
     depends_on:
       kafka:
         condition: service_healthy
       redis-runtime:
+        condition: service_healthy
+      redis-configuration:
         condition: service_healthy
 
   # Partner SMPP Gateway — services_specifictaion.md §2.2. Добавлен для
@@ -968,7 +1023,7 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: mpp
-      POSTGRES_USER: mpp
+      POSTGRES_USER: mpp_config
       POSTGRES_PASSWORD: mpp_local_dev
     depends_on:
       postgres:
@@ -982,7 +1037,7 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: mpp
-      POSTGRES_USER: mpp
+      POSTGRES_USER: mpp_iam
       POSTGRES_PASSWORD: mpp_local_dev
     depends_on:
       postgres:
@@ -996,7 +1051,7 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: mpp
-      POSTGRES_USER: mpp
+      POSTGRES_USER: mpp_credentials
       POSTGRES_PASSWORD: mpp_local_dev
       VAULT_ADDR: http://vault:8200
       VAULT_MOUNT: secret
@@ -1058,7 +1113,7 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: mpp
-      POSTGRES_USER: mpp
+      POSTGRES_USER: mpp_incident
       POSTGRES_PASSWORD: mpp_local_dev
     depends_on:
       postgres:
@@ -1078,7 +1133,7 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: mpp
-      POSTGRES_USER: mpp
+      POSTGRES_USER: mpp_support
       POSTGRES_PASSWORD: mpp_local_dev
     depends_on:
       postgres:
@@ -1124,7 +1179,7 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: mpp
-      POSTGRES_USER: mpp
+      POSTGRES_USER: mpp_policy_write
       POSTGRES_PASSWORD: mpp_local_dev
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     depends_on:
@@ -1210,6 +1265,12 @@ services:
       # auth.go's handleLogin (VerifyPartnerPortalCredentials) и
       # internal/auth/resolve.go's ResolveLiveAccess (ResolvePartnerPortalAccess).
       IAM_SERVICE_ADDR: iam-service:9000
+      # BACKOFFICE_ROADMAP.md P1 "Observability" — commit 630be46 wired a
+      # real OTLP/gRPC exporter behind this env var (buildSpanExporter in
+      # main.go), but it was never actually pointed at anything: no OTel
+      # Collector existed in this stack, so spans still had nowhere real to
+      # go. otel-collector below is that collector.
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
     depends_on:
       configuration-service:
         condition: service_started
@@ -1218,6 +1279,8 @@ services:
       chat-service:
         condition: service_started
       iam-service:
+        condition: service_started
+      otel-collector:
         condition: service_started
 
   billing-self-service-api:
@@ -1239,13 +1302,18 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: mpp
-      POSTGRES_USER: mpp
+      POSTGRES_USER: mpp_billing_read
       POSTGRES_PASSWORD: mpp_local_dev
       CONFIGURATION_SERVICE_ADDR: configuration-service:9000
+      # BACKOFFICE_ROADMAP.md P1 "Observability" — см. комментарий у той же
+      # переменной в partner-self-service-api выше.
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
     depends_on:
       postgres:
         condition: service_healthy
       configuration-service:
+        condition: service_started
+      otel-collector:
         condition: service_started
 
   compliance-api:
@@ -1269,12 +1337,17 @@ services:
       REDIS_RUNTIME_PASSWORD: mpp_local_dev
       CONFIGURATION_SERVICE_ADDR: configuration-service:9000
       IAM_SERVICE_ADDR: iam-service:9000
+      # BACKOFFICE_ROADMAP.md P1 "Observability" — см. комментарий у той же
+      # переменной в partner-self-service-api выше.
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
     depends_on:
       redis-runtime:
         condition: service_healthy
       configuration-service:
         condition: service_started
       iam-service:
+        condition: service_started
+      otel-collector:
         condition: service_started
 
   # Отсутствовал в локальном compose целиком (проверено — deployed в k8s,
@@ -1296,7 +1369,7 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: mpp
-      POSTGRES_USER: mpp
+      POSTGRES_USER: mpp_policy_read
       POSTGRES_PASSWORD: mpp_local_dev
       REDIS_RUNTIME_HOST: redis-runtime
       REDIS_RUNTIME_PORT: "6379"
@@ -1411,7 +1484,7 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: mpp
-      POSTGRES_USER: mpp
+      POSTGRES_USER: mpp_backoffice_read
       POSTGRES_PASSWORD: mpp_local_dev
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       CONFIGURATION_SERVICE_ADDR: configuration-service:9000
@@ -1421,7 +1494,7 @@ services:
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PORT: "9000"
       CLICKHOUSE_DB: analytics
-      CLICKHOUSE_USER: mpp
+      CLICKHOUSE_USER: analytics_reader
       CLICKHOUSE_PASSWORD: mpp_local_dev
       INCIDENT_SERVICE_ADDR: incident-service:9000
       CHAT_SERVICE_ADDR: chat-service:9000
@@ -1431,6 +1504,9 @@ services:
       REDIS_RUNTIME_HOST: redis-runtime
       REDIS_RUNTIME_PORT: "6379"
       REDIS_RUNTIME_PASSWORD: mpp_local_dev
+      # BACKOFFICE_ROADMAP.md P1 "Observability" — см. комментарий у той же
+      # переменной в partner-self-service-api выше.
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
     depends_on:
       postgres:
         condition: service_healthy
@@ -1443,6 +1519,8 @@ services:
       redis-runtime:
         condition: service_healthy
       chat-service:
+        condition: service_started
+      otel-collector:
         condition: service_started
 
   backoffice-ui:
@@ -1480,6 +1558,14 @@ services:
     # ничем не ограничен (docker inspect Memory=0).
     volumes:
       - ./clickhouse-config/low-memory.xml:/etc/clickhouse-server/config.d/low-memory.xml:ro
+      # Production Readiness Review P1 "Security" — per-service ClickHouse
+      # users (analytics_writer/pdu_log_writer/analytics_reader/
+      # partner_api_reader), локальный аналог
+      # infra/terraform/clickhouse.tf's yandex_mdb_clickhouse_user.service +
+      # infra/clickhouse/production_grants.sql. Официальный образ выполняет
+      # *.sql из этой директории один раз, после старта сервера, на первой
+      # инициализации (на уже существующем томе — вручную, см. файл).
+      - ./clickhouse-init:/docker-entrypoint-initdb.d:ro
     # 1g -> 1.25g: cgroup memory.events:max дорос до 5009, то есть лимит
     # реально дёргался постоянно. На VM сейчас ~1.7ГБ свободно.
     mem_limit: 1250m
@@ -1509,7 +1595,7 @@ services:
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PORT: "9000"
       CLICKHOUSE_DB: analytics
-      CLICKHOUSE_USER: mpp
+      CLICKHOUSE_USER: analytics_writer
       CLICKHOUSE_PASSWORD: mpp_local_dev
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     depends_on:
@@ -1533,7 +1619,7 @@ services:
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PORT: "9000"
       CLICKHOUSE_DB: analytics
-      CLICKHOUSE_USER: mpp
+      CLICKHOUSE_USER: pdu_log_writer
       CLICKHOUSE_PASSWORD: mpp_local_dev
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     depends_on:
@@ -1574,7 +1660,7 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: mpp
-      POSTGRES_USER: mpp
+      POSTGRES_USER: mpp_billing_write
       POSTGRES_PASSWORD: mpp_local_dev
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     depends_on:
@@ -1604,7 +1690,7 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: mpp
-      POSTGRES_USER: mpp
+      POSTGRES_USER: mpp_dlr
       POSTGRES_PASSWORD: mpp_local_dev
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     depends_on:
@@ -1624,7 +1710,7 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: mpp
-      POSTGRES_USER: mpp
+      POSTGRES_USER: mpp_dlr
       POSTGRES_PASSWORD: mpp_local_dev
       REDIS_RUNTIME_HOST: redis-runtime
       REDIS_RUNTIME_PORT: "6379"
@@ -1654,7 +1740,7 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: mpp
-      POSTGRES_USER: mpp
+      POSTGRES_USER: mpp_messaging
       POSTGRES_PASSWORD: mpp_local_dev
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     depends_on:

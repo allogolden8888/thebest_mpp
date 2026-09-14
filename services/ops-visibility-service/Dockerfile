@@ -12,7 +12,8 @@ RUN --mount=type=secret,id=extra_ca_cert,required=false \
 COPY . .
 RUN CGO_ENABLED=0 go build -o /build/bin/ops-visibility-service ./cmd/ops-visibility-service
 
-FROM gcr.io/distroless/static-debian12
+FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /build/bin/ops-visibility-service /app/ops-visibility-service
 EXPOSE 9090
+USER nonroot:nonroot
 ENTRYPOINT ["/app/ops-visibility-service"]

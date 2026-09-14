@@ -12,6 +12,7 @@ import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import uz.mpp.billingledgerwriter.health.HealthServer;
+import uz.mpp.billingledgerwriter.kafkaio.KafkaSaslProperties;
 import uz.mpp.billingledgerwriter.kafkaio.LedgerEntryMapper;
 import uz.mpp.billingledgerwriter.store.LedgerStore;
 import uz.mpp.billingledgerwriter.store.ReconnectingConnectionProvider;
@@ -50,7 +51,18 @@ public final class Main {
         // что уже применён в delivery-service/message-state-resolver этой
         // же сессии.
         Properties props = new Properties();
-        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, env("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap.mpp.svc:9092"));
+        // BACKOFFICE_ROADMAP.md P1 "Kafka — plaintext listener без SASL/ACL,
+        // хотя HLD требует ACL": billing-ledger-writer — один из трёх пилотных
+        // клиентов нового SASL_SCRAM+TLS листенера (KafkaSaslProperties). Когда
+        // KAFKA_SASL_* переменные не заданы (все остальные ~37 сервисов, любой
+        // локальный запуск), fromEnv() возвращает null и поведение остаётся
+        // byte-for-byte прежним — plaintext KAFKA_BOOTSTRAP_SERVERS.
+        Properties sasl = KafkaSaslProperties.fromEnv(System.getenv());
+        if (sasl != null) {
+            props.putAll(sasl);
+        } else {
+            props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, env("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap.mpp.svc:9092"));
+        }
         props.put(ConsumerConfig.GROUP_ID_CONFIG, "billing-ledger-writer");
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());

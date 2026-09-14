@@ -2,7 +2,7 @@
 
 **Основание:** `development_plan.md` Фаза 2.1/2.4, одиннадцатый и **последний сервис "ходового скелета"** (Главный агент) — конец пути, начатого `partner-rest-receiver`: превращает `message.lifecycle` в реальную push-доставку партнёру (`service_internal_methods.md` §7.1). Третий Go-сервис Главного агента, первый с реальным gRPC-клиентом на Go в этой сессии.
 
-**Статус:** `go build ./... && go test ./...`, **21/21 тестов проходят**, 13 из них — реальные round-trip'ы: 4 против настоящего in-process gRPC-сервера (`google.golang.org/grpc`, не мок клиентского интерфейса), 5 против настоящего `httptest.Server`.
+**Статус (2026-09-14):** `go build ./... && go test ./...`, **50/50 top-level тестов проходят**. В набор входят реальные local round-trip'ы через miniredis, in-process gRPC и `httptest.Server`, а также version-fence/captured-EOF/readiness тесты live-config пути.
 
 ```bash
 cd services/partner-notification-service
@@ -38,14 +38,24 @@ go test ./...
 
 **Не закрыто в этом раунде (см. `development_plan.md`, следующий этап работы):** HMAC/подпись на исходящих REST callback'ах — требует нового поля в `partner.schema.json` (per-partner shared secret), кросс-сервисное изменение схемы конфигурации (config_schemas — общая зона с Субагентом 1), не точечный фикс одного сервиса; `FirstApplication` misdelivery — требует добавления `application_id` в `msgctx`/`MessageLifecycleEvent`, что означает изменения в уже закоммиченных Pipeline Engine и Message State Resolver; удвоенная доставка при сбое `PendingStore.Delete` после успешного retry — известный, самодокументированный race, не решён.
 
+## Production hardening 2026-09-14: live PARTNER config без рестарта
+
+Прежняя реализация была небезопасна для HA: `config.changes` потреблялся той же consumer group, что и lifecycle-события, поэтому обновлялась только одна из реплик. Consumer перечитывал Redis до/после независимого projector, archive видел старый `config:current`, а новый pod мог стать Ready до replay. Dockerfile и K8s дополнительно задавали `PARTNER_CONFIG_PATH`, фактически выключая hot reload в production.
+
+Теперь каждый процесс имеет отдельный group-less full-mirror consumer с earliest replay и точно захваченной границей EOF по всем партициям. До этой границы delivery consumer не обрабатывает трафик. Live update берёт immutable `payload_json` из Kafka, проверяет key/entity/payload identity и версию, а atomic Store держит version fence и archive tombstone. `active(N) -> archived(N)` разрешён один раз, но повторный `active(N)` уже не оживит архив. Partner payload status `suspended` корректно отличается от lifecycle status конфиг-версии и fail-closed блокирует доставку. Периодический Kafka Ping снимает `/readyz` при потере broker; main loop также перестаёт поллить delivery queue, потому что readiness сама по себе Kafka workload не останавливает. При transient processing error consumer явно перематывает in-memory position на упавший offset, а переподключение config mirror делает replay заново поверх последнего валидного snapshot.
+
+Production deployment больше не монтирует статический fixture и получает `redis-configuration-credentials`; Docker Compose подключён к Configuration Redis. Файл остался только как явный local fallback: `PARTNER_CONFIG_MODE=file` + `PARTNER_CONFIG_PATH`.
+
+Upstream terminal path теперь закрыт: `configuration-service.ArchiveVersion` в одной транзакции меняет status той же версии и пишет `config_outbox`; Config Cache Projector удаляет Redis current-pointer через same-version lifecycle fence. До coordinated rollout остаётся compaction-key коллизия: ключ топика равен только `entity_id`, а не `(entity_type, entity_id)`, а также живой двухрепличный Kafka E2E.
+
 ## Что реализовано по service_internal_methods.md §7.1
 
 | Метод | Где | Примечание |
 |---|---|---|
 | `on_lifecycle_event` | `kafkaio.HandleRecord` | Один консьюмер на оба входных топика (`message.lifecycle`, `notification.retry`) |
 | `resolve_delivery_channel` | `config.ResolveDeliveryChannel` | SMPP (auth.type=SMPP_BIND) либо REST (`notification_callback_url`) |
-| `lookup_gateway_instance` | `registry.Store.Lookup` | `smpp:partner_session:{partner_id}:{system_id}` (`system_id = application_id`, задокументированное допущение) — реальный `go-redis` клиент, live не проверено (владелец записи, Partner SMPP Gateway, не реализован ни в одном репозитории) |
-| `send_deliver_sm` | `notify.SmppClient.DeliverSm` | Реальный сгенерированный gRPC-клиент против `platform-contracts/grpc/partner_gateway.proto`, **доказано против настоящего in-process gRPC-сервера в тестах** — сервер (Partner SMPP Gateway) сам не реализован, но контракт клиента полностью проверен |
+| `lookup_gateway_instance` | `registry.Store.Lookup` | `smpp:partner_session:{partner_id}:{system_id}` (`system_id = application_id`, задокументированное допущение) — реальный `go-redis` клиент; записью владеет реализованный Partner SMPP Gateway |
+| `send_deliver_sm` | `notify.SmppClient.DeliverSm` | Реальный сгенерированный gRPC-клиент против `platform-contracts/grpc/partner_gateway.proto`, доказанный против in-process gRPC-сервера; production server реализован в `services/partner-smpp-gateway` |
 | `send_rest_callback` | `notify.RestClient.SendCallback` | Реальный `net/http`, **доказано против настоящего `httptest.Server`** |
 | `send_websocket_push` | — | **Не реализовано в этом срезе** — ни один тестовый партнёр не сигнализирует потребность в WebSocket (нет поля в конфиге, различающего WebSocket от REST callback), см. "Что НЕ реализовано" |
 | `handle_delivery_failure` | `kafkaio.HandleRecord` + `schedule.BuildRetryTask` | Публикует `SchedulerBackgroundTask{NOTIFICATION_RETRY}` в `scheduler.background.commands` — **не Kafka-редоставка**: неудачный gRPC/HTTP вызов НЕ считается processing-ошибкой (offset коммитится), единственный retry-механизм — через Scheduler (`services_specifictaion.md` §8.1: "второго, самостоятельного механизма retry внутри сервиса нет") |
@@ -53,16 +63,13 @@ go test ./...
 
 ## Тесты — что доказано
 
-24 теста:
-* `internal/config` (7) — загрузка реального `partner.valid.json` (включая новое поле), `resolve_delivery_channel` для всех веток (SMPP_BIND без URL, API_KEY с URL, API_KEY без URL — ошибка).
-* `internal/notify` (13, **реально против живых серверов**) — gRPC: `DELIVERED`/`STALE_EPOCH`/`NO_ACTIVE_SESSION` реакции, переиспользование соединения между вызовами на один endpoint (регрессия на "не открывать новый канал на каждый вызов"); HTTP: 2xx/5xx/429/4xx/сетевая недоступность — каждый со своим `Outcome`, включая тонкое различие **429 retryable, но остальные 4xx — permanent failure** (партнёрский endpoint отверг запрос по причине, которую повтор не исправит); SSRF guard (4, см. выше) — запрещённый scheme и loopback-адрес за валидным https против настоящего `httptest.NewTLSServer`, оба класса дают `OutcomePermanentFailure`.
-* `internal/schedule` (4) — TTL-граница (исключительная, `now == deadline` → `Expire`), `attempt` — passthrough, не инкремент (регрессия на находку про `DispatchBuilder`).
+50 top-level тестов: `internal/config` (20), `internal/health` (3), `internal/kafkaio` (7), `internal/notify` (14), `internal/schedule` (6). Новый config-набор проверяет Redis bootstrap, suspended/archive, immutable payload, identity/version mismatch, stale replay, same-version tombstone, concurrent CAS и captured EOF на нескольких партициях. HTTP/gRPC/miniredis тесты остаются реальными local round-trip, а не моками клиентских интерфейсов.
 
 ## Что НЕ реализовано на этом шаге (честно, не спрятано)
 
 * **WebSocket-канал не реализован** — `service_internal_methods.md` §7.1 упоминает `send_websocket_push`, но ни `partner.schema.json`, ни какой-либо другой документ не специфицирует, как партнёр сигнализирует желание получать уведомления через WebSocket вместо REST callback (нет отдельного значения в `auth.type`, нет булева флага) — не додумано заново, оставлено как открытый вопрос, аналогичный найденным в этой сессии для Sub-агента 1.
 * **`registry.Store`/`msgctx.Store`/`pending.Store` — реальные Redis-клиенты, ни разу не запущены против живого Runtime Redis** — тот же класс оговорки, что у остальных Redis-клиентов этой сессии.
-* **Ни разу не запущено против реального Kafka-брокера или реального Partner SMPP Gateway** — gRPC-клиент полностью проверен в тестах против фейкового, но настоящего gRPC-сервера; реальный Partner SMPP Gateway не реализован ни в одном репозитории на момент написания.
+* **Новый full-mirror ещё не прогнан против production-like Kafka с двумя репликами** — unit/component контракты закрыты, но нужен живой E2E на broadcast, compaction gaps, restart с пустым Redis и broker loss/recovery.
 * **ОБНОВЛЕНО 2026-08-06:** `docker build` реально прогнан и провалидирован для этого сервиса (найдены и исправлены реальные баги по пути, где применимо — см. `development_plan.md` "Координация" п.5 и `infra/docker/README.md`). Формулировка ниже — из более раннего состояния сессии, оставлена для истории.
 * **`docker build` не выполнялся** — недоступен Docker daemon.
 * **`FirstApplication`, не полноценный per-application resolve** — см. находку выше про отсутствие `application_id` в `msgctx`.

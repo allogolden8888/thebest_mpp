@@ -276,16 +276,30 @@ func (s *Store) GetVersionByNumber(ctx context.Context, entityType validate.Enti
 }
 
 // ArchiveVersion — handle_crud_request (ArchiveVersion RPC). Hard delete не
-// выполняется (HLD §16.1, migrations/V002 комментарий) — только
-// status=archived.
+// выполняется (HLD §16.1). The terminal transition and a new
+// outbox row are committed atomically; otherwise full-mirror consumers never
+// learn that the active version was archived.
 func (s *Store) ArchiveVersion(ctx context.Context, entityType validate.EntityType, entityID string, version int32) (ConfigVersion, error) {
 	var v ConfigVersion
-	err := s.pool.QueryRow(ctx, `
-		UPDATE config.config_versions
-		SET status = 'archived'
-		WHERE entity_type = $1 AND entity_id = $2 AND version = $3
-		RETURNING id, entity_type, entity_id, version, status, created_at, created_by, payload
-	`, string(entityType), entityID, version).Scan(&v.ID, &v.EntityType, &v.EntityID, &v.Version, &v.Status, &v.CreatedAt, &v.CreatedBy, &v.Payload)
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, `
+			UPDATE config.config_versions
+			SET status = 'archived'
+			WHERE entity_type = $1 AND entity_id = $2 AND version = $3 AND status = 'active'
+			RETURNING id, entity_type, entity_id, version, status, created_at, created_by, payload
+		`, string(entityType), entityID, version).Scan(&v.ID, &v.EntityType, &v.EntityID, &v.Version, &v.Status, &v.CreatedAt, &v.CreatedBy, &v.Payload)
+		if err != nil {
+			return fmt.Errorf("update config version: %w", err)
+		}
+
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO config.config_outbox (config_version_id, entity_type, entity_id, payload)
+			VALUES ($1, $2, $3, $4)
+		`, v.ID, string(entityType), entityID, v.Payload); err != nil {
+			return fmt.Errorf("insert archive outbox: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
 		return ConfigVersion{}, fmt.Errorf("archive version: %w", err)
 	}

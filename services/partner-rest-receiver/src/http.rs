@@ -20,8 +20,9 @@ use crate::ip_allowlist;
 use crate::msgctx;
 use crate::request::{RawRequest, ValidatedRequest, ValidationError, validate_request_schema};
 use crate::segmentation::compute_segments;
-use axum::extract::{ConnectInfo, DefaultBodyLimit, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Request, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
@@ -30,7 +31,7 @@ use redis::aio::MultiplexedConnection;
 use serde::Serialize;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::Semaphore;
 
 pub struct AppState {
@@ -339,10 +340,27 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// лимита получают немедленный 503 вместо неограниченной очереди.
 pub const MAX_CONCURRENT_REQUESTS: usize = 1024;
 
+/// `instrument_ingest` — BACKOFFICE_ROADMAP.md P1 "Observability": реальные
+/// счётчик/гистограмма для `POST /v1/messages` (см. `metrics.rs`), не
+/// изменяя саму `handle_send_message` — та отдаёт `Response` из нескольких
+/// точек выхода (auth reject/idempotency replay/admission/rate-limit/Kafka
+/// publish success-or-failure), middleware читает финальный статус уже
+/// собранного ответа вместо дублирования каждой точки выхода отдельно.
+async fn instrument_ingest(request: Request, next: Next) -> Response {
+    let start = Instant::now();
+    let response = next.run(request).await;
+    let status = response.status().as_u16().to_string();
+    let elapsed = start.elapsed().as_secs_f64();
+    crate::metrics::INGEST_REQUESTS_TOTAL.with_label_values(&[&status]).inc();
+    crate::metrics::INGEST_REQUEST_DURATION.with_label_values(&[&status]).observe(elapsed);
+    response
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/messages", post(handle_send_message))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(middleware::from_fn(instrument_ingest))
         .with_state(state)
 }
 

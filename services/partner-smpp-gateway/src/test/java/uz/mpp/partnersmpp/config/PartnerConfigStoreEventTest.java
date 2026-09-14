@@ -46,13 +46,40 @@ class PartnerConfigStoreEventTest {
     }
 
     @Test
-    void archiveIsVersionedAndOlderActiveEventCannotRevivePartner() {
+    void sameVersionArchiveDominatesAndCannotBeRevived() {
         store.applyEvent("acme", 1, "active", payload("acme", "active", "smpp-v1"));
-        assertTrue(store.applyEvent("acme", 2, "archived", new byte[0]));
+        assertTrue(store.applyEvent("acme", 1, "archived", new byte[0]));
         assertTrue(store.currentCredentials().isEmpty());
+        assertEquals("archived", store.partnerStatus("acme"));
 
         assertFalse(store.applyEvent("acme", 1, "active", payload("acme", "active", "smpp-v1")));
+        assertFalse(store.applyEvent("acme", 1, "archived", new byte[0]));
         assertTrue(store.currentCredentials().isEmpty());
+
+        assertTrue(store.applyEvent("acme", 2, "active", payload("acme", "active", "smpp-v2")));
+        assertEquals("smpp-v2", store.currentCredentials().get("smpp-v2").applicationId());
+    }
+
+    @Test
+    void suspendedPayloadRemovesCredentialsAndAdvancesFence() {
+        assertTrue(store.applyEvent("acme", 4, "active", payload("acme", "active", "smpp-v4")));
+        assertTrue(store.applyEvent("acme", 5, "active", payload("acme", "suspended", "smpp-v5")));
+
+        assertTrue(store.currentCredentials().isEmpty());
+        assertEquals("suspended", store.partnerStatus("acme"));
+        assertFalse(store.applyEvent("acme", 4, "active", payload("acme", "active", "stale")));
+    }
+
+    @Test
+    void unknownPayloadStatusIsRejectedWithoutChangingSnapshot() {
+        store.applyEvent("acme", 1, "active", payload("acme", "active", "smpp-v1"));
+
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> store.applyEvent("acme", 2, "active", payload("acme", "disabled", "smpp-v2"))
+        );
+        assertEquals("smpp-v1", store.currentCredentials().get("smpp-v1").applicationId());
+        assertEquals("active", store.partnerStatus("acme"));
     }
 
     @Test

@@ -1,5 +1,11 @@
 # Partner SMPP Gateway
 
+## Production hardening 2026-09-14: suspended и terminal archive
+
+Live store теперь различает lifecycle status конфиг-версии и status партнёра внутри payload. Валидный `event.status=active` с `payload.status=suspended|archived` больше не отвергается с сохранением старых credentials: карта bind’ов очищается, version fence продвигается, а уже открытые сессии партнёра закрываются. Переход `active(N) -> archived(N)` разрешён один раз и доминирует над повторным `active(N)`; только `active(N+1)` реактивирует партнёра. Redis bootstrap дополнительно сверяет partner identity и допустимый status.
+
+Проверка: `PartnerConfigStoreEventTest` + `PartnerConfigStoreTest` — 9/9, включая реальный локальный Redis. Полный suite — 102/105; три оставшихся падения относятся к `VaultClientTest`, где локальный Vault отклонил seed с `403 invalid token`.
+
 **Основание:** `development_plan.md` — Субагент 1, Operator/partner-facing протоколы. `services_specifictaion.md` §2.2: SMPP bind/unbind, `submit_sm`, `deliver_sm`, partner-side `query_sm`, `enquire_link`. **Архитектурное решение LLD, соблюдено буквально**: "Не рекомендуется делать критический Gateway полностью зависимым от старой сторонней SMPP-библиотеки" — внутренний `smpp-codec`/`smpp-pdu-model` реализован с нуля на Netty (`src/main/java/uz/mpp/partnersmpp/codec/`), JSMPP/cloudhopper не используются даже как зависимость.
 
 **Статус:** реально компилируется и тестируется — `mvn test`, **71 тест** (Java 25). Codec протестирован round-trip. **Полный SMPP-сервер протестирован через реальный TCP localhost socket** (не мок) — `PartnerSmppServerIntegrationTest`: настоящий Netty-сервер на эфемерном порту, настоящий `java.net.Socket`-клиент, настоящая сериализация PDU в обе стороны. Redis-путь протестирован против реального локального Redis (brew). Последний прогон: 67/71 прошли, оставшиеся 4 `VaultClientTest` требуют запущенный dev Vault на `127.0.0.1:8200`; отдельный heartbeat/registry/TCP-набор — 24/24.

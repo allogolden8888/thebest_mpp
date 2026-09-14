@@ -9,7 +9,7 @@ import (
 )
 
 func TestHealthzAlwaysOk(t *testing.T) {
-	srv := httptest.NewServer(Router(&State{}))
+	srv := httptest.NewServer(Router(&State{}, nil))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/healthz")
 	if err != nil {
@@ -23,7 +23,7 @@ func TestHealthzAlwaysOk(t *testing.T) {
 
 func TestReadyz503UntilReady(t *testing.T) {
 	state := &State{}
-	srv := httptest.NewServer(Router(state))
+	srv := httptest.NewServer(Router(state, nil))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/readyz")
 	if err != nil {
@@ -50,7 +50,7 @@ func TestReadyz503WhenDependencyCheckFails(t *testing.T) {
 	state.SetDependencyChecks(map[string]func(context.Context) error{
 		"redis": func(ctx context.Context) error { return errors.New("dial tcp: connection refused") },
 	})
-	srv := httptest.NewServer(Router(state))
+	srv := httptest.NewServer(Router(state, nil))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/readyz")
 	if err != nil {
@@ -68,7 +68,7 @@ func TestReadyz200WhenAllDependencyChecksPass(t *testing.T) {
 	state.SetDependencyChecks(map[string]func(context.Context) error{
 		"redis": func(ctx context.Context) error { return nil },
 	})
-	srv := httptest.NewServer(Router(state))
+	srv := httptest.NewServer(Router(state, nil))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/readyz")
 	if err != nil {
@@ -81,7 +81,7 @@ func TestReadyz200WhenAllDependencyChecksPass(t *testing.T) {
 }
 
 func TestMetricsReturns200(t *testing.T) {
-	srv := httptest.NewServer(Router(&State{}))
+	srv := httptest.NewServer(Router(&State{}, nil))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/metrics")
 	if err != nil {

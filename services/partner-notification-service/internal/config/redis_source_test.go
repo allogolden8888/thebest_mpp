@@ -48,6 +48,19 @@ func TestFetchPartnerReadsCurrentVersionPayload(t *testing.T) {
 	}
 }
 
+func TestFetchPartnerAcceptsSuspendedEntityInsideActiveConfigVersion(t *testing.T) {
+	source, rdb := newTestSource(t)
+	seedPartner(t, rdb, "acme", 4, `{"partner_id":"acme","version":4,"status":"suspended","applications":[{"application_id":"acme_app"}]}`)
+
+	partner, found, err := source.FetchPartner(context.Background(), "acme")
+	if err != nil || !found {
+		t.Fatalf("FetchPartner suspended: found=%v err=%v", found, err)
+	}
+	if partner.Status != "suspended" {
+		t.Fatalf("status=%q, want suspended", partner.Status)
+	}
+}
+
 func TestFetchPartnerNotFoundWhenNoCurrentPointer(t *testing.T) {
 	source, _ := newTestSource(t)
 

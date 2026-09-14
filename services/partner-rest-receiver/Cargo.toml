@@ -23,6 +23,13 @@ uuid = { version = "1", features = ["v4"] }
 # HTTP-клиента, тот же выбор, что уже избегает лишних системных зависимостей
 # у rdkafka/redis в этом сервисе.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# prometheus — BACKOFFICE_ROADMAP.md P1 "Observability" (см. metrics.rs
+# package doc): реальные счётчик/гистограмма на /v1/messages вместо
+# хардкод-заглушки /metrics. Официальный Rust client для Prometheus, не
+# переизобретённый text-exposition-format вручную. `process`-фичу не
+# включаем — process_* коллектор требует procfs и не даёт здесь ничего
+# сверх того, что уже есть в go_* аналоге у Go-сервисов этой сессии.
+prometheus = { version = "0.13", default-features = false }
 # Не добавлен: async-trait. AuthVerifier::verify теперь возвращает
 # `Pin<Box<dyn Future<...>>>` вручную (VaultAuthVerifier делает реальный
 # сетевой I/O) — трейт по-прежнему используется как `Box<dyn AuthVerifier>`

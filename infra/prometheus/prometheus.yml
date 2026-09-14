@@ -1,0 +1,75 @@
+# BACKOFFICE_ROADMAP.md P1 "Observability" — до этого коммита ни один
+# реальный Prometheus не был поднят ни локально (docker-compose), ни в этом
+# файле. K8s-стороне (infra/terraform/observability.tf, "Фаза 1.10") уже
+# развёрнут kube-prometheus-stack + infra/observability/pod-monitor.yaml
+# (PodMonitor скрейпит /metrics на порту 9090 у ЛЮБОГО пода в namespace
+# mpp) — та же "скрейпим всех, у кого есть health-порт" философия
+# воспроизведена здесь статическим target-листом, потому что
+# docker-compose не умеет service discovery по лейблам, как k8s.
+#
+# Честно: большинство целей ниже по-прежнему отдают только
+# "<service>_up 1" (см. BACKOFFICE_ROADMAP.md P1 "Observability" за полным
+# списком сервисов, ещё не переведённых на реальные метрики) — сам факт их
+# наличия здесь даёт малую, но реальную ценность (алерт up == 0 работает на
+# ВСЕХ них уже сейчас, см. alerts.yml), не только на четырёх, получивших
+# реальные счётчики/гистограммы в этом заходе.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]
+
+  # Метрики, реально прошедшие через OTLP metrics pipeline коллектора (см.
+  # otel-collector-config.yaml) — пусто до тех пор, пока хотя бы один
+  # сервис не начнёт экспортировать OTLP-метрики (сегодня только трейсы
+  # реально экспортируются, см. buildSpanExporter в 5 self-service API);
+  # цель оставлена заведённой заранее, а не добавлена задним числом.
+  - job_name: otel-collector-forwarded-metrics
+    static_configs:
+      - targets: ["otel-collector:8889"]
+
+  - job_name: mpp-services
+    static_configs:
+      - targets:
+          - config-event-publisher:9090
+          - execution-control-service:9090
+          - partner-rest-receiver:9090
+          - pipeline-engine:9090
+          - destination-resolution-service:9090
+          - policy-service:9090
+          - billing-service:9090
+          - routing-service:9090
+          - delivery-service:9090
+          - operator-smpp-session-manager:9090
+          - delivery-reconciliation-service:9090
+          - message-state-resolver:9090
+          - partner-notification-service:9090
+          - partner-smpp-gateway:9090
+          - scheduler-background-lane:9090
+          - configuration-service:9090
+          - iam-service:9090
+          - credential-issuer-service:9090
+          - operator-http-gateway:9090
+          - incident-service:9090
+          - chat-service:9090
+          - ops-visibility-service:9090
+          - template-management-service:9090
+          - partner-self-service-api:9090
+          - billing-self-service-api:9090
+          - compliance-api:9090
+          - consent-cache-projector:9090
+          - config-cache-projector:9090
+          - backoffice-api:9090
+          - analytics-writer:9090
+          - pdu-log-writer:9090
+          - billing-outbox-publisher:9090
+          - billing-ledger-writer:9090
+          - dlr-correlation-writer:9090
+          - dlr-manager:9090
+          - lifecycle-writer:9090

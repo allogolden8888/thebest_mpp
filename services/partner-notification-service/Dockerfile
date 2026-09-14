@@ -17,13 +17,11 @@ RUN --mount=type=secret,id=extra_ca_cert,required=false \
 COPY . .
 RUN CGO_ENABLED=0 go build -o /build/bin/partner-notification-service ./cmd/partner-notification-service
 
-FROM gcr.io/distroless/static-debian12
+FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /build/bin/partner-notification-service /app/partner-notification-service
-# PARTNER_CONFIG_PATH — в этом срезе статический файл-заглушка (в проде
-# читалось бы из config.changes/Configuration Redis, см. README) — build
-# context этого Dockerfile не включает config_schemas/ (та же директория-
-# only конвенция, что у dlr-correlation-writer/dlr-manager), файл должен
-# быть примонтирован отдельно (ConfigMap) для реального запуска контейнера.
-ENV PARTNER_CONFIG_PATH=/config/partner.valid.json
+# Production defaults to Configuration Redis bootstrap plus a complete
+# per-process config.changes mirror. Static input remains an explicit local
+# escape hatch: PARTNER_CONFIG_MODE=file together with PARTNER_CONFIG_PATH.
 EXPOSE 9090
+USER nonroot:nonroot
 ENTRYPOINT ["/app/partner-notification-service"]

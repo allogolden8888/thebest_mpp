@@ -7,6 +7,7 @@ mod http;
 mod idempotency;
 mod ip_allowlist;
 mod kafka_io;
+mod metrics;
 mod msgctx;
 mod partner_config;
 mod proto;

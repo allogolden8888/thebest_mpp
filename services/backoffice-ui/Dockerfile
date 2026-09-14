@@ -29,3 +29,16 @@ FROM nginx:1.27-alpine
 COPY --from=builder /build/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 8080
+# Non-root — same UID:GID convention as the Java/Rust Dockerfiles in this
+# repo. nginx:alpine's stock image ships its own "nginx" user (uid 101) but
+# leaves /var/cache/nginx and the pid file path (/run/nginx.pid) owned by
+# root and not writable by it — verified live (`docker run nginx:1.27-alpine
+# id nginx; ls -ld /var/cache/nginx /run`). Repointing the pid file at /tmp
+# (already world-writable 1777 in this image) and chown'ing the nginx cache
+# dir to our uid is the minimal fix; verified live that nginx actually
+# starts and serves under this uid (see BACKOFFICE_ROADMAP.md P1 Security).
+RUN addgroup -g 10001 -S mpp \
+    && adduser -u 10001 -S -D -H -G mpp mpp \
+    && sed -i 's#/run/nginx.pid#/tmp/nginx.pid#' /etc/nginx/nginx.conf \
+    && chown -R mpp:mpp /var/cache/nginx
+USER 10001:10001

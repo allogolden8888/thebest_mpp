@@ -24,14 +24,18 @@ const Topic = "config.changes"
 // (Consent Cache Projector, Runtime Redis, hot path), см.
 // DecodeConfigChangeEvent.
 var validConfigEntityTypes = map[commonv1.ConfigEntityType]bool{
-	commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PIPELINE:        true,
-	commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_POLICY_RULESET:  true,
-	commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_POLICY_TEMPLATE: true,
-	commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_BILLING_TARIFF:  true,
-	commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_ROUTING_TABLE:   true,
-	commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_NUMBER_RANGE:    true,
-	commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER:         true,
-	commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_OPERATOR:        true,
+	commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PIPELINE:            true,
+	commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_POLICY_RULESET:      true,
+	commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_POLICY_TEMPLATE:     true,
+	commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_BILLING_TARIFF:      true,
+	commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_ROUTING_TABLE:       true,
+	commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_NUMBER_RANGE:        true,
+	commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PARTNER:             true,
+	commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_OPERATOR:            true,
+	commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_CATEGORY:            true,
+	commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_CTN:                 true,
+	commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_PATTERN_PLACEHOLDER: true,
+	commonv1.ConfigEntityType_CONFIG_ENTITY_TYPE_GUIDE:               true,
 }
 
 // DecodeConfigChangeEvent — чистая функция, разбор одного сообщения.

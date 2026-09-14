@@ -23,4 +23,10 @@ FROM eclipse-temurin:25-jre
 WORKDIR /app
 COPY --from=builder /build/target/message-state-resolver-0.1.0.jar /app/message-state-resolver.jar
 EXPOSE 9090
+# Non-root — matches the UID:GID used across every non-distroless base image
+# in this repo (Rust debian:bookworm-slim, nginx:alpine frontends); distroless
+# Go images use their own baked-in :nonroot tag (uid 65532) instead.
+RUN groupadd --system --gid 10001 mpp \
+    && useradd --system --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin mpp
+USER 10001:10001
 ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75", "-XX:InitialRAMPercentage=50", "-XX:StartFlightRecording=filename=/tmp/message-state-resolver.jfr,duration=150s,dumponexit=true,settings=profile", "-jar", "/app/message-state-resolver.jar"]
