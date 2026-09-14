@@ -24,9 +24,19 @@ CREATE USER IF NOT EXISTS partner_api_reader IDENTIFIED WITH plaintext_password 
 GRANT SELECT, INSERT, ALTER ON analytics.stage_events TO analytics_writer;
 GRANT SELECT, INSERT, ALTER ON analytics.stage_events_hourly_mv TO analytics_writer;
 GRANT CREATE TABLE ON analytics.* TO analytics_writer;
+-- EnsureSchema (services/analytics-writer/internal/store/store.go) always
+-- runs `CREATE DATABASE IF NOT EXISTS analytics` unconditionally at startup
+-- — ClickHouse requires CREATE DATABASE to even attempt this statement, it
+-- doesn't skip the privilege check just because the database already
+-- exists (created by CLICKHOUSE_DB env var at container init). Without
+-- this grant analytics-writer fails to start on every restart, not just
+-- the first one.
+GRANT CREATE DATABASE ON analytics.* TO analytics_writer;
 
 GRANT SELECT, INSERT, ALTER ON analytics.operator_pdu_log TO pdu_log_writer;
 GRANT CREATE TABLE ON analytics.* TO pdu_log_writer;
+-- Same unconditional CREATE DATABASE IF NOT EXISTS at startup, see comment above.
+GRANT CREATE DATABASE ON analytics.* TO pdu_log_writer;
 
 GRANT SELECT ON analytics.stage_events TO analytics_reader;
 GRANT SELECT ON analytics.operator_pdu_log TO analytics_reader;

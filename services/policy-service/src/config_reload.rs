@@ -269,8 +269,51 @@ pub fn handle_config_change(overlay: &ConfigOverlay, event: &ConfigChangeEvent) 
     }
 }
 
+/// 2026-09-14, реальная находка полного replay на живом стенде (не
+/// гипотетическая): `build_live_state` пересобирает `CompiledRuleset`
+/// (Aho-Corasick автомат по ВСЕМ текущим шаблонам, `template_matching.rs`
+/// `CompiledRuleset::new`) — это настоящая O(n) работа, не бесплатный
+/// клон. Вызов на КАЖДОЕ сообщение во время replay compacted-топика
+/// (`build_config_consumer` выше — уникальный `group_id` на каждый старт,
+/// намеренно, чтобы гарантировать полный replay) даёт O(n) вызовов ×
+/// растущий O(n) на каждый = O(n²) суммарно. При ~6323 реальных шаблонах
+/// (см. doc-комментарий модуля) это заняло несколько МИНУТ на каждом
+/// рестарте процесса — измерено напрямую (docker stats: контейнер держал
+/// ~100% CPU, пока полностью не переиграет топик), не предположение.
+/// routing-service/destination-resolution-service вызывают свой
+/// build_snapshot() на каждое сообщение тем же паттерном, но там это
+/// дешёвая операция (без regex/автомат-компиляции) — там O(n²) с O(1)
+/// внутри всё равно быстро на n≈6000.
+///
+/// Фикс: не пересобирать на каждое сообщение — помечать "грязным" и
+/// пересобирать по таймеру (`POLICY_LIVE_STATE_REBUILD_INTERVAL_MS`,
+/// дефолт 100мс). Offset коммитится сразу как раньше (durability не
+/// затронута); видимость нового состояния в live ArcSwap теперь отстаёт от
+/// применения overlay не более чем на интервал таймера — с запасом для
+/// hot-reload конфига (секунды, не миллисекунды, были и так приемлемы), и
+/// коллапсирует O(n²) до O(n + replay_duration/interval × n).
+fn rebuild_interval_ms() -> u64 {
+    std::env::var("POLICY_LIVE_STATE_REBUILD_INTERVAL_MS").ok().and_then(|v| v.parse().ok()).filter(|v| *v > 0).unwrap_or(100)
+}
+
 pub async fn run_loop(consumer: StreamConsumer, overlay: Arc<ConfigOverlay>, live: Arc<ArcSwap<PolicyLiveState>>) {
     consumer.subscribe(&[TOPIC]).expect("не удалось подписаться на config.changes");
+
+    let dirty = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let dirty = dirty.clone();
+        let overlay = overlay.clone();
+        let live = live.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(rebuild_interval_ms()));
+            loop {
+                interval.tick().await;
+                if dirty.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                    live.store(Arc::new(overlay.build_live_state()));
+                }
+            }
+        });
+    }
 
     loop {
         match consumer.recv().await {
@@ -289,9 +332,9 @@ pub async fn run_loop(consumer: StreamConsumer, overlay: Arc<ConfigOverlay>, liv
                 };
 
                 if handle_config_change(&overlay, &event) {
-                    live.store(Arc::new(overlay.build_live_state()));
+                    dirty.store(true, std::sync::atomic::Ordering::Release);
                     tracing::info!(
-                        "config.changes: policy обновлён (entity_type={}, entity_id={}, status={}) — снапшот пересобран",
+                        "config.changes: policy обновлён (entity_type={}, entity_id={}, status={}) — снапшот помечен к пересборке",
                         event.entity_type,
                         event.entity_id,
                         event.status

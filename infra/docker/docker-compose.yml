@@ -427,16 +427,20 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       RUST_LOG: info
-      # 2026-08-13 1500 TPS push, второй раунд — см. pipeline-engine выше.
-      # Пул независимых Kafka-producer'ов. Один общий FutureProducer на
-      # 1024 конкурентных задач — последовательная точка: librdkafka держит
-      # одно TCP-соединение и один I/O-поток на брокер НА КЛИЕНТА, а clone()
-      # это Arc на тот же клиент. Измерено на pipeline-engine (500 TPS): 79%
-      # вызовов send() дольше 50мс, e2e p95 2934мс; с пулом=4 — 2.1% и 940мс.
-      # Здесь конкурентность ВЫШЕ, чем была там (1024 против 768).
-      # 8 давало регрессию — больше нативных клиентов означает больше
-      # OS-потоков librdkafka и scheduling-контеншн внутри контейнера.
-      DESTINATION_RESOLUTION_PRODUCER_POOL_SIZE: "${DESTINATION_RESOLUTION_PRODUCER_POOL_SIZE:-4}"
+      # 2026-09-14, дефолт откачен на 1 (эффективно один producer, как и было
+      # до этой переменной) — измерено A/B на тихой 12-ядерной машине: этот
+      # пул + пул в policy/routing одновременно с pipeline-engine's
+      # (PIPELINE_PRODUCER_POOL_SIZE=4) дал РЕГРЕССИЮ, не улучшение (500 TPS,
+      # честный e2e через Postgres message_lifecycle_history: p95
+      # 936мс->3905мс при включении этих трёх). Один pipeline-engine's пул=4
+      # сам по себе — подтверждённое улучшение (см. RYZEN_500TPS_FINDINGS.md);
+      # добавление тех же пулов ЕЩЁ в трёх сервисах одновременно — больше
+      # нативных librdkafka-клиентов/OS-потоков суммарно по стенду, чем
+      # реально помогает, тот же класс контеншена, что и pool=8 в одном
+      # сервисе. Оставлено env-переключаемым для дальнейшего A/B (например
+      # пул в ОДНОМ из трёх вместо всех сразу), не удалено — код рабочий,
+      # просто дефолт был не откалиброван перед тем, как попасть в компоуз.
+      DESTINATION_RESOLUTION_PRODUCER_POOL_SIZE: "${DESTINATION_RESOLUTION_PRODUCER_POOL_SIZE:-1}"
       DESTINATION_RESOLUTION_CONCURRENCY: "1024"
     depends_on:
       kafka:
@@ -454,16 +458,12 @@ services:
       REDIS_RUNTIME_PORT: "6379"
       REDIS_RUNTIME_PASSWORD: mpp_local_dev
       RUST_LOG: info
-      # 2026-08-13 1500 TPS push, второй раунд — см. pipeline-engine выше.
-      # Пул независимых Kafka-producer'ов. Один общий FutureProducer на
-      # 1024 конкурентных задач — последовательная точка: librdkafka держит
-      # одно TCP-соединение и один I/O-поток на брокер НА КЛИЕНТА, а clone()
-      # это Arc на тот же клиент. Измерено на pipeline-engine (500 TPS): 79%
-      # вызовов send() дольше 50мс, e2e p95 2934мс; с пулом=4 — 2.1% и 940мс.
-      # Здесь конкурентность ВЫШЕ, чем была там (1024 против 768).
-      # 8 давало регрессию — больше нативных клиентов означает больше
-      # OS-потоков librdkafka и scheduling-контеншн внутри контейнера.
-      POLICY_PRODUCER_POOL_SIZE: "${POLICY_PRODUCER_POOL_SIZE:-4}"
+      # 2026-09-14, дефолт откачен на 1 — см. идентичный комментарий у
+      # DESTINATION_RESOLUTION_PRODUCER_POOL_SIZE выше (destination-resolution-service):
+      # включение пулов здесь + routing + pipeline-engine's одновременно дало
+      # РЕГРЕССИЮ на честном A/B (p95 936мс->3905мс, Postgres
+      # message_lifecycle_history), не улучшение.
+      POLICY_PRODUCER_POOL_SIZE: "${POLICY_PRODUCER_POOL_SIZE:-1}"
       POLICY_CONCURRENCY: "1024"
     depends_on:
       kafka:
@@ -589,16 +589,12 @@ services:
       - "9097:9090"
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      # 2026-08-13 1500 TPS push, второй раунд — см. pipeline-engine выше.
-      # Пул независимых Kafka-producer'ов. Один общий FutureProducer на
-      # 1024 конкурентных задач — последовательная точка: librdkafka держит
-      # одно TCP-соединение и один I/O-поток на брокер НА КЛИЕНТА, а clone()
-      # это Arc на тот же клиент. Измерено на pipeline-engine (500 TPS): 79%
-      # вызовов send() дольше 50мс, e2e p95 2934мс; с пулом=4 — 2.1% и 940мс.
-      # Здесь конкурентность ВЫШЕ, чем была там (1024 против 768).
-      # 8 давало регрессию — больше нативных клиентов означает больше
-      # OS-потоков librdkafka и scheduling-контеншн внутри контейнера.
-      ROUTING_PRODUCER_POOL_SIZE: "${ROUTING_PRODUCER_POOL_SIZE:-4}"
+      # 2026-09-14, дефолт откачен на 1 — см. идентичный комментарий у
+      # DESTINATION_RESOLUTION_PRODUCER_POOL_SIZE (destination-resolution-service):
+      # включение пулов здесь + policy + pipeline-engine's одновременно дало
+      # РЕГРЕССИЮ на честном A/B (p95 936мс->3905мс, Postgres
+      # message_lifecycle_history), не улучшение.
+      ROUTING_PRODUCER_POOL_SIZE: "${ROUTING_PRODUCER_POOL_SIZE:-1}"
       ROUTING_CONCURRENCY: "1024"
     depends_on:
       kafka:
