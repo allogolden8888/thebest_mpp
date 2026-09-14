@@ -21,7 +21,7 @@
 - **Observability**: многие `/metrics` отдают только `*_up 1`, OpenTelemetry на `noopExporter`, нет alert rules/дашбордов/централизованных логов/реального OTel Collector (уже отложено в `development_plan.md:206`).
 - **Security**: Vault standalone/file storage без HA/auto-unseal, TLS выключен (`infra/terraform/vault.tf:5`); Kafka — plaintext listener без SASL/ACL, хотя HLD требует ACL (`infra/kafka/generate_kafka_topics.py:201`); один Postgres-юзер на все сервисы, ClickHouse — `admin` (`infra/terraform/postgresql.tf:40`); ни один Dockerfile не задаёт `USER`, нет pod security context.
 - **Конкурентные изменения**: self-service делает read-modify-write всего partner-документа без ETag/expected version/idempotency key (`partner-self-service-api/internal/httpapi/partnerconfig.go:84`) — параллельные изменения могут тихо затереть друг друга.
-- **Autoscaling**: KEDA считает topic как `stage.<service-name>`, но, например, Config Cache Projector потребляет `config.changes` (`k8s/generate_manifests.py:559`, `config-cache-projector/internal/kafkaio/consumer.go:16`) — большинство autoscaling-сигналов смотрит не туда.
+- ~~**Autoscaling**~~ ✅ закрыто 2026-09-11 (см. «Журнал работ», п.5): KEDA теперь несёт явный список `(topic, consumerGroup)` на сервис, включая multi-topic consumers; producer-only сервисы больше не получают фиктивный scaler.
 - **Capacity/DR**: модель до 20k TPS расчётная, не измеренная (`capacity_model.md:4`); локальный результат на 300 TPS нестабилен и выше целевого p99 (`PLATFORM_STATE_FOR_REVIEW.md:9`); нет проверенного backup/restore, RPO/RTO, DR-топологии, chaos-прогонов, production runbook.
 
 ### P2 — функциональная полнота
