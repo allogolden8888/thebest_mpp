@@ -20,7 +20,6 @@ use crate::ip_allowlist;
 use crate::msgctx;
 use crate::request::{RawRequest, ValidatedRequest, ValidationError, validate_request_schema};
 use crate::segmentation::compute_segments;
-use arc_swap::ArcSwap;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -36,13 +35,12 @@ use tokio::sync::Semaphore;
 
 pub struct AppState {
     /// BACKOFFICE_ROADMAP.md P0 #4: hot-swappable, not a one-time-loaded
-    /// value — `ArcSwap` (lock-free atomic pointer swap) so this hot-path
-    /// read (every request goes through `authorize_and_admit`) never
-    /// blocks on the `config.changes` consumer publishing a new snapshot
-    /// (`config_reload.rs`). Static-file fallback (`PARTNER_CONFIG_PATH`
-    /// set explicitly) still goes through this same field — it's just an
-    /// `ArcSwap` that's never mutated after the initial store.
-    pub partner_snapshot: Arc<ArcSwap<PartnerSnapshot>>,
+    /// value — `PartnerSnapshot` holds its state behind its own
+    /// `Arc<RwLock<..>>` (see `partner_config.rs`) and is cheap to clone,
+    /// so this hot-path read (every request goes through
+    /// `authorize_and_admit`) always sees whatever `config_reload.rs`'s
+    /// `config.changes` consumer last wrote, without an extra swap layer.
+    pub partner_snapshot: PartnerSnapshot,
     pub auth_verifier: Box<dyn AuthVerifier>,
     pub admission_gate: Box<dyn AdmissionGate>,
     pub rate_limiter: RateLimiter,
@@ -224,12 +222,7 @@ async fn handle_send_message(
         sandbox: header_string(&headers, "x-sandbox").as_deref() == Some("true"),
     };
 
-    // `load_full()` (owned Arc clone, not a borrowed Guard) — authorize_and_admit
-    // is async and awaits on auth_verifier.verify below; an ArcSwap Guard
-    // held across an .await would tie this request's view of the snapshot
-    // to a borrow that isn't necessarily Send-safe across suspension
-    // points, whereas an owned Arc<PartnerSnapshot> is trivially so.
-    let partner_snapshot = state.partner_snapshot.load_full();
+    let partner_snapshot = state.partner_snapshot.clone();
     let validated = match authorize_and_admit(
         &raw,
         &partner_snapshot,

@@ -16,13 +16,6 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 uuid = { version = "1", features = ["v4"] }
-# arc-swap — BACKOFFICE_ROADMAP.md P0 #4: партнёрский снапшот раньше грузился
-# один раз из статического файла и никогда не обновлялся. Тот же примитив,
-# что уже реально подключён к config.changes у destination-resolution-service/
-# policy-service/pipeline-engine/routing-service (см. их config_reload.rs) —
-# lock-free atomic swap, читатели (authorize_and_admit на каждый HTTP-запрос)
-# никогда не блокируются на писателе (config.changes consumer).
-arc-swap = "1"
 # reqwest — единственный HTTP-клиент в этом сервисе, добавлен ради
 # vault_auth.rs (VaultAuthVerifier читает partner credentials из живого
 # Vault вместо статических PARTNER_CRED_* env-переменных). rustls-tls (не
