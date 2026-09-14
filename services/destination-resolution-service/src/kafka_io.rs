@@ -22,6 +22,7 @@ use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::message::Message as _;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::{Offset, TopicPartitionList};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
@@ -94,6 +95,62 @@ pub fn build_producer(bootstrap_servers: &str) -> FutureProducer {
         .set("linger.ms", "5")
         .create()
         .expect("не удалось создать Kafka producer")
+}
+
+/// Пул независимых producer'ов вместо одного общего.
+///
+/// ИЗМЕРЕНО на тихом стенде (Ryzen 5 7600X, 12 CPU; RYZEN_500TPS_FINDINGS.md):
+/// в pipeline-engine один `FutureProducer`, обслуживавший ~768 конкурентных
+/// tokio-тасков, стал последовательной точкой — на 500 TPS 79% вызовов
+/// `send()` занимали >50мс (118344 из ~150000), e2e p95 2934мс. Пул из 4
+/// независимых клиентов снизил долю медленных до 2.1%, e2e p95 до 940мс.
+///
+/// Причина не в переполнении локальной очереди (это чинилось отдельно через
+/// `queue.buffering.max.messages`, см. `build_producer`), а в том, что
+/// librdkafka держит ОДНО TCP-соединение и один внутренний I/O-поток на
+/// брокер НА КЛИЕНТА, а `FutureProducer::clone()` — Arc на тот же клиент,
+/// то есть параллелизма не добавляет. Простаивающие ядра не могут
+/// распараллелить трафик через одно соединение — этим объясняется
+/// наблюдавшаяся ранее полка по CPU при незакрытом бюджете латентности.
+///
+/// Здесь тот же паттерн и КРАТНО большая конкурентность: `DESTINATION_RESOLUTION_CONCURRENCY` по
+/// умолчанию 1024 против 768 у pipeline-engine, и через этот сервис
+/// проходит каждое сообщение.
+///
+/// Размер по умолчанию 4, а не больше: на 8 измерена РЕГРЕССИЯ (доля
+/// медленных send выросла 2.1% -> 18%) — каждый нативный клиент librdkafka
+/// приносит свои OS-потоки, и после некоторого порога это даёт
+/// scheduling-контеншн внутри контейнера вместо параллелизма. Тот же класс,
+/// что задокументирован для MAX_CONCURRENT_SUBMITS в
+/// operator-smpp-session-manager.
+pub struct ProducerPool {
+    producers: Arc<Vec<FutureProducer>>,
+    next: Arc<AtomicUsize>,
+}
+
+impl ProducerPool {
+    pub fn new(bootstrap_servers: &str, size: usize) -> Self {
+        let size = size.max(1);
+        let producers = (0..size).map(|_| build_producer(bootstrap_servers)).collect();
+        Self { producers: Arc::new(producers), next: Arc::new(AtomicUsize::new(0)) }
+    }
+
+    /// Round-robin. Упорядоченность в партиции не страдает: сервис публикует
+    /// РОВНО ОДНО событие на входящую запись, поэтому двух одновременных
+    /// публикаций с одним ключом не бывает по построению.
+    pub fn pick(&self) -> FutureProducer {
+        let idx = self.next.fetch_add(1, AtomicOrdering::Relaxed) % self.producers.len();
+        self.producers[idx].clone()
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.producers.len()
+    }
+}
+
+pub fn producer_pool_size() -> usize {
+    std::env::var("DESTINATION_RESOLUTION_PRODUCER_POOL_SIZE").ok().and_then(|v| v.parse().ok()).filter(|v| *v > 0).unwrap_or(4)
 }
 
 /// Ядро обработки одного сообщения — вынесено отдельно от Kafka-цикла,
@@ -180,7 +237,7 @@ async fn process_one_record(payload: &[u8], producer: &FutureProducer, snapshot:
     true
 }
 
-pub async fn run_loop(consumer: StreamConsumer, producer: FutureProducer, live_snapshot: Arc<ArcSwap<Snapshot>>) {
+pub async fn run_loop(consumer: StreamConsumer, producer_pool: ProducerPool, live_snapshot: Arc<ArcSwap<Snapshot>>) {
     consumer
         .subscribe(&[INPUT_TOPIC])
         .expect("не удалось подписаться на stage.destination-resolution");
@@ -216,7 +273,7 @@ pub async fn run_loop(consumer: StreamConsumer, producer: FutureProducer, live_s
 
                 let permit = semaphore.clone().acquire_owned().await.expect("semaphore не должен закрываться");
                 let consumer_task = consumer.clone();
-                let producer_task = producer.clone();
+                let producer_task = producer_pool.pick();
                 let snapshot = live_snapshot.load_full();
                 let tracker_task = tracker.clone();
                 let key_task = key.clone();

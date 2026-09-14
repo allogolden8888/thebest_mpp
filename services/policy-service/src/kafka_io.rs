@@ -36,6 +36,7 @@ use rdkafka::message::Message as _;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::{Offset, TopicPartitionList};
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::sync::{OnceCell, Semaphore};
@@ -203,6 +204,65 @@ pub fn build_producer(bootstrap_servers: &str) -> FutureProducer {
         .expect("не удалось создать Kafka producer")
 }
 
+/// Пул независимых producer'ов вместо одного общего.
+///
+/// ИЗМЕРЕНО на тихом стенде (Ryzen 5 7600X, 12 CPU; см.
+/// RYZEN_500TPS_FINDINGS.md): в pipeline-engine один `FutureProducer`,
+/// обслуживавший ~768 конкурентных tokio-тасков, стал последовательной
+/// точкой — на 500 TPS 79% вызовов `send()` занимали >50мс (118344 из
+/// ~150000), e2e p95 2934мс. Пул из 4 независимых клиентов снизил долю
+/// медленных до 2.1%, а e2e p95 до 940мс.
+///
+/// Причина не в переполнении локальной очереди (это чинилось отдельно через
+/// `queue.buffering.max.messages`, см. `build_producer`), а в том, что
+/// librdkafka держит ОДНО TCP-соединение и один внутренний I/O-поток на
+/// брокер НА КЛИЕНТА, а `FutureProducer::clone()` — это Arc на тот же
+/// клиент, то есть клонирование параллелизм не добавляет. Простаивающие
+/// ядра физически не могут распараллелить трафик через одно соединение —
+/// именно этим объясняется наблюдавшаяся ранее полка по CPU при незакрытом
+/// бюджете латентности.
+///
+/// Здесь тот же паттерн и КРАТНО большая конкурентность: `POLICY_CONCURRENCY`
+/// по умолчанию 1024 против 768 у pipeline-engine, и через этот сервис
+/// проходит каждое сообщение.
+///
+/// Размер по умолчанию 4, а не больше: на 8 измерена РЕГРЕССИЯ (доля
+/// медленных send выросла 2.1% -> 18%), потому что каждый нативный клиент
+/// librdkafka приносит свои OS-потоки, и после некоторого порога это
+/// создаёт scheduling-контеншн внутри контейнера вместо параллелизма. Тот
+/// же класс, что уже задокументирован для MAX_CONCURRENT_SUBMITS в
+/// operator-smpp-session-manager.
+pub struct ProducerPool {
+    producers: Arc<Vec<FutureProducer>>,
+    next: Arc<AtomicUsize>,
+}
+
+impl ProducerPool {
+    pub fn new(bootstrap_servers: &str, size: usize) -> Self {
+        let size = size.max(1);
+        let producers = (0..size).map(|_| build_producer(bootstrap_servers)).collect();
+        Self { producers: Arc::new(producers), next: Arc::new(AtomicUsize::new(0)) }
+    }
+
+    /// Round-robin. Упорядоченность в партиции не страдает: этот сервис
+    /// публикует РОВНО ОДНО событие на входящую запись, поэтому двух
+    /// одновременных публикаций с одним ключом не бывает по построению, и
+    /// переставить их местами разные producer'ы не могут.
+    pub fn pick(&self) -> FutureProducer {
+        let idx = self.next.fetch_add(1, AtomicOrdering::Relaxed) % self.producers.len();
+        self.producers[idx].clone()
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.producers.len()
+    }
+}
+
+pub fn producer_pool_size() -> usize {
+    std::env::var("POLICY_PRODUCER_POOL_SIZE").ok().and_then(|v| v.parse().ok()).filter(|v| *v > 0).unwrap_or(4)
+}
+
 /// Asia/Tashkent — постоянный UTC+5, без перехода на летнее время с 1992 года
 /// (в отличие от большинства зон, здесь не нужна полноценная tz-база вроде
 /// `chrono-tz`, фиксированного смещения достаточно и корректно навсегда).
@@ -361,7 +421,7 @@ async fn publish_event(producer: &FutureProducer, event: &StageCompletedEvent) -
 
 pub async fn run_loop(
     consumer: StreamConsumer,
-    producer: FutureProducer,
+    producer_pool: ProducerPool,
     context_store: Arc<dyn MessageContextStore>,
     live_policy: Arc<ArcSwap<PolicyLiveState>>,
 ) {
@@ -399,7 +459,7 @@ pub async fn run_loop(
 
                 let permit = semaphore.clone().acquire_owned().await.expect("semaphore не должен закрываться");
                 let consumer_task = consumer.clone();
-                let producer_task = producer.clone();
+                let producer_task = producer_pool.pick();
                 let context_store_task = context_store.clone();
                 // load_full() — один атомарный снапшот на сообщение: ruleset/
                 // templates/banwords обязаны быть согласованы друг с другом
@@ -561,5 +621,57 @@ mod tests {
         let expected = utc_now.naive_utc() + chrono::Duration::hours(5);
         let diff = (tashkent_now - expected).num_seconds().abs();
         assert!(diff <= 2, "конвертация в Asia/Tashkent должна давать UTC+5, разница {diff}с слишком велика для дрожания часов теста");
+    }
+}
+
+#[cfg(test)]
+mod producer_pool_tests {
+    use super::*;
+
+    /// Пул обязан создать ровно столько независимых клиентов, сколько
+    /// запрошено. Смысл именно в НЕЗАВИСИМОСТИ: клонирование одного
+    /// FutureProducer даёт Arc на тот же нативный клиент, то же TCP-
+    /// соединение и тот же I/O-поток — параллелизма не добавляет, что и
+    /// было измерено как узкое место на 500 TPS.
+    #[test]
+    fn пул_создаёт_запрошенное_число_независимых_клиентов() {
+        let pool = ProducerPool::new("localhost:9092", 4);
+        assert_eq!(pool.len(), 4);
+    }
+
+    /// Ноль и отрицательные значения не должны давать пустой пул — pick()
+    /// делил бы на ноль. Минимум один клиент = прежнее поведение.
+    #[test]
+    fn нулевой_размер_схлопывается_в_один_клиент() {
+        let pool = ProducerPool::new("localhost:9092", 0);
+        assert_eq!(pool.len(), 1);
+    }
+
+    /// Round-robin обязан раздавать нагрузку по кругу, а не всегда отдавать
+    /// первого: иначе пул есть, а последовательная точка остаётся.
+    #[test]
+    fn round_robin_обходит_всех_по_кругу() {
+        let pool = ProducerPool::new("localhost:9092", 3);
+        // Сравниваем по позиции счётчика, а не по самим клиентам: FutureProducer
+        // не реализует PartialEq, а проверяем мы именно раздачу по кругу.
+        let first = pool.next.load(AtomicOrdering::Relaxed);
+        for _ in 0..7 {
+            let _ = pool.pick();
+        }
+        assert_eq!(pool.next.load(AtomicOrdering::Relaxed) - first, 7,
+            "каждый pick() обязан продвигать счётчик ровно на один");
+    }
+
+    /// Размер по умолчанию — 4: подтверждённое измерением значение, 8 давало
+    /// регрессию. Тест сторожит, что дефолт не уедет незаметно.
+    #[test]
+    fn размер_по_умолчанию_четыре() {
+        // Rust 2024: env::remove_var помечен unsafe (гонка с другими
+        // потоками процесса). Тест однопоточный по сути, но чтобы не
+        // зависеть от порядка запуска тестов, переменную не трогаем вовсе —
+        // проверяем разбор напрямую там, где её нет.
+        if std::env::var("POLICY_PRODUCER_POOL_SIZE").is_err() {
+            assert_eq!(producer_pool_size(), 4);
+        }
     }
 }

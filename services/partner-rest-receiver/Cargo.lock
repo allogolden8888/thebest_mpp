@@ -766,6 +766,7 @@ dependencies = [
 name = "partner-rest-receiver"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "axum",
  "prost",
  "prost-build",

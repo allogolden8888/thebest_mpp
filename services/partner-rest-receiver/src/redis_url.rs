@@ -20,6 +20,27 @@ pub fn build_redis_runtime_url() -> String {
     }
 }
 
+/// Same discretized env-var convention as `build_redis_runtime_url`, but for
+/// Configuration Redis (`redis-configuration.mpp.svc`, the third Redis
+/// instance) — BACKOFFICE_ROADMAP.md P0 #4: bootstrap/live-refresh source
+/// for the partner snapshot (`config_source.rs`). Matches
+/// `REDIS_CONFIGURATION_HOST`/`_PORT`/`_PASSWORD`, already used by
+/// config-cache-projector (Go) and billing-service's
+/// `RedisUrl.buildConfigurationUrl()` (Java) for the same Redis instance.
+pub fn build_redis_configuration_url() -> String {
+    if let Ok(v) = std::env::var("REDIS_CONFIGURATION_URL") {
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    let host = std::env::var("REDIS_CONFIGURATION_HOST").unwrap_or_else(|_| "redis-configuration.mpp.svc".to_string());
+    let port = std::env::var("REDIS_CONFIGURATION_PORT").unwrap_or_else(|_| "6379".to_string());
+    match std::env::var("REDIS_CONFIGURATION_PASSWORD") {
+        Ok(password) if !password.is_empty() => format!("redis://:{password}@{host}:{port}/0"),
+        _ => format!("redis://{host}:{port}/0"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -33,6 +54,12 @@ mod tests {
 
     fn clear_env() {
         for key in ["REDIS_RUNTIME_URL", "REDIS_RUNTIME_HOST", "REDIS_RUNTIME_PORT", "REDIS_RUNTIME_PASSWORD"] {
+            unsafe { std::env::remove_var(key) };
+        }
+    }
+
+    fn clear_configuration_env() {
+        for key in ["REDIS_CONFIGURATION_URL", "REDIS_CONFIGURATION_HOST", "REDIS_CONFIGURATION_PORT", "REDIS_CONFIGURATION_PASSWORD"] {
             unsafe { std::env::remove_var(key) };
         }
     }
@@ -74,5 +101,41 @@ mod tests {
         let url = build_redis_runtime_url();
         clear_env();
         assert_eq!(url, "redis://explicit-override/0");
+    }
+
+    #[test]
+    fn configuration_url_composes_from_discrete_vars_with_password() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_configuration_env();
+        unsafe {
+            std::env::set_var("REDIS_CONFIGURATION_HOST", "redis-config.example.internal");
+            std::env::set_var("REDIS_CONFIGURATION_PORT", "6381");
+            std::env::set_var("REDIS_CONFIGURATION_PASSWORD", "cfgpass");
+        }
+        let url = build_redis_configuration_url();
+        clear_configuration_env();
+        assert_eq!(url, "redis://:cfgpass@redis-config.example.internal:6381/0");
+    }
+
+    #[test]
+    fn configuration_url_defaults_without_any_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_configuration_env();
+        let url = build_redis_configuration_url();
+        clear_configuration_env();
+        assert_eq!(url, "redis://redis-configuration.mpp.svc:6379/0");
+    }
+
+    #[test]
+    fn configuration_url_explicit_override_takes_priority() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_configuration_env();
+        unsafe {
+            std::env::set_var("REDIS_CONFIGURATION_URL", "redis://explicit-config-override/0");
+            std::env::set_var("REDIS_CONFIGURATION_HOST", "should-be-ignored");
+        }
+        let url = build_redis_configuration_url();
+        clear_configuration_env();
+        assert_eq!(url, "redis://explicit-config-override/0");
     }
 }

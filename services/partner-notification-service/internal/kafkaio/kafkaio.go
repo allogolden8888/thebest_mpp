@@ -29,17 +29,28 @@ const (
 	TopicNotificationRetry    = "notification.retry"
 	TopicSchedulerBackground  = "scheduler.background.commands"
 	TopicNotificationArchived = "notification.archived"
+	// TopicConfigChanges — same compacted topic config-cache-projector
+	// consumes (services/config-cache-projector/internal/kafkaio/consumer.go),
+	// filtered here to entity_type=PARTNER only (see configchanges.go).
+	// Only subscribed to when running against Configuration Redis
+	// (PARTNER_CONFIG_PATH unset) — see cmd/partner-notification-service/main.go.
+	TopicConfigChanges = "config.changes"
 )
 
 type Consumer struct {
 	client *kgo.Client
 }
 
-func NewConsumer(brokers []string, groupID string) (*Consumer, error) {
+// NewConsumer — extraTopics lets callers opt this same consumer/consumer
+// group into config.changes (BACKOFFICE_ROADMAP.md P0 #4) without standing
+// up a second Kafka client: reuses the existing wiring, PollOnce loop just
+// branches on record.Topic (see HandleConfigChangeRecord vs HandleRecord).
+func NewConsumer(brokers []string, groupID string, extraTopics ...string) (*Consumer, error) {
+	topics := append([]string{TopicLifecycle, TopicNotificationRetry}, extraTopics...)
 	client, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
 		kgo.ConsumerGroup(groupID),
-		kgo.ConsumeTopics(TopicLifecycle, TopicNotificationRetry),
+		kgo.ConsumeTopics(topics...),
 		kgo.DisableAutoCommit(),
 	)
 	if err != nil {
@@ -122,8 +133,17 @@ func (p *Producer) PublishArchived(ctx context.Context, eventID string, event *e
 	return nil
 }
 
+// SnapshotSource — anything HandleRecord needs from a partner config
+// source: Application/FirstApplication (see config.Snapshot and
+// config.Store — the latter wraps the former behind an atomic pointer for
+// live config.changes-driven updates, BACKOFFICE_ROADMAP.md P0 #4).
+type SnapshotSource interface {
+	Application(partnerID, applicationID string) (config.Partner, config.Application, bool)
+	FirstApplication(partnerID string) (config.Partner, config.Application, bool)
+}
+
 type Deps struct {
-	Snapshot         config.Snapshot
+	Snapshot         SnapshotSource
 	MsgCtxStore      *msgctx.Store
 	RegistryStore    *registry.Store
 	PendingStore     *pending.Store

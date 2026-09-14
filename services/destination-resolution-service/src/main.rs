@@ -48,12 +48,12 @@ async fn main() {
     let bootstrap_servers = std::env::var("KAFKA_BOOTSTRAP_SERVERS")
         .unwrap_or_else(|_| "kafka-bootstrap.mpp.svc:9092".to_string());
     let consumer = kafka_io::build_consumer(&bootstrap_servers, "destination-resolution-service");
-    let producer = kafka_io::build_producer(&bootstrap_servers);
+    let producer_pool = kafka_io::ProducerPool::new(&bootstrap_servers, kafka_io::producer_pool_size());
     // Отдельная consumer group от stage.destination-resolution — независимые
     // офсеты/партиционирование, сбой одного цикла не должен блокировать другой.
     let config_consumer =
         config_reload::build_config_consumer(&bootstrap_servers, "destination-resolution-service-config");
     tokio::spawn(config_reload::run_loop(config_consumer, overlay, live_snapshot.clone()));
 
-    kafka_io::run_loop(consumer, producer, live_snapshot).await;
+    kafka_io::run_loop(consumer, producer_pool, live_snapshot).await;
 }
