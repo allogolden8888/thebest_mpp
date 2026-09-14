@@ -26,7 +26,7 @@ jobs:
           find . -name '*.proto' -print0 | xargs -0 protoc -I . --descriptor_set_out=/dev/null
 
   migrations:
-    name: PostgreSQL migrations (apply + partition maintenance test)
+    name: PostgreSQL migrations (versioned apply + verify)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -43,13 +43,18 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
-      - name: Apply V001-V017 in order
+      - name: Validate migration runner and immutable catalog
+        run: |
+          python3 -m unittest discover -s infra/migrations -p 'test_*.py'
+          python3 infra/migrations/migrate.py validate
+      - name: Apply, re-apply idempotently, and verify schema history
         env:
+          DATABASE_URL: postgresql://mpp_test@localhost:5432/mpp_test
           PGPASSWORD: mpp_test
         run: |
-          for f in migrations/V*.sql; do
-            psql -h localhost -U mpp_test -d mpp_test -v ON_ERROR_STOP=1 -f "$f"
-          done
+          python3 infra/migrations/migrate.py apply
+          python3 infra/migrations/migrate.py apply
+          python3 infra/migrations/migrate.py verify
 
   python-artifacts:
     name: Python-исполняемые спецификации (state machines / policy matching / config schemas)

@@ -4,6 +4,7 @@ import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import migrate
 
@@ -91,6 +92,7 @@ class DriverSqlTest(unittest.TestCase):
         self.assertLess(history_insert_position, commit_position)
         self.assertLess(commit_position, unlock_position)
         self.assertIn("SET lock_timeout = '23s'", sql)
+        self.assertIn("SET statement_timeout = '900s'", sql)
         self.assertIn("migration history drift", sql)
         self.assertIn("non-prefix migration history", sql)
         self.assertIn("'a" + "a" * 63 + "'", sql)
@@ -120,6 +122,32 @@ class DriverSqlTest(unittest.TestCase):
             migrate.build_driver_sql(
                 [self.migration()], mode="verify", lock_timeout_seconds=0
             )
+
+    def test_rejects_invalid_statement_timeout(self) -> None:
+        with self.assertRaisesRegex(migrate.MigrationError, "statement timeout"):
+            migrate.build_driver_sql(
+                [self.migration()],
+                mode="verify",
+                lock_timeout_seconds=60,
+                statement_timeout_seconds=0,
+            )
+
+    @mock.patch("migrate.subprocess.run")
+    @mock.patch("migrate.shutil.which", return_value="/usr/bin/psql")
+    def test_database_url_is_not_exposed_in_psql_argv(
+        self,
+        _which: mock.Mock,
+        run: mock.Mock,
+    ) -> None:
+        run.return_value.returncode = 0
+        database_url = "postgresql://migrator:secret@db.example/mpp"
+
+        migrate.run_psql(database_url, "SELECT 1;", "psql")
+
+        argv = run.call_args.args[0]
+        environment = run.call_args.kwargs["env"]
+        self.assertNotIn(database_url, argv)
+        self.assertEqual(environment["PGDATABASE"], database_url)
 
 
 if __name__ == "__main__":

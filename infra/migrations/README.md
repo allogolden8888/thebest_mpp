@@ -23,7 +23,9 @@ DATABASE_URL='postgresql://...' python3 infra/migrations/migrate.py verify
 
 `apply` is the pre-deploy migration job. It waits at most 60 seconds for the
 global DB lock, validates the complete applied prefix, applies pending files
-and verifies that none remain. `verify` is the application deployment gate:
+and verifies that none remain. Every SQL statement has a finite 15-minute
+timeout by default (`--statement-timeout-seconds`); size it explicitly for a
+known online migration instead of allowing DDL to wait forever. `verify` is the application deployment gate:
 it executes no migration and fails on a changed/renamed/removed migration, a
 history gap, or any unapplied version.
 
@@ -31,6 +33,12 @@ The deploy identity needs `CREATE` on the database for first installation and
 the DDL/DML privileges required by the migration files. Application identities
 should only receive permissions on their own schemas and must not be able to
 modify `mpp_migrations.schema_history`.
+
+The runner passes `DATABASE_URL` to libpq through the child environment, not
+the `psql` command line, so an embedded password is not exposed by ordinary
+process listings. Production should still use a password-free DSN with
+`PGPASSFILE` (or separate secret-injected `PG*` variables) rather than putting
+the password in `DATABASE_URL`.
 
 ## Adopting an existing database
 

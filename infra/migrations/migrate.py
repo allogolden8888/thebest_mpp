@@ -146,7 +146,12 @@ def expected_values(migrations: Sequence[Migration]) -> str:
     )
 
 
-def bootstrap_sql(lock_timeout_seconds: int, *, allow_untracked: bool = False) -> str:
+def bootstrap_sql(
+    lock_timeout_seconds: int,
+    statement_timeout_seconds: int,
+    *,
+    allow_untracked: bool = False,
+) -> str:
     managed_schemas = ", ".join(sql_literal(name) for name in MANAGED_SCHEMAS)
     untracked_guard = ""
     if not allow_untracked:
@@ -174,6 +179,7 @@ SET application_name = 'mpp-schema-migrator';
 SET lock_timeout = '{lock_timeout_seconds}s';
 SELECT pg_advisory_lock({LOCK_KEY});
 SET lock_timeout = '0';
+SET statement_timeout = '{statement_timeout_seconds}s';
 
 CREATE SCHEMA IF NOT EXISTS {HISTORY_SCHEMA};
 CREATE TABLE IF NOT EXISTS {HISTORY_SCHEMA}.{HISTORY_TABLE} (
@@ -348,19 +354,26 @@ def build_driver_sql(
     migrations: Sequence[Migration],
     mode: str,
     lock_timeout_seconds: int,
+    statement_timeout_seconds: int = 900,
     baseline_version: int | None = None,
 ) -> str:
     if lock_timeout_seconds <= 0:
         raise MigrationError("lock timeout must be positive")
+    if statement_timeout_seconds <= 0:
+        raise MigrationError("statement timeout must be positive")
 
     if mode == "baseline":
         if baseline_version is None:
             raise MigrationError("baseline mode requires --baseline-version")
         # Baseline has its own existing-schema guard. The normal bootstrap
         # guard intentionally blocks untracked installations.
-        bootstrap = bootstrap_sql(lock_timeout_seconds, allow_untracked=True)
+        bootstrap = bootstrap_sql(
+            lock_timeout_seconds,
+            statement_timeout_seconds,
+            allow_untracked=True,
+        )
     else:
-        bootstrap = bootstrap_sql(lock_timeout_seconds)
+        bootstrap = bootstrap_sql(lock_timeout_seconds, statement_timeout_seconds)
 
     driver = bootstrap + catalog_validation_sql(migrations)
     if mode == "apply":
@@ -386,16 +399,16 @@ def run_psql(database_url: str, driver_sql: str, psql_binary: str) -> None:
             driver.write(driver_sql)
             driver_path = Path(driver.name)
         os.chmod(driver_path, 0o600)
+        process_environment = os.environ.copy()
+        # libpq accepts a URI/conninfo string in PGDATABASE. Keeping it out
+        # of argv prevents an embedded password from appearing in ordinary
+        # process listings. Production should still prefer PGPASSFILE or a
+        # password-free URI plus separate PG* credentials.
+        process_environment["PGDATABASE"] = database_url
         completed = subprocess.run(
-            [
-                executable,
-                "--no-psqlrc",
-                "--dbname",
-                database_url,
-                "--file",
-                str(driver_path),
-            ],
+            [executable, "--no-psqlrc", "--file", str(driver_path)],
             check=False,
+            env=process_environment,
         )
         if completed.returncode != 0:
             raise MigrationError(
@@ -418,6 +431,12 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     parser.add_argument("--psql", default="psql", help="psql executable name or path")
     parser.add_argument("--lock-timeout-seconds", type=int, default=60)
+    parser.add_argument(
+        "--statement-timeout-seconds",
+        type=int,
+        default=900,
+        help="maximum duration of one migration statement (default: 900)",
+    )
     parser.add_argument("--baseline-version", type=int)
     parser.add_argument(
         "--acknowledge-baseline-risk",
@@ -450,6 +469,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             migrations,
             mode=args.mode,
             lock_timeout_seconds=args.lock_timeout_seconds,
+            statement_timeout_seconds=args.statement_timeout_seconds,
             baseline_version=args.baseline_version,
         )
         run_psql(args.database_url, driver_sql, args.psql)
