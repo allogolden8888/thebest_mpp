@@ -24,7 +24,9 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
 	grpcv1 "mpp/platformcontracts/grpc/v1"
@@ -141,12 +143,37 @@ func testToken(t *testing.T, f *testFixture, partnerID string, roles []string) s
 // fakeConfigServer — держит по одному активному payload'у на entity_id,
 // version инкрементируется на каждый CreateVersion (тот же контракт, что
 // реальный configuration-service). GetActiveVersion возвращает NotFound,
-// если для entity_id ещё ничего не создано.
+// если для entity_id ещё ничего не создано. CreateVersion эмулирует ту же
+// CAS-проверку, что реальный configuration-service делает в
+// store.CreateImmutableVersionAndOutbox (BACKOFFICE_ROADMAP.md, Production
+// Readiness Review, P1 "Конкурентные изменения"): expected_version=0
+// пропускает проверку (обратная совместимость), иначе сверяется с реальной
+// текущей версией этого entity_id — расхождение возвращает codes.Aborted,
+// как storeErrToStatus делает для store.ErrVersionConflict, а не молча
+// затирает payload. Без этого router-тесты не могли бы доказать, что
+// putPartnerConfig-хендлеры (applications.go/webhook.go) действительно
+// получают и правильно маппят codes.Aborted, а не просто отправляют поле,
+// которое никто не проверяет.
 type fakeConfigServer struct {
 	grpcv1.UnimplementedConfigServiceServer
 	mu       sync.Mutex
 	versions map[string]int64
 	payloads map[string][]byte
+	// forceCreateVersionErr — тест-хук: если задан, CreateVersion возвращает
+	// эту ошибку безусловно вместо реальной CAS-проверки, не трогая
+	// versions/payloads. Используется для детерминированной симуляции
+	// codes.Aborted от ConfigService (TestPutPartnerConfigConflictMapsTo409)
+	// без необходимости реально гонять два конкурентных запроса.
+	forceCreateVersionErr error
+	// onGetActiveVersion — тест-хук, вызывается синхронно ПОСЛЕ того, как
+	// GetActiveVersion прочитал текущее состояние, но ДО того, как ответ
+	// вернётся вызывающему хендлеру — точка, где реальный read-modify-write
+	// гонку и может проиграть. TestConcurrentApplicationAndSenderCreatesRace
+	// использует это, чтобы гарантированно свести оба конкурентных запроса в
+	// одной и той же точке (оба прочитали одну версию), прежде чем каждый
+	// продолжит к своему CreateVersion — иначе гонка была бы недетерминированной
+	// и тест мог бы случайно проходить без реального доказательства CAS.
+	onGetActiveVersion func()
 }
 
 func newFakeConfigServer() *fakeConfigServer {
@@ -163,6 +190,12 @@ func (f *fakeConfigServer) seed(entityID string, payload []byte) {
 func (f *fakeConfigServer) CreateVersion(ctx context.Context, req *grpcv1.CreateVersionRequest) (*grpcv1.ConfigVersionResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.forceCreateVersionErr != nil {
+		return nil, f.forceCreateVersionErr
+	}
+	if expected := req.GetExpectedVersion(); expected != 0 && f.versions[req.GetEntityId()] != expected {
+		return nil, status.Error(codes.Aborted, "version conflict: текущая версия не совпадает с expected_version")
+	}
 	f.versions[req.GetEntityId()]++
 	f.payloads[req.GetEntityId()] = req.GetPayloadJson()
 	return &grpcv1.ConfigVersionResponse{
@@ -176,15 +209,20 @@ func (f *fakeConfigServer) CreateVersion(ctx context.Context, req *grpcv1.Create
 
 func (f *fakeConfigServer) GetActiveVersion(ctx context.Context, req *grpcv1.GetActiveVersionRequest) (*grpcv1.ConfigVersionResponse, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	payload, ok := f.payloads[req.GetEntityId()]
+	version := f.versions[req.GetEntityId()]
+	hook := f.onGetActiveVersion
+	f.mu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("entity_id %q не найден", req.GetEntityId())
+	}
+	if hook != nil {
+		hook()
 	}
 	return &grpcv1.ConfigVersionResponse{
 		EntityType:  req.GetEntityType(),
 		EntityId:    req.GetEntityId(),
-		Version:     f.versions[req.GetEntityId()],
+		Version:     version,
 		Status:      "active",
 		PayloadJson: payload,
 	}, nil
@@ -455,6 +493,168 @@ func TestCreateApplicationDuplicateIDReturnsConflict(t *testing.T) {
 	status, _ := doRequest(t, f, http.MethodPost, "/v1/self-service/applications", token, body)
 	if status != http.StatusConflict {
 		t.Fatalf("ожидали 409 на дубликат application_id, получили %d", status)
+	}
+}
+
+// TestPutPartnerConfigConflictMapsToHTTP409 — BACKOFFICE_ROADMAP.md,
+// Production Readiness Review, P1 "Конкурентные изменения": прямая,
+// детерминированная симуляция codes.Aborted от ConfigService (см.
+// configuration-service/internal/grpcserver/server.go storeErrToStatus,
+// store.ErrVersionConflict) — expected_version, прочитанный этим запросом
+// через getPartnerConfig, разошёлся бы с реальной текущей версией к моменту
+// записи (кто-то другой уже записал в промежутке). writePutConfigError
+// (partnerconfig.go) обязан отличить этот код от прочих ошибок
+// нижестоящего сервиса и вернуть 409 Conflict, а не 502 Bad Gateway,
+// которым помечены все прочие сбои putPartnerConfig.
+func TestPutPartnerConfigConflictMapsToHTTP409(t *testing.T) {
+	f := newTestFixture(t)
+	f.config.seed("acme", []byte(seedPartnerConfig))
+	token := testToken(t, f, "acme", []string{"partner-admin"})
+
+	f.config.forceCreateVersionErr = status.Error(codes.Aborted, "version conflict: текущая версия не совпадает с expected_version")
+
+	body := `{"application_id":"app2","display_name":"Second","auth":{"type":"API_KEY","credential_ref":"vault://x"},"rate_limit_tps":10,"allowed_channels":["SMS"]}`
+	code, respBody := doRequest(t, f, http.MethodPost, "/v1/self-service/applications", token, body)
+	if code != http.StatusConflict {
+		t.Fatalf("ожидали 409 при codes.Aborted от ConfigService, получили %d: %s", code, respBody)
+	}
+	if !strings.Contains(string(respBody), "перечитайте") {
+		t.Fatalf("тело 409-ответа должно объяснять вызывающему, что нужно перечитать конфиг и повторить, получили: %s", respBody)
+	}
+}
+
+// TestConcurrentApplicationAndSenderCreatesRaceExactlyOneWins — реальная
+// (не последовательная) гонка двух HTTP-запросов через httptest.Server:
+// оба стартуют из одной и той же прочитанной версии конфига (см.
+// fakeConfigServer.onGetActiveVersion — барьер сводит оба GetActiveVersion
+// в одну точку до того, как любой из них продолжит к своему CreateVersion),
+// один добавляет application, другой — sender. Ровно один должен получить
+// 200/201, другой — 409, а итоговый сохранённый конфиг обязан отражать
+// РОВНО изменение победителя (append поверх актуальной версии), не оба
+// молча слитых и не оба потерянных — то же свойство, что
+// TestConcurrentCreateWithStaleExpectedVersionOneWinsOneConflicts в
+// configuration-service/internal/store/store_test.go доказывает на уровне
+// Postgres, здесь — на уровне HTTP-хендлеров этого сервиса.
+func TestConcurrentApplicationAndSenderCreatesRaceExactlyOneWins(t *testing.T) {
+	f := newTestFixture(t)
+	f.config.seed("acme", []byte(seedPartnerConfig))
+	adminToken := testToken(t, f, "acme", []string{"partner-admin"})
+
+	const n = 2
+	var barrierOnce sync.Once
+	reached := make(chan struct{}, n)
+	release := make(chan struct{})
+	f.config.onGetActiveVersion = func() {
+		reached <- struct{}{}
+		barrierOnce.Do(func() {
+			go func() {
+				for i := 0; i < n; i++ {
+					<-reached
+				}
+				close(release)
+			}()
+		})
+		<-release
+	}
+
+	type result struct {
+		name string
+		code int
+		body []byte
+		err  error
+	}
+	results := make(chan result, n)
+
+	// rawRequest — тот же HTTP round-trip, что doRequest, но БЕЗ *testing.T:
+	// t.Fatalf из горутины, отличной от горутины самого теста, небезопасен
+	// (останавливает только эту горутину через runtime.Goexit, не проваливает
+	// тест) — обе гонки-запроса здесь идут из отдельных горутин, поэтому
+	// ошибки транспорта репортятся через канал results и проверяются уже в
+	// основной горутине теста ниже.
+	rawRequest := func(method, path, body string) (int, []byte, error) {
+		req, err := http.NewRequest(method, f.server.URL+path, strings.NewReader(body))
+		if err != nil {
+			return 0, nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return 0, nil, err
+		}
+		defer resp.Body.Close()
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return 0, nil, err
+		}
+		return resp.StatusCode, respBody, nil
+	}
+
+	go func() {
+		body := `{"application_id":"app-race","display_name":"Race App","auth":{"type":"API_KEY","credential_ref":"vault://x"},"rate_limit_tps":10,"allowed_channels":["SMS"]}`
+		code, respBody, err := rawRequest(http.MethodPost, "/v1/self-service/applications", body)
+		results <- result{"application", code, respBody, err}
+	}()
+	go func() {
+		body := `{"sender_id":"SENDER-RACE","type":"ALPHANAME"}`
+		code, respBody, err := rawRequest(http.MethodPost, "/v1/self-service/senders", body)
+		results <- result{"sender", code, respBody, err}
+	}()
+
+	var successes, conflicts int
+	var winner string
+	for i := 0; i < n; i++ {
+		r := <-results
+		if r.err != nil {
+			t.Fatalf("%s: request failed: %v", r.name, r.err)
+		}
+		switch r.code {
+		case http.StatusCreated:
+			successes++
+			winner = r.name
+		case http.StatusConflict:
+			conflicts++
+		default:
+			t.Fatalf("%s: неожиданный статус %d: %s", r.name, r.code, r.body)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("ожидали ровно 1 успех и 1 конфликт из %d конкурентных read-modify-write, получили successes=%d conflicts=%d", n, successes, conflicts)
+	}
+
+	// Финальный конфиг должен отражать ИЗМЕНЕНИЕ ПОБЕДИТЕЛЯ и только его —
+	// не оба изменения (гонка не должна была молча пропустить CAS-проверку
+	// одного из хендлеров) и не ни одного (проигравший не должен был
+	// частично примениться до конфликта).
+	f.config.onGetActiveVersion = nil
+	code, listBody := doRequest(t, f, http.MethodGet, "/v1/self-service/applications", adminToken, "")
+	if code != http.StatusOK {
+		t.Fatalf("GET /applications после гонки: ожидали 200, получили %d", code)
+	}
+	var apps []application
+	if err := json.Unmarshal(listBody, &apps); err != nil {
+		t.Fatalf("decode applications failed: %v", err)
+	}
+	code, sendersBody := doRequest(t, f, http.MethodGet, "/v1/self-service/senders", adminToken, "")
+	if code != http.StatusOK {
+		t.Fatalf("GET /senders после гонки: ожидали 200, получили %d", code)
+	}
+	var senders []sender
+	if err := json.Unmarshal(sendersBody, &senders); err != nil {
+		t.Fatalf("decode senders failed: %v", err)
+	}
+
+	gotNewApp := len(apps) == 2
+	gotNewSender := len(senders) == 2
+	switch winner {
+	case "application":
+		if !gotNewApp || gotNewSender {
+			t.Fatalf("победитель — application, но итоговый конфиг: apps=%d senders=%d (ожидали apps=2 senders=1)", len(apps), len(senders))
+		}
+	case "sender":
+		if !gotNewSender || gotNewApp {
+			t.Fatalf("победитель — sender, но итоговый конфиг: apps=%d senders=%d (ожидали apps=1 senders=2)", len(apps), len(senders))
+		}
 	}
 }
 
