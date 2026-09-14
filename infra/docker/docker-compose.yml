@@ -1010,6 +1010,46 @@ services:
       vault:
         condition: service_healthy
 
+  # operator-http-gateway — services_specifictaion.md §2.3a, never added to
+  # this local stack before (Production Readiness Review P0#1/#4 live
+  # verification needs it running). Webhook auth is per-operator now
+  # (internal/webhookauth resolves OPERATOR config from Configuration Redis
+  # -> credential_ref -> Vault secret, replacing the old shared
+  # WEBHOOK_AUTH_TOKEN) — needs Configuration Redis (config-cache-projector
+  # must be up to actually populate config:current:operator:*) and Vault,
+  # same VAULT_MOUNT=secret dev convention as credential-issuer-service.
+  operator-http-gateway:
+    image: mpp/operator-http-gateway:test
+    ports:
+      - "8092:8080"
+      - "9126:9000"
+      - "9127:9090"
+    environment:
+      OPERATOR_ID: beeline_uz
+      ROUTE_ID: route-1
+      OPERATOR_SUBMIT_ENDPOINT: https://operator.example/submit
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_RUNTIME_HOST: redis-runtime
+      REDIS_RUNTIME_PORT: "6379"
+      REDIS_RUNTIME_PASSWORD: mpp_local_dev
+      REDIS_CONFIGURATION_HOST: redis-configuration
+      REDIS_CONFIGURATION_PORT: "6379"
+      REDIS_CONFIGURATION_PASSWORD: mpp_local_dev
+      VAULT_ADDR: http://vault:8200
+      VAULT_MOUNT: secret
+      VAULT_TOKEN: root-token-local-dev
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis-runtime:
+        condition: service_healthy
+      redis-configuration:
+        condition: service_healthy
+      vault:
+        condition: service_healthy
+      config-cache-projector:
+        condition: service_started
+
   incident-service:
     image: mpp/incident-service:test
     ports:
@@ -1099,19 +1139,28 @@ services:
       - "9110:9090"
       - "8081:8080"
     environment:
-      # JWT_PUBLIC_KEY_PEM — тот же общий локальный dev-only "IdP" keypair,
-      # что billing-self-service-api/compliance-api ниже, используется этим
-      # сервисом только чтобы ВАЛИДИРОВАТЬ чужие (гипотетические Keycloak)
-      # токены — оставлен общим намеренно, отдельного смысла под конкретно
-      # ЭТУ половину нет.
+      # JWT_PUBLIC_KEY_PEM — BACKOFFICE_ROADMAP.md Production Readiness Review
+      # P0#5: main.go's Validator (validates EVERY incoming request, self-
+      # issued login tokens included) and TokenIssuer (signs them, see
+      # JWT_PRIVATE_KEY_PEM below) both load from these two env vars — there
+      # is only one Validator instance, so this MUST be the public half of
+      # the SAME keypair as JWT_PRIVATE_KEY_PEM, not the shared dev-only
+      # "hypothetical Keycloak" keypair billing-self-service-api/
+      # compliance-api use below. Found live: a mismatched pair here makes
+      # every self-issued login token fail signature verification
+      # (crypto/rsa: verification error) the instant it comes back in on
+      # the next request. Once a real external IdP exists for partner-portal
+      # users, validating ITS tokens too will need a second, separate
+      # mechanism (e.g. JWKS-based, like backoffice-api's own rotation) —
+      # not a second static env var doing double duty like this one did.
       JWT_PUBLIC_KEY_PEM: |
         -----BEGIN PUBLIC KEY-----
-        MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAr6ChhBR6hStwLBcl/n3z
-        N+mFv4S7ocHFZaTdbD5vLRfOcIPIKrXs5Oaf6AKIr2JjKSGI2JWbpprDRw2P4ZK9
-        g6USZ9VYvudEh9I+In7x9ds+4TNdaQTh8OKZWq6mFF5Kl6aLuwd5h6er0GoDRDip
-        jrD61NZKZp+gMk6CkH5KbiK0sy3Yp/Ip0ELbMkzhJi8nw2Rd5qVbI2wzoi+h6/wb
-        Ml4tgq78NFWc4GB96pWLZIotzmZypbqTCOzwDqf5DBGYABHb/2OOF8jmXaodXiWk
-        h6xvXwJXLNNqjAE6Dy5OfO0RYWHhm7qQ+62pzOO1Kj63YDr7FKydtVswNUmIfgj9
+        MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAty4rEufFa7cdTbPGzHrX
+        BRZsxugyYHaYTgP4+zFRFx/yl4g8E4oztU6SRT3jAYxloirIXoeON6cY5xSjTWWw
+        O9dYSd4Jd4jS1I/ymLSBrhKQWVWV54xJpG0QO15irBrpBd4iTH+NzfpEr/Z4jKQe
+        RK1jbE5FiJ9ePv9Qle25tbmsAeGjaAOibkaLgHTtbaDHI8mKdhxpNHcE0cp/je3L
+        btImAiuI8ZZohbdYDK42PYsbgZgPqUlqhAKrDW4JA0Z81kxqXrlqMr3vTOzzGl1F
+        RGFIYeXulOIz8SvyNdapLz9KlG2PJUcVs+KHSQPHOW3ACQbaEctZbpi2X9NTqfaf
         KwIDAQAB
         -----END PUBLIC KEY-----
       # JWT_PRIVATE_KEY_PEM — BACKOFFICE_ROADMAP.md Production Readiness
