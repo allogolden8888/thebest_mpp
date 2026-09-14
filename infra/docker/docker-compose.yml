@@ -376,6 +376,15 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       RUST_LOG: info
       # 2026-08-13 1500 TPS push, второй раунд — см. pipeline-engine выше.
+      # Пул независимых Kafka-producer'ов. Один общий FutureProducer на
+      # 1024 конкурентных задач — последовательная точка: librdkafka держит
+      # одно TCP-соединение и один I/O-поток на брокер НА КЛИЕНТА, а clone()
+      # это Arc на тот же клиент. Измерено на pipeline-engine (500 TPS): 79%
+      # вызовов send() дольше 50мс, e2e p95 2934мс; с пулом=4 — 2.1% и 940мс.
+      # Здесь конкурентность ВЫШЕ, чем была там (1024 против 768).
+      # 8 давало регрессию — больше нативных клиентов означает больше
+      # OS-потоков librdkafka и scheduling-контеншн внутри контейнера.
+      DESTINATION_RESOLUTION_PRODUCER_POOL_SIZE: "${DESTINATION_RESOLUTION_PRODUCER_POOL_SIZE:-4}"
       DESTINATION_RESOLUTION_CONCURRENCY: "1024"
     depends_on:
       kafka:
@@ -394,6 +403,15 @@ services:
       REDIS_RUNTIME_PASSWORD: mpp_local_dev
       RUST_LOG: info
       # 2026-08-13 1500 TPS push, второй раунд — см. pipeline-engine выше.
+      # Пул независимых Kafka-producer'ов. Один общий FutureProducer на
+      # 1024 конкурентных задач — последовательная точка: librdkafka держит
+      # одно TCP-соединение и один I/O-поток на брокер НА КЛИЕНТА, а clone()
+      # это Arc на тот же клиент. Измерено на pipeline-engine (500 TPS): 79%
+      # вызовов send() дольше 50мс, e2e p95 2934мс; с пулом=4 — 2.1% и 940мс.
+      # Здесь конкурентность ВЫШЕ, чем была там (1024 против 768).
+      # 8 давало регрессию — больше нативных клиентов означает больше
+      # OS-потоков librdkafka и scheduling-контеншн внутри контейнера.
+      POLICY_PRODUCER_POOL_SIZE: "${POLICY_PRODUCER_POOL_SIZE:-4}"
       POLICY_CONCURRENCY: "1024"
     depends_on:
       kafka:
@@ -520,6 +538,15 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       # 2026-08-13 1500 TPS push, второй раунд — см. pipeline-engine выше.
+      # Пул независимых Kafka-producer'ов. Один общий FutureProducer на
+      # 1024 конкурентных задач — последовательная точка: librdkafka держит
+      # одно TCP-соединение и один I/O-поток на брокер НА КЛИЕНТА, а clone()
+      # это Arc на тот же клиент. Измерено на pipeline-engine (500 TPS): 79%
+      # вызовов send() дольше 50мс, e2e p95 2934мс; с пулом=4 — 2.1% и 940мс.
+      # Здесь конкурентность ВЫШЕ, чем была там (1024 против 768).
+      # 8 давало регрессию — больше нативных клиентов означает больше
+      # OS-потоков librdkafka и scheduling-контеншн внутри контейнера.
+      ROUTING_PRODUCER_POOL_SIZE: "${ROUTING_PRODUCER_POOL_SIZE:-4}"
       ROUTING_CONCURRENCY: "1024"
     depends_on:
       kafka:
@@ -780,6 +807,52 @@ services:
         condition: service_healthy
       redis-runtime:
         condition: service_healthy
+
+  # Partner SMPP Gateway — services_specifictaion.md §2.2. Добавлен для
+  # live-верификации Production Readiness Review P0#4 (live partner SMPP
+  # config reload, см. services/partner-smpp-gateway/README.md) — раньше не
+  # был подключён к этому стеку вообще. AUTH_VERIFIER_MODE=vault (дефолт) —
+  # реальный путь: bootstrap из Configuration Redis + живой config.changes
+  # consumer (см. Main.java), реальный Vault-read через VaultAuthenticator.
+  # VAULT_KV_MOUNT=secret (не дефолтный "mpp" в коде) — этот dev-стек уже
+  # использует mount "secret" для credential-issuer-service (см. её
+  # комментарий выше "дефолтный KV2-mount, который dev-mode уже включает
+  # сам"), не отдельный "mpp"-mount, которого в этом Vault-инстансе нет.
+  # hostname — явно, не полагаемся на HOSTNAME по умолчанию (Docker сам
+  # выставит его равным hostname контейнера) — тот же приём, что
+  # operator-smpp-session-manager выше, нужен consistent instance id для
+  # register_session (ChannelRegistry/SessionRedisRegistry) и уникального
+  # config.changes consumer group id (ConfigChangeConsumer).
+  partner-smpp-gateway:
+    image: mpp/partner-smpp-gateway:test
+    hostname: partner-smpp-gateway-0
+    ports:
+      - "2775:2775"
+      - "9124:9000"
+      - "9125:9090"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_RUNTIME_HOST: redis-runtime
+      REDIS_RUNTIME_PORT: "6379"
+      REDIS_RUNTIME_PASSWORD: mpp_local_dev
+      REDIS_CONFIGURATION_HOST: redis-configuration
+      REDIS_CONFIGURATION_PORT: "6379"
+      REDIS_CONFIGURATION_PASSWORD: mpp_local_dev
+      AUTH_VERIFIER_MODE: vault
+      VAULT_ADDR: http://vault:8200
+      VAULT_KV_MOUNT: secret
+      VAULT_TOKEN: root-token-local-dev
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis-runtime:
+        condition: service_healthy
+      redis-configuration:
+        condition: service_healthy
+      vault:
+        condition: service_healthy
+      config-cache-projector:
+        condition: service_started
 
   # dynamic-seeking-russell.md "Retry-until-expiry для DELIVERY" — держит
   # STAGE_RETRY (наравне с уже существующими DLR_CORRELATION_RETRY/
@@ -1186,6 +1259,32 @@ services:
       kafka:
         condition: service_healthy
       redis-runtime:
+        condition: service_healthy
+
+  # config-cache-projector — on_config_change -> write_projection в
+  # Configuration Redis (config:current:{entity_type}:{id} / config:version:
+  # {entity_type}:{id}:{version}), symметричный consent-cache-projector выше
+  # но для partner/routing_table/policy_ruleset/etc, а не subscriber_consent.
+  # Добавлен для live-верификации Production Readiness Review P0#4
+  # (partner-smpp-gateway ниже) — раньше не был подключён к этому стеку
+  # вообще, хотя сервис уже существовал и был протестирован изолированно
+  # (см. services/config-cache-projector/README.md); без него
+  # config:current:partner:* в Configuration Redis никогда бы не
+  # заполнялся, и partner-smpp-gateway.PartnerConfigStore.bootstrap()
+  # видел бы только пустой Redis.
+  config-cache-projector:
+    image: mpp/config-cache-projector:test
+    ports:
+      - "9123:9090"
+    environment:
+      REDIS_CONFIGURATION_HOST: redis-configuration
+      REDIS_CONFIGURATION_PORT: "6379"
+      REDIS_CONFIGURATION_PASSWORD: mpp_local_dev
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis-configuration:
         condition: service_healthy
 
   partner-portal-ui:

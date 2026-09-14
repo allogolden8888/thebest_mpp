@@ -23,6 +23,10 @@ public final class ChannelRegistry {
     public record ActiveSessionRef(String partnerId, String systemId, long sessionEpoch) {
     }
 
+    /** {@code system_id} + сессия — используется {@link #sessionsForPartner(String)}. */
+    public record PartnerSession(String systemId, ActiveSession session) {
+    }
+
     private record SessionKey(String partnerId, String systemId) {
     }
 
@@ -66,5 +70,26 @@ public final class ChannelRegistry {
                 entry.getValue().sessionEpoch()
             ))
             .toList();
+    }
+
+    /**
+     * Снапшот ВСЕХ живых сессий данного партнёра на ЭТОМ инстансе — не знает
+     * заранее ни один {@code system_id} (партнёр может держать несколько
+     * bind'ов, по одному на приложение). Используется на {@code
+     * entity_type=PARTNER config.changes} со статусом, отличным от {@code
+     * "active"} ({@code Main.java}, обоснование см. её javadoc "Архивация —
+     * принудительное разъединение") — принудительно закрывает ровно те
+     * каналы, что реально держит этот под, остальные реплики StatefulSet'а
+     * делают то же самое независимо для своих сессий (каждый под — свой
+     * consumer group, см. {@link uz.mpp.partnersmpp.kafkaio.ConfigChangeConsumer}).
+     */
+    public List<PartnerSession> sessionsForPartner(String partnerId) {
+        List<PartnerSession> result = new java.util.ArrayList<>();
+        for (Map.Entry<SessionKey, ActiveSession> entry : sessions.entrySet()) {
+            if (entry.getKey().partnerId().equals(partnerId)) {
+                result.add(new PartnerSession(entry.getKey().systemId(), entry.getValue()));
+            }
+        }
+        return result;
     }
 }

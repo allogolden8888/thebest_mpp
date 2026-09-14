@@ -3,9 +3,12 @@ package uz.mpp.partnersmpp.server;
 import io.netty.channel.embedded.EmbeddedChannel;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ChannelRegistryTest {
 
@@ -60,5 +63,42 @@ class ChannelRegistryTest {
         registry.unregisterIfSameChannel("acme", "click_uz_main", channel);
 
         assertNull(registry.lookup("acme", "click_uz_main"));
+    }
+
+    @Test
+    void sessionsForPartnerReturnsAllBindsOfThatPartnerOnly() {
+        ChannelRegistry registry = new ChannelRegistry();
+        EmbeddedChannel acmeMain = new EmbeddedChannel();
+        EmbeddedChannel acmeAlt = new EmbeddedChannel();
+        EmbeddedChannel betaMain = new EmbeddedChannel();
+        registry.register("acme", "click_uz_main", acmeMain);
+        registry.register("acme", "click_uz_alt", acmeAlt);
+        registry.register("beta", "beta_main", betaMain);
+
+        List<ChannelRegistry.PartnerSession> acmeSessions = registry.sessionsForPartner("acme");
+
+        assertEquals(2, acmeSessions.size());
+        assertTrue(acmeSessions.stream().anyMatch(s -> s.systemId().equals("click_uz_main") && s.session().channel() == acmeMain));
+        assertTrue(acmeSessions.stream().anyMatch(s -> s.systemId().equals("click_uz_alt") && s.session().channel() == acmeAlt));
+        assertTrue(acmeSessions.stream().noneMatch(s -> s.session().channel() == betaMain), "чужой партнёр не должен попадать в выборку");
+    }
+
+    @Test
+    void sessionsForPartnerReturnsEmptyListWhenNoneBound() {
+        ChannelRegistry registry = new ChannelRegistry();
+        assertTrue(registry.sessionsForPartner("nobody").isEmpty());
+    }
+
+    @Test
+    void sessionsForPartnerDoesNotPrefixMatchDifferentPartnerId() {
+        // "acme" не должен по ошибке подобрать сессии "acme2" — startsWith
+        // без явной проверки границы ключа схлопнул бы их (id вложены как
+        // подстрока), см. реализацию (сначала startsWith, затем точное
+        // сравнение partnerIdOf(key)).
+        ChannelRegistry registry = new ChannelRegistry();
+        EmbeddedChannel acme2Channel = new EmbeddedChannel();
+        registry.register("acme2", "some_system", acme2Channel);
+
+        assertTrue(registry.sessionsForPartner("acme").isEmpty());
     }
 }
